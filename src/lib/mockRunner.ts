@@ -16,7 +16,9 @@ import type {
   RunState,
   RunTarget,
 } from '../types/contract';
+import { runModeOf } from '../types/contract';
 import type { Timers } from './debounce';
+import { deriveSession, groupSessions } from './sessions';
 import { targetSet } from './graphOps';
 import { assertNever } from './status';
 
@@ -89,6 +91,9 @@ function reasonFor(outcome: Outcome): string | null {
   }
 }
 
+/** Fake pid of a mock terminal session (display only). */
+export const MOCK_PID_BASE = 4000;
+
 /** Run id = UTC timestamp, e.g. 20261107T101500Z. */
 export function runIdFor(date: Date): string {
   return date.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
@@ -129,6 +134,16 @@ export function createMockRunner(deps: RunnerDeps) {
 
   const key = (runId: string, nodeId: string): string => `${runId}\u0000${nodeId}`;
   const stamp = (): string => deps.now().toISOString();
+
+  /** Terminal mode: refresh the session statuses from the node statuses, then emit. */
+  const emit = (run: MockRun): void => {
+    if (run.state.mode === 'terminal') {
+      const cancelled = run.state.status === 'cancelled';
+      const sessions = (run.state.sessions ?? []).map((s, i) => deriveSession(s, run.state.nodes, cancelled, MOCK_PID_BASE + i));
+      run.state = { ...run.state, sessions };
+    }
+    deps.emitState(run.state);
+  };
 
   const setNode = (run: MockRun, id: string, patch: Partial<NodeRunState>): void => {
     const current = run.state.nodes[id] ?? blankNode();
@@ -227,7 +242,7 @@ export function createMockRunner(deps: RunnerDeps) {
       }
     }
     // Show the settled (queued/skipped) state before anything starts.
-    if (settled) deps.emitState(run.state);
+    if (settled) emit(run);
 
     const running = Object.values(run.state.nodes).filter((n) => n.status === 'running').length;
     const free = Math.max(0, run.graph.settings.max_parallel - running);
@@ -249,7 +264,7 @@ export function createMockRunner(deps: RunnerDeps) {
           : 'succeeded';
       run.state = { ...run.state, status: final, finished_at: stamp() };
     }
-    deps.emitState(run.state);
+    emit(run);
   }
 
   const active = (): MockRun | undefined => [...runs.values()].find((r) => r.state.status === 'running');
@@ -263,6 +278,7 @@ export function createMockRunner(deps: RunnerDeps) {
       const base = runIdFor(deps.now());
       let runId = base;
       for (let i = 2; runs.has(runId); i += 1) runId = `${base}-${i}`;
+      const mode = runModeOf(graph.settings);
       const run: MockRun = {
         graph,
         results: {},
@@ -274,10 +290,12 @@ export function createMockRunner(deps: RunnerDeps) {
           finished_at: null,
           status: 'running',
           nodes: Object.fromEntries(ids.map((id) => [id, blankNode()])),
+          mode,
+          sessions: mode === 'terminal' ? groupSessions(graph, ids) : [],
         },
       };
       runs.set(runId, run);
-      deps.emitState(run.state);
+      emit(run);
       deps.timers.setTimeout(() => advance(run), 0);
       return runId;
     },
@@ -289,7 +307,7 @@ export function createMockRunner(deps: RunnerDeps) {
         if (!TERMINAL.has(n.status)) setNode(run, id, { status: 'cancelled', finished_at: stamp(), reason: 'run cancelled' });
       }
       run.state = { ...run.state, status: 'cancelled', finished_at: stamp() };
-      deps.emitState(run.state);
+      emit(run);
     },
     /** Queue a follow-up; a finished node resumes (running) until the fake reply lands. */
     sendMessage(runId: string, nodeId: string, text: string): void {
@@ -309,7 +327,7 @@ export function createMockRunner(deps: RunnerDeps) {
       if (resumed) {
         setNode(run, nodeId, { status: 'running' });
         run.state = { ...run.state, status: 'running', finished_at: null };
-        deps.emitState(run.state);
+        emit(run);
       }
       later(run, nodeId, MOCK_REPLY_MS, () => {
         // Like followup_status: a blocked node's DONE reply promotes it to succeeded.
@@ -327,7 +345,7 @@ export function createMockRunner(deps: RunnerDeps) {
             advance(run);
           } else {
             setNode(run, nodeId, { num_turns: turns });
-            deps.emitState(run.state);
+            emit(run);
           }
         });
       });

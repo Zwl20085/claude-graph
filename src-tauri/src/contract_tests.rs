@@ -34,6 +34,11 @@ fn example_graph_round_trips() {
             .entry("prompt")
             .or_insert(json!(""));
     }
+    original["settings"]
+        .as_object_mut()
+        .unwrap()
+        .entry("run_mode")
+        .or_insert(json!("terminal"));
     let reserialised = serde_json::to_value(&graph).unwrap();
     assert_eq!(
         numbers_as_f64(original),
@@ -58,6 +63,7 @@ fn minimal_node_loads_with_defaults() {
     assert!(n.allowed_tools.is_none());
     assert!(n.deliverables.is_empty());
     assert_eq!(g.settings, Settings::default());
+    assert_eq!(g.settings.run_mode, RunMode::Terminal);
     assert!(g.edges.is_empty());
 }
 
@@ -145,13 +151,25 @@ fn run_state_round_trips() {
         finished_at: None,
         status: RunStatus::Running,
         nodes,
+        mode: RunMode::Headless,
+        sessions: Vec::new(),
     };
     let v = serde_json::to_value(&state).unwrap();
     assert_eq!(v["nodes"]["survey"]["status"], json!("pending"));
     assert_eq!(v["started_at"], json!("2026-11-07T10:15:00Z"));
     assert_eq!(v["finished_at"], Value::Null);
-    let back: RunState = serde_json::from_value(v).unwrap();
+    let back: RunState = serde_json::from_value(v.clone()).unwrap();
     assert_eq!(back, state);
+    // run.json written before terminal mode: headless, no sessions.
+    let mut old = v;
+    let obj = old.as_object_mut().unwrap();
+    obj.remove("mode");
+    obj.remove("sessions");
+    let back: RunState = serde_json::from_value(old).unwrap();
+    assert_eq!((back.mode, back.sessions.len()), (RunMode::Headless, 0));
+    assert_eq!(json!(RunMode::Terminal), json!("terminal"));
+    assert_eq!(json!(SessionStatus::Done), json!("done"));
+    assert_eq!(json!(NodeEventKind::Notification), json!("notification"));
 }
 
 #[test]

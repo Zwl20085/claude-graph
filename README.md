@@ -5,7 +5,7 @@
 <h1 align="center">Claude Graph</h1>
 
 <p align="center">
-  <strong>Sequence heavy Claude Code tasks as a blueprint graph. Local CLI, no API keys, every run stored with the graph.</strong>
+  <strong>Draw your Claude Code tasks as a blueprint graph, press Run, and watch real Claude Code windows work through them in order. Your own login and settings, no API keys, every run stored with the graph.</strong>
 </p>
 
 <p align="center">
@@ -70,7 +70,40 @@ chat history in some app. Plain files next to the graph that produced them.
   </tr>
 </table>
 
-## How it works
+## Run all opens Claude Code windows
+
+This is the default way a graph runs, and the simplest: the app is a messenger, Claude
+Code does everything else.
+
+<p align="center">
+  <img src="docs/media/session-window.png" alt="A Claude Code session window opened by the app, titled Literature survey, with a done pill and the node list survey, design, report. The transcript shows /model haiku, then the message for the survey node, Claude's reply, /model opus, the design node message, and so on, ending at an empty prompt" width="100%">
+  <br>
+  <sub>One session for the whole chain. Each node's prompt is typed in turn; the window stays open afterwards so you can keep talking.</sub>
+</p>
+
+- **One window per chain.** Nodes connected by wires form one interactive Claude Code
+  session, hosted by the app in a real terminal and shown in its own window. Separate
+  chains get separate windows, up to `max_parallel` at once.
+- **Your prompts, typed for you.** The app types each node's prompt into the session in
+  dependency order, exactly as if you had typed it. A multi-line prompt is pasted whole; a
+  node with a structured brief gets a one-line message pointing at its `brief.md`. If a
+  node names a model, `/model <name>` goes in first.
+- **It waits for Claude, not for a protocol.** A `Stop` hook, passed on the command line,
+  tells the app when a turn is over. Then the next node's prompt goes in. No reply parsing,
+  no `## Status:` lines, no flags you did not set: permission prompts, skills, hooks and
+  the model come from your own Claude Code settings. When Claude asks you something, the
+  app notifies you and the window is right there.
+- **Done means the files exist.** After the turn, a node with required deliverables is
+  `succeeded` when they exist and `failed` otherwise; with `stop_on_failure` the chain
+  stops there. Nothing else is judged.
+- **Still in the folder.** Each session keeps a raw transcript, its hooks file and the
+  node timings under `runs/<run-id>/sessions/<sid>/`, next to the briefs and deliverables.
+
+Switch to **headless engine (advanced)** in the settings to get the one-process-per-node
+scheduler described next: explicit model, permission mode and tool list per node,
+resource pools, streamed events and parsed results.
+
+## How the headless engine works (advanced)
 
 <p align="center">
   <img src="docs/media/architecture.svg" alt="Architecture: the editor saves graph.json, the Rust scheduler admits ready nodes through resource pools, each node runs as a claude -p process with the brief on stdin and stream-json on stdout, output lands in the run folder, and live events flow back to the editor" width="100%">
@@ -412,8 +445,9 @@ A graph folder can come from someone else. The app treats it as data.
 
 ## Status and limits
 
-v0.2. Two ways to run a graph: the node runner (one process per node, explicit
-settings) and Assistant mode (one scheduler session, your Claude Code settings).
+v0.3. Three ways to run a graph: Claude Code windows (default: one interactive session
+per chain, your own settings), the headless engine (one process per node, explicit
+settings) and Assistant mode (one scheduler session that runs the whole workflow).
 Verified on Windows 11 with Claude Code 2.1.x. CI builds and tests the backend
 on Linux too, but the macOS and Linux apps have not been tried by hand.
 

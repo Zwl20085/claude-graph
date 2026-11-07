@@ -168,7 +168,7 @@ scheduled exactly like `failed`.
   blocked nodes, and the run ends `failed` when any node is failed or blocked.
   GRAPH_LOG.md writes `blocked`; a resumed run keeps blocked slots as they are.
 
-## 5. Claude runner (Rust)
+## 5. Headless engine (advanced): Claude runner (Rust)
 
 One `claude` process per node:
 
@@ -349,6 +349,11 @@ contains the text `FAKE_FAIL` (put it in a node's `extra_context`) it ends with 
 error result and exit code 1, to test failure propagation (fix pass 2; before, it
 ended `## Status: BLOCKED`, which is now `FAKE_BLOCKED`). `--version`
 prints `2.1.0 (fake-claude)`; env `FAKE_CLAUDE_DELAY_MS` slows the stream for cancel tests.
+Started without `-p` it plays an interactive Claude Code for terminal mode: it reads the
+`--settings` JSON and runs its hook commands through the platform shell (`execSync`), answers
+each typed line (writing the deliverables of a brief it is pointed at, unless `FAKE_FAIL`),
+logs the lines to `fake-received.log` next to the settings file; markers `FAKE_SLEEP_MS=<n>`,
+`FAKE_EXIT=<code>`, `FAKE_NOTIFY`; flag `--fake-no-start` skips SessionStart (see its header).
 
 ## 9. Out of scope for v0.1
 
@@ -616,3 +621,105 @@ scheduler**, executes it. Module `src-tauri/src/assistant/` (`charter`, `render`
 - **Fake CLI.** `scripts/fake-claude.mjs` switches to scheduler mode when the `-p` instruction
   starts with "You are the work scheduler" (markers `FAKE_FINAL`, `FAKE_SLEEP_MS=<n>`,
   `FAKE_ERROR`, `FAKE_DENY`); `tests/e2e_assistant.rs` drives it.
+
+## Terminal mode (default)
+
+Backend: `src-tauri/src/terminal/` (2026-11-07). `settings.run_mode` (`"terminal"` default,
+`"headless"`) decides what `start_run` does (`AppState::start_by_mode`; the Rust methods
+`start_terminal_run` and `start_run` force one engine; the headless tests call `start_run`).
+In terminal mode the app only delivers messages: no `claude -p`, no flags the user did not
+set, no reply parsing, no status protocol.
+
+**Sessions.** One session per weakly connected component (`components.rs`). Sid `s1`, `s2`, …
+in order of the component's smallest node position (y, then x, then id), numbered over the
+whole graph so a component keeps its sid whatever the target. Title: the root nodes' titles
+joined with " + " (max 60 chars). Inside a session nodes go in topological order (Kahn, ties
+by position). `all`: every component. `{from: id}`: that node's component, starting at that
+node. `{failed_of: run}`: components holding a failed/blocked/skipped/cancelled node of that
+run, each starting at its first such node. Nodes before the start node are `skipped` with
+reason `before start node`; they do not make the run fail (deviation from the contract's
+literal rule, which would make every `from` run fail). At most `max_parallel` sessions are
+starting/running at once; a session that is `done` no longer counts (its process stays up).
+
+**One session** (`session.rs`, `startup.rs`, `node.rs`):
+1. `runs/<run>/sessions/<sid>/hooks.json` (SessionStart/Stop/Notification hooks that
+   `echo start|stop|notify>> "<abs>/hooks.log"`, forward slashes), `session.json`
+   `{ sid, title, node_ids, pid, status, started_at, finished_at }`, `transcript.log`
+   (raw pty output, append).
+2. The backend opens (creates or focuses) the window `term-<run>-<sid>`, url
+   `index.html#/terminal/<run>/<sid>?dir=<url-encoded graph dir>`, title
+   `Claude Code — <title>`, 1000x640, min 600x400.
+3. Spawn in a pty (portable-pty 0.9; ConPTY on Windows), 120x40:
+   `claude --settings <hooks.json> --add-dir <graph dir> [--permission-mode <default mode
+   unless claude_settings>]`, cwd = first sent node's `working_dir` (else the graph dir),
+   env `CLAUDE_GRAPH_RUN`, `CLAUDE_GRAPH_SESSION`, with `CLAUDE_CODE_CHILD_SESSION` and
+   `CLAUDECODE` removed (no "child session" marker from an enclosing Claude Code). The executable comes from the usual
+   `claude_bin` chain (program + prefix args, so `node cli.js` and the fake work). On Windows
+   the child goes into a kill-on-close Job Object (`Job::assign_handle` with portable-pty's
+   process handle); kill = close the job + `ChildKiller::kill` + `taskkill /T /F`.
+   ConPTY asks the terminal for the cursor position (`ESC[6n`) once at start and blocks
+   until answered: the reader answers `ESC[1;1R` itself and drops the query from the output.
+4. Wait for `start` in hooks.log (polled every 300 ms). Fallback for CLIs without
+   SessionStart: 3 s of pty quiet after the first output. Timeout 60 s → session `failed`,
+   reason "Claude Code did not start: <transcript tail>". **Dialogs:** a fresh folder makes
+   Claude Code show its workspace-trust dialog (default choice "No, exit") before any hook
+   runs, and a project MCP server may show another one after `start`. The reader counts
+   dialog markers in the output ("Enter to confirm", "do you trust", "trust this folder");
+   while one is open (no keystroke from the window since) the timeout and the quiet fallback
+   pause, a `notification` node event asks the user to answer in the window, and the first
+   message waits. After start the session waits for 1 s of quiet (max 5 s) before typing.
+5. Per node: status `running`, `nodes/<id>/brief.md` (the brief without "## How to finish";
+   upstream inputs carry this run's status or "not run in this run", no result.md) copied to
+   `runs/<run>/<id>/prompt.md`; explicit model → `/model <m>\r` + 700 ms; the message
+   (below) + `\r`; a `text` node event "sent node <id> to window <title>"; then wait for a
+   new `stop` line (no timeout; `notify` lines become `notification` events). Required
+   deliverables present and written since node start − 2 s → `succeeded`, else `failed`
+   "deliverables missing: a, b". `stop_on_failure`: the rest of that session is `skipped`
+   ("stopped after <id>"). Per node `runs/<run>/<id>/summary.json` = `{ session, started_at,
+   finished_at, status, reason }` plus the headless `NodeSummary` fields (so
+   `read_node_result` reads it) and a GRAPH_LOG line (cost `-`).
+6. Node list exhausted → session `done`; the process stays alive for the user. Process exit
+   while a node runs → node `failed`, the rest `skipped`, session `failed`. Kill while a
+   node runs → node and the rest `cancelled`, session `cancelled`. Once the process is gone
+   `pid` is `null` (that is the "alive" signal: `status: done` + `pid`).
+
+**The message** (`message.rs`): prompt-mode node, one line, ≤ 2000 chars → the prompt
+verbatim (control chars → spaces). Prompt-mode node with several lines, ≤ 8000 chars → one
+bracketed paste `ESC[200~…ESC[201~`, 300 ms, then `\r` (verified with the real CLI 2.1.319:
+a two-line paste was submitted as one prompt, one Stop). Otherwise:
+`Node "<title>" (<id>): read the brief at <abs brief.md> and do it; write all outputs to
+<abs deliverables dir>.`
+
+**Run loop** (`run.rs`): RunState gets `mode: "terminal"` and `sessions`. The run is
+`cancelled` after `cancel_run`, else `failed` if any node is failed/blocked/skipped/cancelled
+(except `before start node`), else `succeeded`, once every session is settled
+(done/failed/cancelled). The loop is registered like a headless run (one active run per
+graph folder, `cancel_run`, `cancel_node`, `send_message`), but the sessions live in
+`AppState::terminals()` until app exit: `cancel_run` on a finished terminal run kills its
+live sessions; `cancel_node` kills the node's session; `send_message` types the text + Enter
+into the node's session (or `not_found` "Session closed; rerun to talk"). A new terminal
+run of a graph first kills the live sessions of its earlier runs (node event `text`
+"closed sessions of run <old id>" on the new run). Closing a session window does nothing
+(the pty stays alive; reopen it from the main window). App exit kills every session
+(`shutdown`).
+
+**Commands** (`terminal/api.rs`; ids and sizes validated: run id as a folder name, sid
+`^s[0-9]+$` ≤ 6 chars, cols 10..=1000, rows 4..=500, text ≤ 64 KiB):
+`list_sessions { dir, run_id }` (live registry, else run.json; `dir: ""` = registry only,
+`not_found` when not live), `pty_write { run_id, sid, text }`, `pty_resize { run_id, sid,
+cols, rows }`, `pty_replay { run_id, sid } → { text, seq }` (last 512 KiB of the emitted
+text and the number of chunks emitted), `open_session_window { run_id, sid }`. Event
+`pty:data { run_id, sid, data, seq }` goes to the session window only (`emit_to`); `seq` is
+1-based per session and counted into the replay before the chunk is emitted, so a window
+drops live chunks with `seq ≤` its replay's `seq`. The `Emitter` trait gained `pty_data` and
+`open_window` (no-op defaults for tests). Capabilities: `"windows": ["main", "term-*"]`.
+
+**Ignored in terminal mode:** resource tags, `allowed_tools`, `max_turns`,
+`continue_session_of`, per-node permission modes, `default_model` (only an explicit node
+model is sent, via `/model`).
+
+**Tests:** `tests/e2e_terminal.rs` drives the fake CLI's interactive mode in a real pty
+(order of messages, `/model`, paste, statuses, `stop_on_failure`, `from`, `failed_of`,
+`max_parallel`, cancel killing the child, `pty_replay` seq, typing after the run).
+`tests/real_terminal.rs` (ignored) runs the real CLI for one node and answers the trust/MCP
+dialogs like a user.

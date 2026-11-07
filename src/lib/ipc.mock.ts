@@ -18,6 +18,8 @@ import type {
   NodeEvent,
   NodeEventKind,
   NodeResult,
+  PtyData,
+  RunMode,
   RunState,
   RunSummary,
   RunTarget,
@@ -28,6 +30,7 @@ import { defaultTimers, type Timers } from './debounce';
 import { emptyGraph } from './graphOps';
 import { createMockAssistant, MOCK_ASSISTANT_REPLY_MS } from './mockAssistant';
 import { createMockRunner, type MockRun } from './mockRunner';
+import { createMockTerminal, MOCK_PTY_REPLY_MS, type MockChannel } from './mockTerminal';
 import { countStatuses } from './status';
 import { trustFingerprint, trustItems } from './trust';
 import { claudeBinError, validateGraph } from './validate';
@@ -47,6 +50,29 @@ export interface MockOptions {
   trustAll?: boolean;
   /** Delay of the mock scheduler's reply in assistant mode. */
   assistantReplyMs?: number;
+  /**
+   * run_mode written into the seeded example. Default 'headless': the
+   * existing mock tests exercise the headless engine. 'as_file' keeps the
+   * file as it is (no run_mode = terminal); browser dev uses that.
+   */
+  exampleRunMode?: RunMode | 'as_file';
+  /** Delay of the fake reply to a line typed into a mock terminal. */
+  ptyReplyMs?: number;
+  /** Open a session "window" (browser dev: a new tab). Default: nothing. */
+  openWindow?: (url: string, target: string) => void;
+  /** Share terminal sessions with other tabs over BroadcastChannel (browser dev). */
+  broadcast?: boolean;
+  /** Injected channel (tests); wins over `broadcast`. */
+  channel?: MockChannel;
+}
+
+const MOCK_CHANNEL_NAME = 'claude-graph-mock';
+
+function openChannel(options: MockOptions): MockChannel | null {
+  if (options.channel) return options.channel;
+  if (options.broadcast !== true) return null;
+  const BC = (globalThis as { BroadcastChannel?: new (name: string) => MockChannel }).BroadcastChannel;
+  return typeof BC === 'function' ? new BC(MOCK_CHANNEL_NAME) : null;
 }
 
 const appError = (code: string, message: string): AppError => ({ code, message });
@@ -86,6 +112,7 @@ export function createMockIpc(options: MockOptions = {}): Api {
   const stateListeners = new Set<(s: RunState) => void>();
   const eventListeners = new Set<(e: NodeEvent) => void>();
   const assistantListeners = new Set<(s: AssistantState) => void>();
+  const ptyListeners = new Set<(d: PtyData) => void>();
   /** dir -> accepted fingerprint of the elevated fields (stand-in for trusted.json). */
   const trusted = new Map<string, string>();
   let appSettings: AppSettings = { claude_bin: null };
@@ -100,15 +127,29 @@ export function createMockIpc(options: MockOptions = {}): Api {
     recent = [dir, ...recent.filter((d) => d !== dir)].slice(0, 20);
   };
 
+  const terminal = createMockTerminal({
+    timers: options.timers ?? defaultTimers,
+    replyMs: options.ptyReplyMs ?? MOCK_PTY_REPLY_MS,
+    getRun: (runId) => runner.get(runId),
+    emitPty: (d) => ptyListeners.forEach((h) => h({ ...d })),
+    emitRemoteState: (s) => stateListeners.forEach((h) => h(clone(s))),
+    openWindow: options.openWindow,
+    channel: openChannel(options),
+  });
+
   const runner = createMockRunner({
     timers: options.timers ?? defaultTimers,
     stepMs: options.stepMs ?? 600,
     now: options.now ?? (() => new Date()),
-    emitState: (s) => stateListeners.forEach((h) => h(clone(s))),
+    emitState: (s) => {
+      stateListeners.forEach((h) => h(clone(s)));
+      terminal.shareState(clone(s));
+    },
     emitEvent: (dir, runId, nodeId, kind: NodeEventKind, text) => {
       void dir;
       const ev: NodeEvent = { run_id: runId, node_id: nodeId, kind, text, ts: (options.now ?? (() => new Date()))().toISOString() };
       eventListeners.forEach((h) => h(ev));
+      terminal.onNodeEvent(runId, nodeId, kind, text);
     },
   });
 
@@ -127,7 +168,8 @@ export function createMockIpc(options: MockOptions = {}): Api {
   if (options.seed !== false) {
     const g = validateGraph(example);
     if (!(g instanceof Error)) {
-      graphs.set(MOCK_EXAMPLE_DIR, g);
+      const mode = options.exampleRunMode ?? 'headless';
+      graphs.set(MOCK_EXAMPLE_DIR, mode === 'as_file' ? g : { ...g, settings: { ...g.settings, run_mode: mode } });
       touchRecent(MOCK_EXAMPLE_DIR);
     }
   }
@@ -240,6 +282,23 @@ export function createMockIpc(options: MockOptions = {}): Api {
     onAssistantUpdate: async (handler): Promise<Unlisten> => {
       assistantListeners.add(handler);
       return () => assistantListeners.delete(handler);
+    },
+    listSessions: async (dir, runId) => clone(terminal.list(dir, runId)),
+    ptyWrite: async (runId, sid, text) => terminal.write(runId, sid, text),
+    ptyResize: async (runId, sid, cols, rows) => terminal.resize(runId, sid, cols, rows),
+    ptyReplay: async (runId, sid) => terminal.replay(runId, sid),
+    // Not async: window.open must run inside the click's user gesture.
+    openSessionWindow: (runId, sid) => {
+      try {
+        terminal.open(runId, sid);
+        return Promise.resolve();
+      } catch (err) {
+        return Promise.reject(err);
+      }
+    },
+    onPtyData: async (handler): Promise<Unlisten> => {
+      ptyListeners.add(handler);
+      return () => ptyListeners.delete(handler);
     },
   };
 }

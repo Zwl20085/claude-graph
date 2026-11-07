@@ -1,7 +1,7 @@
 /** Graph settings (concurrency, resources, defaults) and per-machine app settings (claude path). */
 import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
-import { MODELS, PERMISSION_MODES, type Settings } from '../types/contract';
+import { MODELS, PERMISSION_MODES, runModeOf, type RunMode, type Settings } from '../types/contract';
 import { permissionLabel } from '../lib/status';
 import { IGNORED_CLAUDE_BIN_TEXT, useGraphStore } from '../store/graphStore';
 import { btnCls, errorCls, Field, Input, inputBoxCls, inputCls, NumberInput, Select, tagError } from './ui';
@@ -100,6 +100,26 @@ function AppSettingsSection() {
   );
 }
 
+const RUN_MODE_CHOICES: ReadonlyArray<{ mode: RunMode; label: string }> = [
+  { mode: 'terminal', label: 'Claude Code windows (default)' },
+  { mode: 'headless', label: 'headless engine (advanced)' },
+];
+
+/** Run in: Claude Code windows (terminal) or the headless engine. Missing = terminal. */
+export function RunModeRadio({ value, onChange }: { value: RunMode; onChange: (mode: RunMode) => void }) {
+  return (
+    <fieldset className="space-y-1" aria-label="Run in">
+      <legend className="mb-1 text-[11px] text-[#9a9a9a]">Run in</legend>
+      {RUN_MODE_CHOICES.map(({ mode, label }) => (
+        <label key={mode} className="flex items-center gap-2 text-[13px]">
+          <input type="radio" name="run_mode" value={mode} checked={value === mode} onChange={() => onChange(mode)} />
+          {label}
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
 export function SettingsPopover() {
   const settings = useGraphStore((s) => s.graph?.settings);
   const update = useGraphStore((s) => s.updateSettings);
@@ -111,6 +131,7 @@ export function SettingsPopover() {
       className="absolute right-0 top-9 z-40 max-h-[80vh] w-[340px] space-y-3 overflow-auto rounded border border-[#3c3c3c] bg-[#252526] p-3 shadow-xl"
     >
       <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[#d4d4d4]">Graph settings</h3>
+      <RunModeRadio value={runModeOf(settings)} onChange={(run_mode) => update({ run_mode })} />
       <Field label="max_parallel">
         <NumberInput value={settings.max_parallel} min={1} onCommit={(n) => n !== null && update({ max_parallel: n })} />
       </Field>

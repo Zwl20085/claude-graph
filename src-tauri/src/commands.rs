@@ -17,7 +17,8 @@ use tauri_plugin_opener::OpenerExt;
 use crate::claude_bin;
 use crate::contract::{
     AppError, AppResult, AppSettings, AssistantState, ClaudeCheck, Graph, LaunchOptions,
-    NodeMessage, NodeResult, RunState, RunSummary, RunTarget, TrustStatus,
+    NodeMessage, NodeResult, PtyReplay, RunState, RunSummary, RunTarget, TerminalSession,
+    TrustStatus,
 };
 use crate::events::{Emitter, TauriEmitter};
 use crate::paths::{canonical, dir_for_create, existing_dir};
@@ -25,6 +26,7 @@ use crate::prompt::{render_brief as render, upstream_placeholders, PREVIEW_DIR};
 use crate::run_api::AppState;
 use crate::run_loop::blocking;
 use crate::run_store::check_id;
+use crate::terminal::api as term;
 use crate::{launch, run_store, store};
 
 fn emitter(app: &AppHandle) -> Arc<dyn Emitter> {
@@ -150,7 +152,7 @@ pub async fn start_run(
     let st = state.inner().clone();
     let em = emitter(&app);
     blocking(move || {
-        let (run_id, _join) = st.start_run(&existing_dir(&dir)?, target, em)?;
+        let (run_id, _join) = st.start_by_mode(&existing_dir(&dir)?, target, em)?;
         Ok(run_id)
     })
     .await
@@ -329,6 +331,68 @@ pub async fn assistant_reset(
     let st = state.inner().clone();
     let em = emitter(&app);
     blocking(move || st.assistant_reset(&existing_dir(&dir)?, em)).await
+}
+
+/// Terminal mode: the sessions of a run (live registry, else run.json in
+/// `dir`). `dir` may be `""`: then only live sessions, `not_found` otherwise.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_sessions(
+    state: State<'_, AppState>,
+    dir: String,
+    run_id: String,
+) -> AppResult<Vec<TerminalSession>> {
+    let st = state.inner().clone();
+    blocking(move || {
+        let dir = match dir.trim() {
+            "" => None,
+            d => Some(existing_dir(d)?),
+        };
+        term::list_sessions(st.terminals(), dir.as_deref(), &run_id)
+    })
+    .await
+}
+
+/// Terminal mode: raw text to the session's pty (keyboard, Messages tab).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn pty_write(
+    state: State<'_, AppState>,
+    run_id: String,
+    sid: String,
+    text: String,
+) -> AppResult<()> {
+    term::pty_write(state.terminals(), &run_id, &sid, &text)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn pty_resize(
+    state: State<'_, AppState>,
+    run_id: String,
+    sid: String,
+    cols: u16,
+    rows: u16,
+) -> AppResult<()> {
+    term::pty_resize(state.terminals(), &run_id, &sid, cols, rows)
+}
+
+/// Terminal mode: the output so far (last 512 KiB) and its chunk count.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn pty_replay(
+    state: State<'_, AppState>,
+    run_id: String,
+    sid: String,
+) -> AppResult<PtyReplay> {
+    term::pty_replay(state.terminals(), &run_id, &sid)
+}
+
+/// Terminal mode: create (or focus) the session's window.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn open_session_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    run_id: String,
+    sid: String,
+) -> AppResult<()> {
+    term::open_session_window(state.terminals(), &*emitter(&app), &run_id, &sid)
 }
 
 #[cfg(test)]

@@ -1,13 +1,15 @@
 /** Simple mode: one prompt box plus model / permission / resources. */
-import { MODELS, PERMISSION_MODES, type Node } from '../types/contract';
+import { MODELS, PERMISSION_MODES, runModeOf, type Node } from '../types/contract';
 import { permissionLabel } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
 import { ChipsInput, Field, inputCls, Select } from './ui';
 
 const MIN_ROWS = 12;
+export const HEADLESS_ONLY_NOTE = 'Permission mode, tools, turns and resource tags apply to headless mode only.';
 
 export function PromptTab({ node }: { node: Node }) {
   const update = useGraphStore((s) => s.updateNode);
+  const terminal = useGraphStore((s) => runModeOf(s.graph?.settings) === 'terminal');
   const rows = Math.max(MIN_ROWS, node.prompt.split('\n').length + 1);
   return (
     <div className="space-y-3">
@@ -19,6 +21,11 @@ export function PromptTab({ node }: { node: Node }) {
         aria-label="Prompt"
         onChange={(e) => update(node.id, { prompt: e.target.value })}
       />
+      {terminal && (
+        <p role="note" aria-label="terminal mode note" className="text-[11px] text-[#8a8a8a]">
+          {HEADLESS_ONLY_NOTE}
+        </p>
+      )}
       <div className="grid grid-cols-2 gap-2">
         <Field label="Model">
           <Select value={node.model} options={MODELS} onChange={(model) => update(node.id, { model })} />

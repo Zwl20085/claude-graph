@@ -10,6 +10,7 @@ import {
   GRAPH_VERSION,
   MODELS,
   PERMISSION_MODES,
+  RUN_MODES,
   type Deliverable,
   type Edge,
   type Graph,
@@ -17,6 +18,7 @@ import {
   type Node,
   type PermissionMode,
   type Position,
+  type RunMode,
   type Settings,
 } from '../types/contract';
 import { findCycle } from './graph';
@@ -96,7 +98,11 @@ function parseSettings(v: unknown): Settings {
     ),
   );
   const stop = o.stop_on_failure ?? DEFAULT_SETTINGS.stop_on_failure;
+  // run_mode is kept only when present: a missing field means terminal (runModeOf).
+  const runMode =
+    o.run_mode === undefined ? {} : { run_mode: oneOf<RunMode>(RUN_MODES, o.run_mode, 'settings.run_mode', 'terminal') };
   return {
+    ...runMode,
     max_parallel: num(o, 'max_parallel', 'settings', DEFAULT_SETTINGS.max_parallel),
     resources: capacities,
     stop_on_failure: typeof stop === 'boolean' ? stop : fail('settings.stop_on_failure must be a boolean'),

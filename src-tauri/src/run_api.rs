@@ -19,12 +19,17 @@ use tokio::task::JoinHandle;
 use crate::app_settings::{self, default_data_dir};
 use crate::assistant::AssistantTurns;
 use crate::claude_bin::{resolve, ClaudeCommand, Resolution, ResolveEnv};
-use crate::contract::{AppError, AppResult, AppSettings, RunState, RunTarget, TrustStatus};
+use crate::contract::{
+    AppError, AppResult, AppSettings, RunMode, RunState, RunTarget, TrustStatus,
+};
 use crate::events::Emitter;
 use crate::run_loop::{initial_state, LoopMsg, RunLoop};
 use crate::run_store::{check_id, list_run_states, new_run_id, read_run_state, sweep_run};
 use crate::scheduler::Scheduler;
 use crate::store::read_graph;
+use crate::terminal::api::session_closed;
+use crate::terminal::run::TerminalLoop;
+use crate::terminal::{plan, Terminals};
 use crate::trust;
 use crate::turns::{checked_session, RunCtx};
 
@@ -65,6 +70,8 @@ pub struct AppState {
     registry: Arc<Mutex<Registry>>,
     /// Running assistant-mode scheduler turns (see [`crate::assistant::api`]).
     assistant: AssistantTurns,
+    /// Terminal-mode sessions, alive or not, of this app run.
+    terminals: Terminals,
     data_dir: PathBuf,
 }
 
@@ -123,6 +130,7 @@ impl AppState {
         Self {
             registry: Arc::new(Mutex::new(Registry::default())),
             assistant: AssistantTurns::default(),
+            terminals: Terminals::default(),
             data_dir,
         }
     }
@@ -133,6 +141,11 @@ impl AppState {
 
     pub(crate) fn assistant_turns(&self) -> &AssistantTurns {
         &self.assistant
+    }
+
+    /// Terminal-mode sessions (live registry).
+    pub fn terminals(&self) -> &Terminals {
+        &self.terminals
     }
 
     fn lock(&self) -> MutexGuard<'_, Registry> {
@@ -226,13 +239,25 @@ impl AppState {
     /// Turn a reservation into a live run and spawn its loop.
     fn commit(
         &self,
-        mut reservation: Reservation,
+        reservation: Reservation,
         run_loop: RunLoop,
+        run_id: String,
+    ) -> JoinHandle<RunState> {
+        let tx = run_loop.sender();
+        self.commit_with(reservation, tx, run_loop.run(), run_id)
+    }
+
+    /// [`Self::commit`] for any loop future fed by `tx`.
+    fn commit_with(
+        &self,
+        mut reservation: Reservation,
+        tx: mpsc::UnboundedSender<LoopMsg>,
+        run: impl std::future::Future<Output = RunState> + Send + 'static,
         run_id: String,
     ) -> JoinHandle<RunState> {
         let handle = RunHandle {
             graph_dir: reservation.dir.clone(),
-            tx: run_loop.sender(),
+            tx,
         };
         {
             let mut reg = self.lock();
@@ -246,11 +271,75 @@ impl AppState {
         };
         tokio::spawn(async move {
             let _guard = guard;
-            run_loop.run().await
+            run.await
         })
     }
 
-    /// Start a run; returns at once with its id and the loop's join handle.
+    /// The `start_run` command: a terminal or headless run per the graph's
+    /// `settings.run_mode`.
+    pub fn start_by_mode(
+        &self,
+        dir: &Path,
+        target: RunTarget,
+        emitter: Arc<dyn Emitter>,
+    ) -> AppResult<(String, JoinHandle<RunState>)> {
+        match read_graph(&abs(dir))?.settings.run_mode {
+            RunMode::Terminal => self.start_terminal_run(dir, target, emitter),
+            RunMode::Headless => self.start_run(dir, target, emitter),
+        }
+    }
+
+    /// Start a terminal-mode run (one Claude Code window per connected
+    /// component), whatever `settings.run_mode` says. Returns at once; the
+    /// join handle ends when every session is done (processes stay alive).
+    pub fn start_terminal_run(
+        &self,
+        dir: &Path,
+        target: RunTarget,
+        emitter: Arc<dyn Emitter>,
+    ) -> AppResult<(String, JoinHandle<RunState>)> {
+        let graph_dir = abs(dir);
+        let reservation = self.reserve(&graph_dir)?;
+        let graph = read_graph(&graph_dir)?;
+        trust::require_trusted(&self.data_dir, &graph_dir, &graph)?;
+        let claude = self.find_claude()?;
+        let plans = plan(&graph, &target, &list_run_states(&graph_dir)?)?;
+        let run_id = new_run_id(&graph_dir, Utc::now())?;
+        let ctx = Arc::new(RunCtx {
+            graph_dir,
+            graph,
+            run_id: run_id.clone(),
+            claude,
+            emitter,
+        });
+        self.close_earlier_sessions(&ctx, &plans);
+        let run_loop = TerminalLoop::new(ctx, plans, self.terminals.clone());
+        let tx = run_loop.sender();
+        let join = self.commit_with(reservation, tx, run_loop.run(), run_id.clone());
+        Ok((run_id, join))
+    }
+
+    /// A new terminal run of a graph first kills the sessions of its earlier
+    /// runs and says so with a `text` node event on the new run.
+    fn close_earlier_sessions(&self, ctx: &RunCtx, plans: &[crate::terminal::SessionPlan]) {
+        let node_id = plans
+            .iter()
+            .find_map(|p| p.to_send().first().cloned())
+            .unwrap_or_default();
+        for old in self.terminals.live_runs_of(&ctx.graph_dir, &ctx.run_id) {
+            self.terminals.kill_run(&old);
+            ctx.emitter.node_event(&crate::contract::NodeEvent {
+                run_id: ctx.run_id.clone(),
+                node_id: node_id.clone(),
+                kind: crate::contract::NodeEventKind::Text,
+                text: format!("closed sessions of run {old}"),
+                ts: Utc::now(),
+            });
+        }
+    }
+
+    /// Start a headless (`claude -p`) run, whatever `settings.run_mode` says;
+    /// returns at once with its id and the loop's join handle.
     /// `dir` should already be canonical ([`crate::paths::existing_dir`]).
     pub fn start_run(
         &self,
@@ -288,12 +377,30 @@ impl AppState {
             .map_err(|_| AppError::new("not_found", format!("run {run_id} has finished")))
     }
 
+    /// Cancel an active run. A finished terminal run's sessions that are
+    /// still alive are killed too.
     pub fn cancel_run(&self, run_id: &str) -> AppResult<()> {
-        self.send(run_id, LoopMsg::CancelRun)
+        match self.send(run_id, LoopMsg::CancelRun) {
+            Err(_) if self.terminals.has_run(run_id) => {
+                self.terminals.kill_run(run_id);
+                Ok(())
+            }
+            other => other,
+        }
     }
 
+    /// Cancel one node; in terminal mode this kills the node's session.
     pub fn cancel_node(&self, run_id: &str, node_id: &str) -> AppResult<()> {
-        self.send(run_id, LoopMsg::CancelNode(node_id.to_string()))
+        match self.send(run_id, LoopMsg::CancelNode(node_id.to_string())) {
+            Err(e) => match self.terminals.session_of_node(run_id, node_id) {
+                Some(session) => {
+                    session.request_kill();
+                    Ok(())
+                }
+                None => Err(e),
+            },
+            ok => ok,
+        }
     }
 
     /// App exit: cancel every active run and assistant turn and wait up to
@@ -315,7 +422,12 @@ impl AppState {
         if turns > 0 {
             log::info!("shutdown: cancelling {turns} assistant turn(s)");
         }
-        let alive = || self.active_count() + self.assistant.live_count();
+        let sessions = self.terminals.kill_all();
+        if sessions > 0 {
+            log::info!("shutdown: killing {sessions} terminal session(s)");
+        }
+        let alive =
+            || self.active_count() + self.assistant.live_count() + self.terminals.live_count();
         let deadline = Instant::now() + timeout;
         while alive() > 0 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -372,6 +484,11 @@ impl AppState {
             return Err(AppError::new("invalid_input", "message is empty"));
         }
         let graph_dir = abs(dir);
+        if self.terminals.has_run(run_id) {
+            // Terminal mode: type the message into the node's session.
+            self.terminals.type_message(run_id, node_id, text)?;
+            return Ok(None);
+        }
         let graph = read_graph(&graph_dir)?;
         trust::require_trusted(&self.data_dir, &graph_dir, &graph)?;
         let started = Instant::now();
@@ -398,6 +515,9 @@ impl AppState {
             }
         };
         let state = read_run_state(&graph_dir, run_id)?;
+        if state.mode == RunMode::Terminal {
+            return Err(session_closed());
+        }
         if state.run_id != run_id {
             return Err(AppError::new("invalid_input", "run.json names another run"));
         }

@@ -188,6 +188,7 @@ export function emptyGraph(name: string): Graph {
     version: 1,
     name,
     settings: {
+      run_mode: 'terminal',
       max_parallel: 2,
       resources: { cpu: 1, memory: 1, gpu: 1 },
       stop_on_failure: false,

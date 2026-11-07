@@ -1,7 +1,7 @@
 /** Chat with a node's Claude session in the shown run. */
 import { useEffect, useRef, useState } from 'react';
 import { Send } from 'lucide-react';
-import type { NodeMessage } from '../types/contract';
+import { runStateMode, type NodeMessage } from '../types/contract';
 import { api } from '../lib/api';
 import {
   composerState,
@@ -13,6 +13,7 @@ import {
 } from '../lib/messages';
 import { useGraphStore } from '../store/graphStore';
 import { errorMessage } from '../store/runHelpers';
+import { TerminalMessages } from './TerminalMessages';
 import { btnCls, inputCls } from './ui';
 
 /**
@@ -76,7 +77,13 @@ function useHistory(dir: string | null, runId: string | null, nodeId: string) {
   return history;
 }
 
+/** Terminal-mode runs type into the node's live session; headless runs chat with its CLI session. */
 export function MessagesTab({ nodeId }: { nodeId: string }) {
+  const terminal = useGraphStore((s) => runStateMode(s.runState) === 'terminal');
+  return terminal ? <TerminalMessages nodeId={nodeId} /> : <HeadlessMessages nodeId={nodeId} />;
+}
+
+function HeadlessMessages({ nodeId }: { nodeId: string }) {
   const dir = useGraphStore((s) => s.dir);
   const runId = useGraphStore((s) => s.runState?.run_id ?? null);
   const status = useGraphStore((s) => s.runState?.nodes[nodeId]?.status ?? null);

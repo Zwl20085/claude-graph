@@ -12,6 +12,8 @@ export const GRAPH_VERSION = 1;
 export const EVENT_RUN_STATE = 'run:state';
 /** Event: one summarised stream-json line of a running node. */
 export const EVENT_NODE_EVENT = 'node:event';
+/** Event (terminal mode): one chunk of a session's pty output, sent to that session's window. */
+export const EVENT_PTY_DATA = 'pty:data';
 
 // ---------------------------------------------------------------------------
 // Graph (graph.json)
@@ -37,7 +39,17 @@ export const PERMISSION_MODES = [
  */
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
+export const RUN_MODES = ['terminal', 'headless'] as const;
+/**
+ * terminal: every connected group of nodes is one interactive Claude Code
+ * session in its own window (default); headless: the `claude -p` engine.
+ */
+export type RunMode = (typeof RUN_MODES)[number];
+export const DEFAULT_RUN_MODE: RunMode = 'terminal';
+
 export interface Settings {
+  /** Missing in older graph.json files: treat as `terminal` (see `runModeOf`). */
+  run_mode?: RunMode;
   max_parallel: number;
   /** Capacity per resource tag. Unknown tags have capacity 1. */
   resources: Record<string, number>;
@@ -142,6 +154,37 @@ export interface NodeRunState {
   permission_denials?: string[];
 }
 
+export const SESSION_STATUSES = ['starting', 'running', 'done', 'failed', 'cancelled'] as const;
+/** done = every node was sent; the process stays alive so the user can keep talking. */
+export type SessionStatus = (typeof SESSION_STATUSES)[number];
+
+/** One Claude Code session of a terminal-mode run (one weakly connected component). */
+export interface TerminalSession {
+  /** `s1`, `s2`, … */
+  sid: string;
+  title: string;
+  /** In the order they are sent. */
+  node_ids: string[];
+  status: SessionStatus;
+  pid: number | null;
+  current_node: string | null;
+}
+
+/** Payload of `pty:data`. */
+export interface PtyData {
+  run_id: string;
+  sid: string;
+  data: string;
+  /** 1-based chunk counter of the session. */
+  seq: number;
+}
+
+/** Return value of `pty_replay`: the transcript so far and the seq of its last chunk (0 = none). */
+export interface PtyReplay {
+  text: string;
+  seq: number;
+}
+
 /** Content of runs/<run-id>/run.json and payload of `run:state`. */
 export interface RunState {
   run_id: string;
@@ -151,6 +194,10 @@ export interface RunState {
   status: RunStatus;
   /** Keyed by node id. Only nodes in the run's target set appear. */
   nodes: Record<string, NodeRunState>;
+  /** Missing in older runs: headless (see `runStateMode`). */
+  mode?: RunMode;
+  /** Terminal mode only; serde default []. Read through `sessionsOf`. */
+  sessions?: TerminalSession[];
 }
 
 export type StatusCounts = Record<NodeStatus, number>;
@@ -295,6 +342,41 @@ const isOptionalStringArray = (v: unknown): boolean =>
 export function deniedTools(n: { permission_denials?: unknown } | null | undefined): string[] {
   const v = n?.permission_denials;
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+/** Run mode of graph settings; a missing or unknown value means terminal. */
+export function runModeOf(settings: { run_mode?: unknown } | null | undefined): RunMode {
+  return settings?.run_mode === 'headless' ? 'headless' : DEFAULT_RUN_MODE;
+}
+
+/** Mode of a run; runs recorded before terminal mode existed are headless. */
+export function runStateMode(rs: { mode?: unknown } | null | undefined): RunMode {
+  return rs?.mode === 'terminal' ? 'terminal' : 'headless';
+}
+
+export function isTerminalSession(v: unknown): v is TerminalSession {
+  return (
+    isObject(v) &&
+    typeof v.sid === 'string' &&
+    typeof v.title === 'string' &&
+    Array.isArray(v.node_ids) &&
+    v.node_ids.every((x) => typeof x === 'string') &&
+    (SESSION_STATUSES as readonly unknown[]).includes(v.status) &&
+    (v.pid === null || v.pid === undefined || typeof v.pid === 'number') &&
+    (v.current_node === null || v.current_node === undefined || typeof v.current_node === 'string')
+  );
+}
+
+/** Well-formed sessions of a run (or of a list_sessions reply); [] when missing. */
+export function sessionsOf(rs: { sessions?: unknown } | null | undefined): TerminalSession[] {
+  return validSessions(rs?.sessions);
+}
+
+export function validSessions(v: unknown): TerminalSession[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter(isTerminalSession)
+    .map((s) => ({ ...s, node_ids: [...s.node_ids], pid: s.pid ?? null, current_node: s.current_node ?? null }));
 }
 
 /** Shape check of a RunState payload (event or command reply) before it enters the store. */

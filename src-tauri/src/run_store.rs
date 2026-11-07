@@ -393,6 +393,8 @@ mod tests {
             finished_at: None,
             status: RunStatus::Failed,
             nodes,
+            mode: crate::contract::RunMode::Headless,
+            sessions: Vec::new(),
         }
     }
 

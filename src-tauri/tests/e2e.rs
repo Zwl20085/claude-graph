@@ -6,7 +6,7 @@ use std::fs;
 use std::sync::Arc;
 
 use claude_graph_lib::contract::{
-    MessageRole, NodeEventKind, NodeRunState, NodeStatus, RunState, RunStatus, RunTarget,
+    MessageRole, NodeEventKind, NodeRunState, NodeStatus, RunMode, RunState, RunStatus, RunTarget,
 };
 use claude_graph_lib::run_store::{self, LOG_HEADER};
 use common::*;
@@ -399,6 +399,8 @@ async fn stale_running_runs_are_swept_but_live_ones_are_not() {
         ]
         .into_iter()
         .collect(),
+        mode: RunMode::Headless,
+        sessions: Vec::new(),
     };
     run_store::write_run_state(dir, &stale).unwrap();
 

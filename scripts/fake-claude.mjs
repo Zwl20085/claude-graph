@@ -31,9 +31,25 @@
 // FAKE_SLEEP_MS=<n> sleeps n ms before replying and then writes
 // `assistant/slept.txt` (a cancelled turn never writes it); FAKE_ERROR ends
 // with an error result; FAKE_DENY reports `permission_denials` for Bash.
-import { spawn } from 'node:child_process';
+//
+// Interactive mode (terminal mode): started WITHOUT `-p`, the fake plays an
+// interactive Claude Code in a pty. It reads the `--settings` JSON the way the
+// CLI does and runs its hook commands through the platform shell
+// (`child_process.execSync`: cmd.exe /d /s /c on Windows, /bin/sh -c elsewhere):
+// SessionStart once at launch (unless `--fake-no-start`), Stop after every
+// handled prompt, Notification for a prompt containing FAKE_NOTIFY. It prints
+// a banner and a fake `> ` prompt, then reads stdin line by line. A bracketed
+// paste (ESC[200~ ... ESC[201~) is one prompt. `/model <m>` prints a line and
+// fires no hook. For any other prompt it appends the prompt to
+// `fake-received.log` next to the settings file (newlines as a literal \n),
+// and if the prompt names a brief (`read the brief at <path>`) writes every
+// deliverable of that brief, unless the brief or prompt contains FAKE_FAIL.
+// Markers in the prompt or brief: FAKE_SLEEP_MS=<n> waits n ms before
+// answering; FAKE_EXIT=<code> exits with that code instead of answering.
+import { execSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 
 const VERSION = '2.1.0 (fake-claude)';
@@ -91,6 +107,9 @@ async function main() {
   if (process.argv.includes('--version')) {
     process.stdout.write(`${VERSION}\n`);
     return 0;
+  }
+  if (!process.argv.includes('-p')) {
+    return interactive();
   }
   const started = Date.now();
   const prompt = await readStdin();
@@ -312,6 +331,79 @@ async function scheduler(prompt, sessionId, started) {
     modelUsage: {},
     permission_denials: denials,
   });
+}
+
+/** Interactive mode: see the header comment. */
+async function interactive() {
+  const settingsPath = argValue('--settings');
+  const settings = settingsPath ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {};
+  const runHooks = (event) => {
+    for (const matcher of settings?.hooks?.[event] ?? []) {
+      for (const h of matcher.hooks ?? []) {
+        if (h.type === 'command') execSync(h.command, { stdio: 'ignore', windowsHide: true });
+      }
+    }
+  };
+  const received = join(settingsPath ? dirname(settingsPath) : process.cwd(), 'fake-received.log');
+  const out = (text) => process.stdout.write(text.replace(/\r?\n/g, '\r\n'));
+  out(`fake-claude ${VERSION} interactive (cwd ${process.cwd()})\n`);
+  if (!process.argv.includes('--fake-no-start')) runHooks('SessionStart');
+  out('> ');
+  const PASTE_START = '\u001b[200~';
+  const PASTE_END = '\u001b[201~';
+  let paste = null;
+  const rl = createInterface({ input: process.stdin, terminal: false, crlfDelay: Infinity });
+  for await (const raw of rl) {
+    let line = raw.replace(/\r$/, '');
+    if (paste === null && line.includes(PASTE_START)) {
+      paste = [];
+      line = line.replace(PASTE_START, '');
+    }
+    if (paste !== null) {
+      const end = line.includes(PASTE_END);
+      paste.push(line.replace(PASTE_END, ''));
+      if (!end) continue;
+      line = paste.join('\n');
+      paste = null;
+    }
+    await answer(line.trim(), runHooks, received, out);
+  }
+  return 0;
+}
+
+async function answer(text, runHooks, received, out) {
+  if (!text) {
+    out('> ');
+    return;
+  }
+  const model = text.match(/^\/model\s+(\S+)/);
+  if (model) {
+    out(`Set model to ${model[1]}\n> `);
+    return;
+  }
+  appendFileSync(received, `${text.replace(/\n/g, '\\n')}\n`, 'utf8');
+  const briefPath = text.match(/read the brief at (.+?brief\.md)/)?.[1];
+  const brief = briefPath ? readFileSync(briefPath, 'utf8') : '';
+  const all = `${text}\n${brief}`;
+  if (all.includes('FAKE_NOTIFY')) runHooks('Notification');
+  const sleepMs = Number(all.match(/FAKE_SLEEP_MS=(\d+)/)?.[1] ?? 0);
+  if (sleepMs > 0) await sleep(sleepMs);
+  const exitCode = all.match(/FAKE_EXIT=(\d+)/)?.[1];
+  if (exitCode !== undefined) process.exit(Number(exitCode));
+  let written = 0;
+  if (brief && !all.includes('FAKE_FAIL')) {
+    const dir = findDeliverablesDir(brief);
+    for (const d of findDeliverables(brief)) {
+      const target = dir ? safeJoin(dir, d.path) : null;
+      if (!target) continue;
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, `# ${d.path}\n\nStub written by fake-claude (interactive).\n`, 'utf8');
+      written += 1;
+    }
+  }
+  out(`you said: ${text.split('\n')[0]}\nok (${written} file(s) written)\n`);
+  runHooks('Stop');
+  out('> ');
 }
 
 main().then(

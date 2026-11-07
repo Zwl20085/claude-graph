@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::contract::{
-    AssistantState, NodeEvent, NodeEventKind, RunState, EVENT_ASSISTANT_UPDATE, EVENT_NODE_EVENT,
-    EVENT_RUN_STATE,
+    AppError, AppResult, AssistantState, NodeEvent, NodeEventKind, PtyData, RunState,
+    EVENT_ASSISTANT_UPDATE, EVENT_NODE_EVENT, EVENT_PTY_DATA, EVENT_RUN_STATE,
 };
 
 const TOOL_INPUT_MAX: usize = 200;
@@ -30,6 +30,28 @@ pub trait Emitter: Send + Sync {
     fn node_event(&self, event: &NodeEvent);
     /// Assistant mode: the whole assistant state of one graph after a change.
     fn assistant_update(&self, state: &AssistantState);
+    /// Terminal mode: a chunk of pty output for the window labelled `label`
+    /// only. No-op by default (tests without Tauri).
+    fn pty_data(&self, _label: &str, _data: &PtyData) {}
+    /// Terminal mode: create the window `spec.label`, or focus it if it exists.
+    /// No-op by default (tests without Tauri).
+    fn open_window(&self, _spec: &WindowSpec) -> AppResult<()> {
+        Ok(())
+    }
+}
+
+/// A terminal-mode session window (created by the backend).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowSpec {
+    /// `term-<run>-<sid>`.
+    pub label: String,
+    pub title: String,
+    /// App route, for example `index.html#/terminal/<run>/<sid>`.
+    pub url: String,
+    pub width: f64,
+    pub height: f64,
+    pub min_width: f64,
+    pub min_height: f64,
 }
 
 /// Emitter that sends through a Tauri app handle.
@@ -55,6 +77,34 @@ impl Emitter for TauriEmitter {
         if let Err(e) = self.0.emit(EVENT_ASSISTANT_UPDATE, state) {
             log::warn!("emit {EVENT_ASSISTANT_UPDATE} failed: {e}");
         }
+    }
+
+    fn pty_data(&self, label: &str, data: &PtyData) {
+        use tauri::Emitter as _;
+        if let Err(e) = self.0.emit_to(label, EVENT_PTY_DATA, data) {
+            log::warn!("emit {EVENT_PTY_DATA} to {label} failed: {e}");
+        }
+    }
+
+    fn open_window(&self, spec: &WindowSpec) -> AppResult<()> {
+        use tauri::Manager as _;
+        if let Some(window) = self.0.get_webview_window(&spec.label) {
+            let shown = window.unminimize().and_then(|_| window.show());
+            return shown
+                .and_then(|_| window.set_focus())
+                .map_err(|e| AppError::new("internal", format!("focus {}: {e}", spec.label)));
+        }
+        tauri::WebviewWindowBuilder::new(
+            &self.0,
+            spec.label.clone(),
+            tauri::WebviewUrl::App(spec.url.clone().into()),
+        )
+        .title(spec.title.clone())
+        .inner_size(spec.width, spec.height)
+        .min_inner_size(spec.min_width, spec.min_height)
+        .build()
+        .map(|_| ())
+        .map_err(|e| AppError::new("internal", format!("open window {}: {e}", spec.label)))
     }
 }
 

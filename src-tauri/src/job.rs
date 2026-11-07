@@ -28,10 +28,16 @@ mod imp {
     impl Job {
         /// Put `child` in a new kill-on-close job. `None` (logged) if any step fails.
         pub fn assign(child: &tokio::process::Child) -> Option<Job> {
-            let process = child.raw_handle()? as HANDLE;
+            Self::assign_handle(child.raw_handle()?)
+        }
+
+        /// Put the process behind the raw handle `process` (alive, owned by the
+        /// caller for the duration of the call) in a new kill-on-close job.
+        pub fn assign_handle(process: std::os::windows::io::RawHandle) -> Option<Job> {
+            let process = process as HANDLE;
             // SAFETY: plain Win32 calls; `job` is checked for null, `info` is a
             // zero-initialised POD struct of the size passed, and `process` is the
-            // live child's handle owned by tokio for the duration of this call.
+            // live child's handle owned by the caller for the duration of this call.
             unsafe {
                 let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
                 if job.is_null() {

@@ -14,7 +14,8 @@ Standalone reference extracted from [ARCHITECTURE.md](ARCHITECTURE.md) §2. Type
     "stop_on_failure": false,
     "default_model": "sonnet",
     "default_permission_mode": "acceptEdits",
-    "claude_bin": null                    // deprecated and ignored: the claude path is a per-machine app setting
+    "claude_bin": null,                   // deprecated and ignored: the claude path is a per-machine app setting
+    "run_mode": "terminal"                // "terminal" (default; missing = terminal) | "headless"
   },
   "nodes": [ { ...Node } ],
   "edges": [ { "id": "e1", "from": "node-a", "to": "node-b" } ]
@@ -66,6 +67,10 @@ Deliverable paths are relative to `nodes/<id>/deliverables/`.
   explicit mode overrides the user's settings.
 - Resource tags: capacity comes from `settings.resources`; unknown tags have
   capacity 1; `exclusive` means nothing else runs alongside the node.
+- `run_mode`: `"terminal"` runs each connected component as one interactive Claude Code
+  session in its own window (ARCHITECTURE.md "Terminal mode (default)"); it ignores resource
+  tags, `allowed_tools`, `max_turns`, `continue_session_of`, per-node permission modes and
+  `default_model`. `"headless"` is the `claude -p` engine.
 
 ## Other folders
 
@@ -81,6 +86,20 @@ assistant/
   turns/0001/         prompt.md, events.jsonl, stderr.log, reply.md of each scheduler turn
   PLAN.md, DECISIONS.md   written by the scheduler itself
 ```
+
+A terminal-mode run (`run.json` has `"mode": "terminal"` and a `sessions` list; older
+run.json files load as `"headless"` with no sessions) also writes one folder per session:
+
+```
+runs/<run-id>/sessions/<sid>/      sid = s1, s2, … (one per connected component)
+  hooks.json        --settings file: SessionStart/Stop/Notification hooks appending to hooks.log
+  hooks.log         start / stop / notify, one word per line, written by Claude Code
+  transcript.log    raw terminal output of the session
+  session.json      { sid, title, node_ids, pid, status, started_at, finished_at }
+```
+
+and per node `runs/<run-id>/<node-id>/prompt.md` (the brief sent) and `summary.json`
+(`{ session, started_at, finished_at, status, reason, … }`).
 
 The scheduler writes node deliverables to the same `nodes/<id>/deliverables/` folders as graph
 mode. See ARCHITECTURE.md "Assistant mode (backend)".

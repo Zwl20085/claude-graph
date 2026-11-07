@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::contract::{
     AppError, AppResult, MessageRole, NodeEvent, NodeEventKind, NodeRunState, NodeStatus,
-    NodeSummary, RunState, RunStatus,
+    NodeSummary, RunMode, RunState, RunStatus,
 };
 use crate::run_store::{append_log, write_run_state};
 use crate::runner::{run_turn, TurnOutcome, TurnSpec};
@@ -96,6 +96,8 @@ pub fn initial_state(ctx: &RunCtx, sched: &Scheduler) -> RunState {
                 (id.clone(), node)
             })
             .collect(),
+        mode: RunMode::Headless,
+        sessions: Vec::new(),
     }
 }
 

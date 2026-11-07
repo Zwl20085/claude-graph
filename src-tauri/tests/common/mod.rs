@@ -9,8 +9,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use claude_graph_lib::claude_bin::ENV_CLAUDE_BIN;
-use claude_graph_lib::contract::{AssistantState, Graph, NodeEvent, NodeEventKind, RunState};
-use claude_graph_lib::events::Emitter;
+use claude_graph_lib::contract::{
+    AppResult, AssistantState, Graph, NodeEvent, NodeEventKind, PtyData, RunState,
+};
+use claude_graph_lib::events::{Emitter, WindowSpec};
 use claude_graph_lib::run_api::{abs, AppState};
 use claude_graph_lib::store;
 use tokio::task::JoinHandle;
@@ -53,6 +55,10 @@ pub struct Recorder {
     pub states: Mutex<Vec<RunState>>,
     pub events: Mutex<Vec<NodeEvent>>,
     pub assistant: Mutex<Vec<AssistantState>>,
+    /// Terminal mode: labels of the windows opened, in order.
+    pub windows: Mutex<Vec<WindowSpec>>,
+    /// Terminal mode: `pty:data` chunks (window label, payload).
+    pub pty: Mutex<Vec<(String, PtyData)>>,
 }
 
 impl Emitter for Recorder {
@@ -64,6 +70,16 @@ impl Emitter for Recorder {
     }
     fn assistant_update(&self, state: &AssistantState) {
         self.assistant.lock().unwrap().push(state.clone());
+    }
+    fn pty_data(&self, label: &str, data: &PtyData) {
+        self.pty
+            .lock()
+            .unwrap()
+            .push((label.to_string(), data.clone()));
+    }
+    fn open_window(&self, spec: &WindowSpec) -> AppResult<()> {
+        self.windows.lock().unwrap().push(spec.clone());
+        Ok(())
     }
 }
 

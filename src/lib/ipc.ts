@@ -10,6 +10,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   EVENT_ASSISTANT_UPDATE,
   EVENT_NODE_EVENT,
+  EVENT_PTY_DATA,
   EVENT_RUN_STATE,
   isAppError,
   type AppError,
@@ -21,9 +22,12 @@ import {
   type NodeEvent,
   type NodeMessage,
   type NodeResult,
+  type PtyData,
+  type PtyReplay,
   type RunState,
   type RunSummary,
   type RunTarget,
+  type TerminalSession,
   type TrustStatus,
 } from '../types/contract';
 
@@ -138,3 +142,33 @@ export const assistantReset = (dir: string): Promise<AssistantState> => call('as
 /** Subscribe to `assistant_update`. The payload names no folder: callers reload their own. */
 export const onAssistantUpdate = (handler: (state: AssistantState) => void): Promise<UnlistenFn> =>
   listen<AssistantState>(EVENT_ASSISTANT_UPDATE, (e) => handler(e.payload));
+
+// ---------------------------------------------------------------------------
+// Terminal mode
+// ---------------------------------------------------------------------------
+
+/** Sessions of a terminal-mode run (empty for a headless run). */
+export const listSessions = (dir: string, run_id: string): Promise<TerminalSession[]> =>
+  call('list_sessions', { dir, run_id });
+
+/** Raw text to the session's pty (keystrokes, or a message followed by "
+"). */
+export const ptyWrite = (run_id: string, sid: string, text: string): Promise<void> =>
+  call('pty_write', { run_id, sid, text });
+
+export const ptyResize = (run_id: string, sid: string, cols: number, rows: number): Promise<void> =>
+  call('pty_resize', { run_id, sid, cols, rows });
+
+/**
+ * The session transcript so far (last 512 KiB), for a window opened late, with
+ * the seq of its last chunk: live `pty:data` chunks with seq <= that are in it.
+ */
+export const ptyReplay = (run_id: string, sid: string): Promise<PtyReplay> => call('pty_replay', { run_id, sid });
+
+/** Create or focus the window `term-<run>-<sid>`. */
+export const openSessionWindow = (run_id: string, sid: string): Promise<void> =>
+  call('open_session_window', { run_id, sid });
+
+/** Subscribe to `pty:data`; callers filter on run_id / sid. */
+export const onPtyData = (handler: (data: PtyData) => void): Promise<UnlistenFn> =>
+  listen<PtyData>(EVENT_PTY_DATA, (e) => handler(e.payload));

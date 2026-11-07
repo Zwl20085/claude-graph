@@ -35,6 +35,8 @@ fn run(run_id: &str, statuses: &[(&str, NodeStatus)]) -> RunState {
                 (id.to_string(), state)
             })
             .collect(),
+        mode: crate::contract::RunMode::Headless,
+        sessions: Vec::new(),
     }
 }
 

@@ -1,13 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: IPC, events, folder dialog. Reveal runs backend-side (no opener permission for the webview).",
+  "description": "Main window and Claude Code session windows (term-<run>-<sid>): IPC, events, folder dialog. Session windows are created by the backend. Reveal runs backend-side (no opener permission for the webview).",
   "windows": [
-    "main"
+    "main",
+    "term-*"
   ],
   "permissions": [
     "core:default",
+    "core:event:default",
     "core:window:allow-set-title",
+    "core:window:allow-close",
     "core:window:allow-destroy",
     "dialog:default",
     "log:default"

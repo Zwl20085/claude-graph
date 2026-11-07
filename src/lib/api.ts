@@ -12,9 +12,12 @@ import type {
   NodeEvent,
   NodeMessage,
   NodeResult,
+  PtyData,
+  PtyReplay,
   RunState,
   RunSummary,
   RunTarget,
+  TerminalSession,
   TrustStatus,
 } from '../types/contract';
 import * as tauriIpc from './ipc';
@@ -52,6 +55,13 @@ export interface Api {
   assistantCancel: (dir: string) => Promise<void>;
   assistantReset: (dir: string) => Promise<AssistantState>;
   onAssistantUpdate: (handler: (state: AssistantState) => void) => Promise<Unlisten>;
+  // Terminal mode (TERMINAL_CONTRACT "Commands and events").
+  listSessions: (dir: string, run_id: string) => Promise<TerminalSession[]>;
+  ptyWrite: (run_id: string, sid: string, text: string) => Promise<void>;
+  ptyResize: (run_id: string, sid: string, cols: number, rows: number) => Promise<void>;
+  ptyReplay: (run_id: string, sid: string) => Promise<PtyReplay>;
+  openSessionWindow: (run_id: string, sid: string) => Promise<void>;
+  onPtyData: (handler: (data: PtyData) => void) => Promise<Unlisten>;
 }
 
 /** True when running inside a Tauri WebView. */
@@ -61,7 +71,16 @@ export function isTauri(win: unknown = globalThis): boolean {
 
 export function selectApi(win: unknown = globalThis): { api: Api; mock: boolean } {
   if (isTauri(win)) return { api: tauriIpc, mock: false };
-  return { api: createMockIpc(), mock: true };
+  // Browser dev: chips open a second tab, and tabs share pty output over a BroadcastChannel.
+  const open = (globalThis as { open?: (url: string, target: string) => unknown }).open;
+  return {
+    api: createMockIpc({
+      broadcast: true,
+      exampleRunMode: 'as_file',
+      openWindow: typeof open === 'function' ? (url, target) => void open.call(globalThis, url, target) : undefined,
+    }),
+    mock: true,
+  };
 }
 
 const selected = selectApi();

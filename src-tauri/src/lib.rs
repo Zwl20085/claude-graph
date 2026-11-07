@@ -21,6 +21,7 @@ pub mod run_store;
 pub mod runner;
 pub mod scheduler;
 pub mod store;
+pub mod terminal;
 pub mod trust;
 pub mod turns;
 
@@ -29,11 +30,14 @@ pub mod turns;
 const EXIT_WAIT: Duration = Duration::from_secs(5);
 
 /// App exit (last window closed, or exit requested): cancel every active run
-/// and assistant turn and wait up to [`EXIT_WAIT`]. Whatever is left is caught by the Job Objects
+/// and assistant turn, kill every terminal session, and wait up to [`EXIT_WAIT`]. Whatever is left is caught by the Job Objects
 /// (Windows) and, on the next open, by the stale-run sweep.
 fn on_exit(app: &tauri::AppHandle) {
     let state = app.state::<run_api::AppState>().inner().clone();
-    if state.active_count() == 0 && state.assistant_active_count() == 0 {
+    if state.active_count() == 0
+        && state.assistant_active_count() == 0
+        && state.terminals().live_count() == 0
+    {
         return;
     }
     log::info!(
@@ -82,6 +86,11 @@ pub fn run() {
             commands::assistant_send,
             commands::assistant_cancel,
             commands::assistant_reset,
+            commands::list_sessions,
+            commands::pty_write,
+            commands::pty_resize,
+            commands::pty_replay,
+            commands::open_session_window,
         ])
         .build(tauri::generate_context!());
     let app = match app {

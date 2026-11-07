@@ -22,6 +22,8 @@ pub const EVENT_RUN_STATE: &str = "run:state";
 pub const EVENT_NODE_EVENT: &str = "node:event";
 /// Event name: full `AssistantState` after every assistant-mode change.
 pub const EVENT_ASSISTANT_UPDATE: &str = "assistant_update";
+/// Event name: a chunk of terminal output ([`PtyData`]), sent to one session window only.
+pub const EVENT_PTY_DATA: &str = "pty:data";
 
 // ---------------------------------------------------------------------------
 // Graph (graph.json)
@@ -54,6 +56,27 @@ pub struct Settings {
     /// lives in the app settings ([`AppSettings::claude_bin`]). A non-null value
     /// is reported as an informational `claude_bin_in_graph` trust item.
     pub claude_bin: Option<String>,
+    /// How `start_run` runs the graph. Missing in older graph.json files: terminal.
+    pub run_mode: RunMode,
+}
+
+/// `terminal`: one interactive Claude Code per connected component, in a
+/// window, messages typed for the user (docs/ARCHITECTURE.md "Terminal mode").
+/// `headless`: the `claude -p` engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunMode {
+    #[default]
+    Terminal,
+    Headless,
+}
+
+impl RunMode {
+    /// Serde default of [`RunState::mode`]: run.json files written before
+    /// terminal mode existed are headless runs.
+    pub fn headless() -> Self {
+        RunMode::Headless
+    }
 }
 
 impl Default for Settings {
@@ -69,6 +92,7 @@ impl Default for Settings {
             default_model: Model::Sonnet,
             default_permission_mode: PermissionMode::AcceptEdits,
             claude_bin: None,
+            run_mode: RunMode::Terminal,
         }
     }
 }
@@ -297,6 +321,73 @@ pub struct RunState {
     pub status: RunStatus,
     /// Keyed by node id. Only nodes in the run's target set appear.
     pub nodes: BTreeMap<String, NodeRunState>,
+    /// Missing in older run.json files: headless.
+    #[serde(default = "RunMode::headless")]
+    pub mode: RunMode,
+    /// Terminal mode: one entry per session of the run, by sid. Empty in headless runs.
+    #[serde(default)]
+    pub sessions: Vec<TerminalSession>,
+}
+
+/// Terminal mode: state of one session (one connected component).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    /// Spawned (or waiting for a slot); Claude Code has not reported its start yet.
+    Starting,
+    /// Claude Code is up and the node messages are being typed.
+    Running,
+    /// Every node message was handled; the process may still be alive (`pid`).
+    Done,
+    /// Claude Code did not start, or exited before its nodes were done.
+    Failed,
+    Cancelled,
+}
+
+impl SessionStatus {
+    /// The session no longer counts against `max_parallel`.
+    pub fn is_settled(self) -> bool {
+        matches!(
+            self,
+            SessionStatus::Done | SessionStatus::Failed | SessionStatus::Cancelled
+        )
+    }
+}
+
+/// Return value of `list_sessions`; entry of [`RunState::sessions`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSession {
+    /// `s1`, `s2`, … (order of the component's smallest node position).
+    pub sid: String,
+    pub title: String,
+    /// Nodes of the session in the order they are sent.
+    pub node_ids: Vec<String>,
+    pub status: SessionStatus,
+    /// Process id while the Claude Code process is alive; `None` once it is gone.
+    pub pid: Option<u32>,
+    /// Node whose message was sent last and has not finished.
+    pub current_node: Option<String>,
+}
+
+/// Payload of the `pty:data` event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PtyData {
+    pub run_id: String,
+    pub sid: String,
+    /// The chunk as UTF-8 (a multi-byte character split across reads is held back).
+    pub data: String,
+    /// 1-based chunk counter of the session; a window drops chunks with
+    /// `seq` ≤ the `seq` of the [`PtyReplay`] it already wrote.
+    pub seq: u64,
+}
+
+/// Return value of `pty_replay`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PtyReplay {
+    /// The output so far (last 512 KiB), exactly the text of chunks 1..=seq.
+    pub text: String,
+    /// Number of `pty:data` chunks emitted so far for the session.
+    pub seq: u64,
 }
 
 /// Count of nodes per status in one run.
@@ -365,6 +456,8 @@ pub enum NodeEventKind {
     /// The CLI denied a tool call without asking (`system`/`permission_denied`);
     /// text is the tool name plus a short input summary.
     PermissionDenied,
+    /// Terminal mode: Claude Code is waiting for the user in a session window.
+    Notification,
 }
 
 /// Payload of the `node:event` event.

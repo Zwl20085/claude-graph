@@ -1,0 +1,91 @@
+/**
+ * Messages tab of a terminal-mode run: the text is typed into the node's
+ * Claude Code session (`pty_write` with "\r") while that session is alive;
+ * the conversation itself lives in the session window.
+ */
+import { useState } from 'react';
+import { Send, SquareTerminal } from 'lucide-react';
+import { sessionsOf } from '../types/contract';
+import { api } from '../lib/api';
+import { isSessionAlive, sessionOfNode } from '../lib/sessions';
+import { useGraphStore } from '../store/graphStore';
+import { errorMessage } from '../store/runHelpers';
+import { openSessionWindow } from './SessionChips';
+import { btnCls, inputCls } from './ui';
+
+export const SESSION_CLOSED_TEXT = 'Session closed; rerun to talk';
+
+/** One line for the TUI: a raw newline would submit early, so line breaks become spaces. */
+export function terminalLine(text: string): string {
+  return text.trim().replace(/\s*\r?\n\s*/g, ' ');
+}
+
+export function TerminalMessages({ nodeId }: { nodeId: string }) {
+  const runState = useGraphStore((s) => s.runState);
+  const pushToast = useGraphStore((s) => s.pushToast);
+  const [draft, setDraft] = useState('');
+  const [sent, setSent] = useState<readonly string[]>([]);
+  const session = sessionOfNode(sessionsOf(runState), nodeId);
+  const runId = runState?.run_id ?? null;
+  const alive = runId !== null && isSessionAlive(session);
+  const hint = alive && session ? `Typed into the Claude Code window “${session.title || session.sid}”.` : SESSION_CLOSED_TEXT;
+  const toast = (text: string): void => pushToast('error', text);
+
+  const send = async (): Promise<void> => {
+    const line = terminalLine(draft);
+    if (line === '' || !alive || !session || runId === null) return;
+    setDraft('');
+    try {
+      await api.ptyWrite(runId, session.sid, `${line}\r`);
+      setSent((list) => [...list, line]);
+    } catch (err) {
+      setDraft(line);
+      toast(`Message not sent: ${errorMessage(err)}`);
+    }
+  };
+
+  return (
+    <div className="flex h-full flex-col gap-2">
+      <div className="min-h-0 flex-1 space-y-2 overflow-auto">
+        {sent.length === 0 && <p className="text-[12px] text-[#777]">The conversation is in the session window.</p>}
+        {sent.map((text, i) => (
+          <div key={`${i}-${text}`} className="flex justify-end">
+            <div className="max-w-[90%] whitespace-pre-wrap break-words rounded bg-[#1e3a5f] px-2 py-1.5 text-[12px] text-[#e5e5e5]">{text}</div>
+          </div>
+        ))}
+      </div>
+      <p className="text-[11px] text-[#9a9a9a]" role="status">
+        {hint}
+      </p>
+      {alive && session && runId !== null && (
+        <button
+          className={`${btnCls} self-start border border-[#3c3c3c]`}
+          onClick={() => openSessionWindow(runId, session.sid, toast)}
+          aria-label="open the Claude Code window of this node"
+        >
+          <SquareTerminal size={13} />Open window
+        </button>
+      )}
+      <div className="flex gap-1">
+        <textarea
+          aria-label="message to this node"
+          className={`${inputCls} resize-none`}
+          rows={3}
+          disabled={!alive}
+          value={draft}
+          placeholder={alive ? 'Type into the session (Ctrl+Enter to send)' : SESSION_CLOSED_TEXT}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault();
+              void send();
+            }
+          }}
+        />
+        <button className={`${btnCls} self-end bg-[#3b82f6] text-white`} disabled={!alive || draft.trim() === ''} onClick={() => void send()}>
+          <Send size={13} />Send
+        </button>
+      </div>
+    </div>
+  );
+}

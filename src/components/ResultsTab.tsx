@@ -1,11 +1,13 @@
 /** Past runs of the graph and this node's result in each. */
 import { useEffect, useState } from 'react';
-import { ExternalLink } from 'lucide-react';
-import { deniedTools, type NodeResult, type RunSummary } from '../types/contract';
+import { ExternalLink, SquareTerminal } from 'lucide-react';
+import { deniedTools, sessionsOf, type NodeResult, type RunSummary } from '../types/contract';
 import { api } from '../lib/api';
 import { DENIED_HINT, formatCost, STATUS_COLORS } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
 import { errorMessage, newestFirst, unionIds } from '../store/runHelpers';
+import { isSessionAlive, sessionOfNode } from '../lib/sessions';
+import { openSessionWindow } from './SessionChips';
 import { btnCls } from './ui';
 
 type Detail = { kind: 'none' } | { kind: 'loading' } | { kind: 'ok'; result: NodeResult } | { kind: 'error'; message: string };
@@ -34,6 +36,23 @@ export function DeniedTools({ tools }: { tools: readonly string[] }) {
   );
 }
 
+/** "Open Claude Code window" while the node's session in the shown run is alive. */
+function OpenSessionButton({ nodeId }: { nodeId: string }) {
+  const runState = useGraphStore((s) => s.runState);
+  const pushToast = useGraphStore((s) => s.pushToast);
+  const session = sessionOfNode(sessionsOf(runState), nodeId);
+  if (!runState || !session || !isSessionAlive(session)) return null;
+  return (
+    <button
+      className={`${btnCls} border border-[#3c3c3c]`}
+      onClick={() => openSessionWindow(runState.run_id, session.sid, (text) => pushToast('error', text))}
+      title={`Open or focus the window of session ${session.title || session.sid}`}
+    >
+      <SquareTerminal size={13} />Open Claude Code window
+    </button>
+  );
+}
+
 export function ResultsTab({ nodeId }: { nodeId: string }) {
   const dir = useGraphStore((s) => s.dir);
   const runKey = useGraphStore((s) => `${s.runState?.run_id ?? ''}:${s.runState?.status ?? ''}`);
@@ -49,9 +68,12 @@ export function ResultsTab({ nodeId }: { nodeId: string }) {
     api.revealNodeDir(dir, nodeId).catch((err) => pushToast('error', `Could not open the folder: ${errorMessage(err)}`));
   };
   const openFolder = (
-    <button className={`${btnCls} border border-[#3c3c3c]`} onClick={reveal} title={`Show nodes/${nodeId}/deliverables in the file manager`}>
-      <ExternalLink size={13} />Open deliverables folder
-    </button>
+    <div className="flex flex-wrap gap-1">
+      <OpenSessionButton nodeId={nodeId} />
+      <button className={`${btnCls} border border-[#3c3c3c]`} onClick={reveal} title={`Show nodes/${nodeId}/deliverables in the file manager`}>
+        <ExternalLink size={13} />Open deliverables folder
+      </button>
+    </div>
   );
 
   useEffect(() => {

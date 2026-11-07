@@ -65,3 +65,27 @@ claude -p "<short instruction>" --output-format stream-json --verbose \
 - Kill: `taskkill /T /F /PID <pid>` on Windows (process tree); on Unix spawn in its own process group and kill the group.
   Each child is also in a kill-on-close Job Object, closed at the end of the turn and by the OS on a crash.
 - No sandbox on native Windows.
+
+## Interactive Claude Code in a pty (terminal mode) — verified 2026-11-07, Claude Code 2.1.319, Windows 11
+
+- `claude --settings <file.json>` loads hooks from that file. With
+  `{"type":"command","command":"echo stop>> \"C:/path/hooks.log\""}` as the `Stop` hook the
+  CLI appends `stop` at the end of every reply (also `-p` turns); `SessionStart` appends
+  `start` once at launch, `Notification` when it waits for the user. Forward slashes in the
+  path work on Windows.
+- Spawned in ConPTY (portable-pty 0.9), the CLI's console first sends `ESC[6n` (cursor
+  position query) and waits for the answer; the app answers `ESC[1;1R`.
+- In a folder never trusted before, the workspace-trust dialog ("Quick safety check: Is this
+  a project you created or one you trust?") comes first and its highlighted default is
+  **"No, exit"** (Enter exits with code 1). No hook runs before it is answered. After trust
+  a project MCP server can show a second dialog ("New MCP server found…", default "Continue
+  without using this MCP server"), after `start`. Both end with "Enter to confirm · Esc to
+  cancel".
+- Typing `text\r` into the pty submits it as a prompt; the reply's Stop hook follows.
+- Bracketed paste `ESC[200~line one\nline two ESC[201~` followed (300 ms later) by `\r` is
+  submitted as **one** prompt (both lines in the prompt box, one reply, one `stop`).
+- When the app itself runs inside a Claude Code session, the child shows "Transcript saving
+  is off — inherited CLAUDE_CODE_CHILD_SESSION marker"; the app therefore removes
+  `CLAUDE_CODE_CHILD_SESSION` and `CLAUDECODE` from the session process's environment.
+- The real smoke test: `cargo test --test real_terminal -- --ignored --nocapture`
+  (one short reply, about one cent).
