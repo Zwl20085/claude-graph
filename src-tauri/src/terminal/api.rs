@@ -16,6 +16,7 @@ use crate::contract::{AppError, AppResult, PtyReplay, TerminalSession};
 use crate::events::{Emitter, WindowSpec};
 use crate::prompt::display_dir;
 use crate::run_store::{check_id, read_run_state};
+use crate::terminal::port::spawn_followup;
 use crate::terminal::pty::Pty;
 use crate::terminal::window_label;
 
@@ -39,6 +40,8 @@ pub struct SessionShared {
     kill: watch::Sender<bool>,
     /// The session task is running (the process may be alive).
     task_alive: AtomicBool,
+    /// Held while a message is delivered, so two never interleave.
+    typing: tokio::sync::Mutex<()>,
 }
 
 impl SessionShared {
@@ -50,6 +53,7 @@ impl SessionShared {
             pty: Mutex::new(None),
             kill: watch::channel(false).0,
             task_alive: AtomicBool::new(false),
+            typing: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -70,6 +74,11 @@ impl SessionShared {
 
     pub fn pty(&self) -> Option<Arc<Pty>> {
         lock(&self.pty).clone()
+    }
+
+    /// Wait for the right to type into the session.
+    pub async fn typing(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.typing.lock().await
     }
 
     pub fn kill_watch(&self) -> watch::Receiver<bool> {
@@ -190,19 +199,19 @@ impl Terminals {
             .count()
     }
 
-    /// Type `text` + Enter into the session that sends `node_id` (follow-up
-    /// message to a node of a terminal run).
-    pub fn type_message(&self, run_id: &str, node_id: &str, text: &str) -> AppResult<()> {
+    /// Deliver `text` (one line) in the background into the session that
+    /// sends `node_id` (follow-up message to a node of a terminal run).
+    pub fn type_message(
+        &self,
+        run_id: &str,
+        node_id: &str,
+        text: &str,
+        emitter: Arc<dyn Emitter>,
+    ) -> AppResult<()> {
         let session = self
             .session_of_node(run_id, node_id)
             .ok_or_else(|| AppError::new("not_found", format!("node {node_id} has no session")))?;
-        let pty = session.pty().ok_or_else(session_closed)?;
-        let line: String = text
-            .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .collect();
-        pty.write(format!("{line}\r").as_bytes(), true)
-            .map_err(|_| session_closed())
+        spawn_followup(session, emitter, node_id, text)
     }
 }
 
@@ -274,7 +283,7 @@ pub fn pty_write(terminals: &Terminals, run_id: &str, sid: &str, text: &str) -> 
         return Ok(());
     }
     let pty = session.pty().ok_or_else(session_closed)?;
-    pty.write(text.as_bytes(), true)
+    pty.write(text.as_bytes())
 }
 
 pub fn pty_resize(
@@ -320,90 +329,5 @@ pub fn open_session_window(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::contract::SessionStatus;
-
-    fn info(sid: &str, nodes: &[&str]) -> TerminalSession {
-        TerminalSession {
-            sid: sid.into(),
-            title: "T".into(),
-            node_ids: nodes.iter().map(|n| n.to_string()).collect(),
-            status: SessionStatus::Starting,
-            pid: None,
-            current_node: None,
-        }
-    }
-
-    #[test]
-    fn sids_and_sizes_are_validated() {
-        for ok in ["s1", "s42", "s99999"] {
-            assert!(check_sid(ok).is_ok(), "{ok}");
-        }
-        for bad in ["", "s", "1", "S1", "s1a", "s-1", "s123456", "../s1"] {
-            assert_eq!(check_sid(bad).unwrap_err().code, "invalid_input", "{bad}");
-        }
-        let t = Terminals::default();
-        t.insert(SessionShared::new(
-            "R1",
-            Path::new("/g"),
-            info("s1", &["a"]),
-        ));
-        assert_eq!(
-            pty_resize(&t, "R1", "s1", 5, 40).unwrap_err().code,
-            "invalid_input"
-        );
-        assert_eq!(
-            pty_resize(&t, "R1", "s1", 80, 1000).unwrap_err().code,
-            "invalid_input"
-        );
-        assert_eq!(
-            pty_resize(&t, "R1", "s1", 80, 24).unwrap_err().code,
-            "not_found"
-        );
-        let big = "x".repeat(WRITE_MAX + 1);
-        assert_eq!(
-            pty_write(&t, "R1", "s1", &big).unwrap_err().code,
-            "invalid_input"
-        );
-        assert_eq!(
-            pty_write(&t, "../x", "s1", "a").unwrap_err().code,
-            "not_found"
-        );
-        assert_eq!(
-            pty_write(&t, "R1", "s2", "a").unwrap_err().code,
-            "not_found"
-        );
-        assert!(pty_write(&t, "R1", "s1", "").is_ok());
-        assert_eq!(pty_replay(&t, "R1", "s1").unwrap().seq, 0);
-    }
-
-    #[test]
-    fn registry_finds_sessions_and_kills() {
-        let t = Terminals::default();
-        let s = SessionShared::new("R1", Path::new("/g"), info("s1", &["a", "b"]));
-        let mut kill = s.kill_watch();
-        t.insert(s.clone());
-        assert!(t.has_run("R1"));
-        assert_eq!(t.session_of_node("R1", "b").unwrap().info().sid, "s1");
-        assert!(t.session_of_node("R1", "c").is_none());
-        assert_eq!(t.live_count(), 0);
-        s.task_started();
-        assert_eq!(t.live_count(), 1);
-        assert_eq!(t.kill_run("R1"), 1);
-        assert!(*kill.borrow_and_update());
-        s.task_ended();
-        assert_eq!(t.live_count(), 0);
-        assert_eq!(
-            t.type_message("R1", "a", "hi").unwrap_err().message,
-            "Session closed; rerun to talk"
-        );
-        let w = s.window();
-        assert_eq!(w.label, "term-R1-s1");
-        assert_eq!(w.url, "index.html#/terminal/R1/s1?dir=%2Fg");
-        assert_eq!(url_encode("C:/a b/ü"), "C%3A%2Fa%20b%2F%C3%BC");
-        assert_eq!(list_sessions(&t, None, "R1").unwrap().len(), 1);
-        assert_eq!(list_sessions(&t, None, "R2").unwrap_err().code, "not_found");
-        assert_eq!(w.title, "Claude Code — T");
-    }
-}
+#[path = "api_tests.rs"]
+mod tests;

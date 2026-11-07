@@ -1,10 +1,15 @@
 //! Terminal mode against the real `claude` CLI (the owner's own login), in a
 //! real pty. Ignored by default; run with
-//! `cargo test --test real_terminal -- --ignored --nocapture` (about one cent).
+//! `cargo test --test real_terminal -- --ignored --nocapture` (about one cent
+//! per run; the test makes two runs).
 //!
-//! A fresh temp folder makes Claude Code ask whether to trust it (and maybe
-//! whether to use a project MCP server). The test answers those dialogs the
-//! way a user would in the window: never the "No, exit" choice.
+//! Run 1, in a fresh temp folder: Claude Code asks whether to trust it (and
+//! maybe whether to use a project MCP server). The test first leaves the
+//! dialog alone and checks that the node stays `queued` with the dialog
+//! notification for 5 s and nothing is typed; then it answers like a user in
+//! the window (pty_write; never the "No, exit" choice) and checks `submit`,
+//! then `stop`, then success. Run 2, in the same (now trusted) folder: no
+//! dialog, straight delivery.
 
 mod common;
 
@@ -12,13 +17,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use claude_graph_lib::claude_bin::ENV_CLAUDE_BIN;
-use claude_graph_lib::contract::{Graph, NodeStatus, RunTarget};
+use claude_graph_lib::contract::{Graph, NodeEventKind, NodeStatus, RunState, RunTarget};
 use claude_graph_lib::run_api::AppState;
 use claude_graph_lib::terminal::api as term;
 use claude_graph_lib::terminal::screen::plain_tail;
 use common::*;
 
 const LIMIT: Duration = Duration::from_secs(240);
+const HANDS_OFF: Duration = Duration::from_secs(5);
 
 fn one_node_graph() -> Graph {
     serde_json::from_value(serde_json::json!({
@@ -29,6 +35,7 @@ fn one_node_graph() -> Graph {
             "id": "ok",
             "title": "Say ok",
             "prompt": "Reply with the single word ok and create no files",
+            "model": "haiku",
         }],
         "edges": [],
     }))
@@ -42,17 +49,17 @@ async fn answer_dialogs(app: &AppState, run_id: &str) {
         return;
     };
     let Some(pty) = session.pty() else { return };
-    if !pty.output.dialog_open() {
+    if !pty.output.screen().dialog_open() {
         return;
     }
     let tail = plain_tail(&pty.output.replay().text, 400).to_lowercase();
     let highlighted = tail
-        .rsplit('❯')
+        .rsplit(['❯', '>'])
         .next()
         .unwrap_or("")
         .trim_start()
         .to_string();
-    println!("dialog: …{}", plain_tail(&tail, 200));
+    println!("answering dialog: …{}", plain_tail(&tail, 200));
     if highlighted.starts_with("no") {
         term::pty_write(app.terminals(), run_id, "s1", "\u{1b}[B").unwrap();
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -61,45 +68,121 @@ async fn answer_dialogs(app: &AppState, run_id: &str) {
     tokio::time::sleep(Duration::from_millis(1500)).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "runs the real claude CLI interactively (one short reply)"]
-async fn real_claude_in_a_pty_reports_start_and_stop() {
-    std::env::remove_var(ENV_CLAUDE_BIN);
-    let tmp = graph_dir(&one_node_graph());
-    let dir = tmp.path();
-    let app = trusted_app(dir);
-    let rec = Arc::new(Recorder::default());
+fn events(rec: &Recorder, run_id: &str, kind: NodeEventKind) -> Vec<String> {
+    rec.events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.run_id == run_id && e.kind == kind)
+        .map(|e| e.text.clone())
+        .collect()
+}
+
+fn node_status(rec: &Recorder, run_id: &str) -> Option<NodeStatus> {
+    let states = rec.states.lock().unwrap();
+    let last = states.iter().rev().find(|s| s.run_id == run_id)?;
+    Some(last.nodes["ok"].status)
+}
+
+/// One run; a dialog is left alone for [`HANDS_OFF`] (checked), then answered.
+async fn run_once(
+    app: &AppState,
+    dir: &std::path::Path,
+    rec: &Arc<Recorder>,
+) -> (String, RunState) {
     let t0 = Instant::now();
     let (run_id, mut join) = app.start_by_mode(dir, RunTarget::All, rec.clone()).unwrap();
+    let mut noticed: Option<Instant> = None;
     let state = loop {
         assert!(t0.elapsed() < LIMIT, "run did not finish in {LIMIT:?}");
         tokio::select! {
             done = &mut join => break done.unwrap(),
-            _ = tokio::time::sleep(Duration::from_millis(500)) => answer_dialogs(&app, &run_id).await,
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+        }
+        let notes = events(rec, &run_id, NodeEventKind::Notification);
+        if noticed.is_none() && !notes.is_empty() {
+            println!("[{:?}] notification: {notes:?}", t0.elapsed());
+            noticed = Some(Instant::now());
+        }
+        match noticed {
+            Some(at) if at.elapsed() < HANDS_OFF => {
+                assert_eq!(node_status(rec, &run_id), Some(NodeStatus::Queued));
+                let steps = events(rec, &run_id, NodeEventKind::Text);
+                assert!(
+                    !steps.iter().any(|s| s == "typed"),
+                    "typed into a dialog: {steps:?}"
+                );
+            }
+            Some(_) => answer_dialogs(app, &run_id).await,
+            None => {}
         }
     };
-    let session_dir = dir.join("runs").join(&run_id).join("sessions").join("s1");
+    (run_id, state)
+}
+
+fn report(dir: &std::path::Path, run_id: &str, rec: &Recorder, state: &RunState) -> Vec<String> {
+    let session_dir = dir.join("runs").join(run_id).join("sessions").join("s1");
     let hooks = std::fs::read_to_string(session_dir.join("hooks.log")).unwrap_or_default();
     let transcript =
         std::fs::read_to_string(session_dir.join("transcript.log")).unwrap_or_default();
-    let plain = plain_tail(&transcript, 3000);
-    println!("--- hooks.log ---\n{hooks}--- transcript (plain tail) ---\n{plain}");
+    let plain = plain_tail(&transcript, 1500);
+    println!("--- run {run_id} hooks.log ---\n{hooks}--- transcript (plain tail) ---\n{plain}");
+    for kind in [
+        NodeEventKind::Notification,
+        NodeEventKind::Text,
+        NodeEventKind::Stderr,
+    ] {
+        println!("{kind:?} events: {:?}", events(rec, run_id, kind));
+    }
     println!(
-        "run {run_id}: {:?} in {:?}; node {:?}",
-        state.status,
-        t0.elapsed(),
-        state.nodes["ok"]
+        "run {run_id}: {:?}; node {:?}",
+        state.status, state.nodes["ok"]
     );
-    let words: Vec<&str> = hooks.lines().map(str::trim).collect();
-    assert!(words.contains(&"start"), "no start hook line");
-    assert!(words.contains(&"stop"), "no stop hook line");
     let replied_ok = plain
         .split('●')
         .skip(1)
         .any(|p| p.trim_start().to_lowercase().starts_with("ok"));
     assert!(replied_ok, "transcript has no '● ok' reply");
+    hooks.lines().map(|l| l.trim().to_string()).collect()
+}
+
+fn assert_submit_then_stop(words: &[String]) {
+    let at = |w: &str| words.iter().position(|x| x == w);
+    let (start, submit, stop) = (at("start"), at("submit"), at("stop"));
+    assert!(start.is_some(), "no start hook line");
+    assert!(submit.is_some(), "no submit hook line");
+    assert!(stop > submit, "stop must follow submit: {words:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "runs the real claude CLI interactively (two short replies)"]
+async fn real_claude_delivery_waits_for_dialogs_and_is_confirmed() {
+    std::env::remove_var(ENV_CLAUDE_BIN);
+    let tmp = graph_dir(&one_node_graph());
+    let dir = tmp.path();
+    let app = trusted_app(dir);
+    let rec = Arc::new(Recorder::default());
+
+    let (run1, state) = run_once(&app, dir, &rec).await;
+    let words = report(dir, &run1, &rec, &state);
+    assert!(
+        !events(&rec, &run1, NodeEventKind::Notification).is_empty(),
+        "a fresh folder should show the trust dialog"
+    );
+    assert_submit_then_stop(&words);
     assert_eq!(state.nodes["ok"].status, NodeStatus::Succeeded);
-    app.cancel_run(&run_id).unwrap();
+
+    // Same folder, now trusted: no dialog.
+    let (run2, state) = run_once(&app, dir, &rec).await;
+    let words = report(dir, &run2, &rec, &state);
+    assert_eq!(
+        events(&rec, &run2, NodeEventKind::Notification),
+        Vec::<String>::new()
+    );
+    assert_submit_then_stop(&words);
+    assert_eq!(state.nodes["ok"].status, NodeStatus::Succeeded);
+
+    app.cancel_run(&run2).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     while app.terminals().live_count() > 0 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;

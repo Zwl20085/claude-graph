@@ -10,19 +10,25 @@
 //! - [`hooks`]: `hooks.json` (`--settings`) and `hooks.log` polling.
 //! - [`pty`]: the portable-pty process, its reader thread and transcript.
 //! - [`screen`]: output as text (UTF-8, escapes, dialog detection).
-//! - [`node`]: one node inside a session (brief, typing, evaluation, files).
-//! - [`session`]: one session's state machine (`startup`: its first phase).
+//! - [`deliver`]: the readiness gate and the verified delivery of one message.
+//! - `port`: delivery on the live pty; follow-up messages.
+//! - [`node`]: one node inside a session (brief, evaluation, files).
+//! - [`session`]: one session's state machine (`startup`: its first phase,
+//!   `send`: one node).
 //! - [`run`]: the run loop (session slots, cancel, run.json).
 //! - [`api`]: the live-session registry and the command-level functions.
 
 pub mod api;
 pub mod components;
+pub mod deliver;
 pub mod hooks;
 pub mod message;
 pub mod node;
+mod port;
 pub mod pty;
 pub mod run;
 pub mod screen;
+mod send;
 pub mod session;
 mod startup;
 

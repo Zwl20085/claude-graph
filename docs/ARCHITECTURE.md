@@ -642,8 +642,8 @@ literal rule, which would make every `from` run fail). At most `max_parallel` se
 starting/running at once; a session that is `done` no longer counts (its process stays up).
 
 **One session** (`session.rs`, `startup.rs`, `node.rs`):
-1. `runs/<run>/sessions/<sid>/hooks.json` (SessionStart/Stop/Notification hooks that
-   `echo start|stop|notify>> "<abs>/hooks.log"`, forward slashes), `session.json`
+1. `runs/<run>/sessions/<sid>/hooks.json` (SessionStart/UserPromptSubmit/Stop/Notification
+   hooks that `echo start|submit|stop|notify>> "<abs>/hooks.log"`, forward slashes), `session.json`
    `{ sid, title, node_ids, pid, status, started_at, finished_at }`, `transcript.log`
    (raw pty output, append).
 2. The backend opens (creates or focuses) the window `term-<run>-<sid>`, url
@@ -663,16 +663,19 @@ starting/running at once; a session that is `done` no longer counts (its process
    SessionStart: 3 s of pty quiet after the first output. Timeout 60 s → session `failed`,
    reason "Claude Code did not start: <transcript tail>". **Dialogs:** a fresh folder makes
    Claude Code show its workspace-trust dialog (default choice "No, exit") before any hook
-   runs, and a project MCP server may show another one after `start`. The reader counts
-   dialog markers in the output ("Enter to confirm", "do you trust", "trust this folder");
-   while one is open (no keystroke from the window since) the timeout and the quiet fallback
-   pause, a `notification` node event asks the user to answer in the window, and the first
-   message waits. After start the session waits for 1 s of quiet (max 5 s) before typing.
-5. Per node: status `running`, `nodes/<id>/brief.md` (the brief without "## How to finish";
-   upstream inputs carry this run's status or "not run in this run", no result.md) copied to
-   `runs/<run>/<id>/prompt.md`; explicit model → `/model <m>\r` + 700 ms; the message
-   (below) + `\r`; a `text` node event "sent node <id> to window <title>"; then wait for a
-   new `stop` line (no timeout; `notify` lines become `notification` events). Required
+   runs, and a project MCP server may show another one after `start`. While the screen
+   shows a dialog (see **Delivery**, "Screen") the timeout and the quiet fallback pause and
+   a `notification` node event "Claude Code is asking something in the window <title>;
+   answer it there" asks the user to answer it (once per dialog).
+5. Per node: the node stays `queued`; node event `text` "delivering message…";
+   `nodes/<id>/brief.md` (the brief without "## How to finish"; upstream inputs carry this
+   run's status or "not run in this run", no result.md) copied to `runs/<run>/<id>/prompt.md`;
+   explicit model → `/model <m>` delivered as a slash command; then the message (below)
+   delivered as a prompt (**Delivery**). The node becomes `running` (its `started_at`) only
+   when the `submit` hook line arrives; a `text` event "sent node <id> to window <title>";
+   then wait for a new `stop` line (no timeout; `notify` lines become `notification`
+   events). Not submitted after 3 cycles → `failed` "could not submit the message after 3
+   attempts; see the window" (the session goes on unless `stop_on_failure`). Required
    deliverables present and written since node start − 2 s → `succeeded`, else `failed`
    "deliverables missing: a, b". `stop_on_failure`: the rest of that session is `skipped`
    ("stopped after <id>"). Per node `runs/<run>/<id>/summary.json` = `{ session, started_at,
@@ -685,10 +688,53 @@ starting/running at once; a session that is `done` no longer counts (its process
 
 **The message** (`message.rs`): prompt-mode node, one line, ≤ 2000 chars → the prompt
 verbatim (control chars → spaces). Prompt-mode node with several lines, ≤ 8000 chars → one
-bracketed paste `ESC[200~…ESC[201~`, 300 ms, then `\r` (verified with the real CLI 2.1.319:
-a two-line paste was submitted as one prompt, one Stop). Otherwise:
+bracketed paste `ESC[200~…ESC[201~` (verified with the real CLI 2.1.319: a two-line paste
+followed by Enter was submitted as one prompt, one Stop). Otherwise:
 `Node "<title>" (<id>): read the brief at <abs brief.md> and do it; write all outputs to
 <abs deliverables dir>.`
+
+**Delivery** (`deliver.rs`: a state machine over a `Port` trait, unit-tested in
+`deliver_tests.rs` against a simulated CLI; `port.rs`: the `Port` on the live pty and
+hooks.log; `send.rs`: one node). Added 2026-11-07 after a real trial typed the message
+while the trust and MCP dialogs were up (text swallowed, or left in the box unsubmitted).
+
+- *Screen* (`screen.rs`): the last 60 lines (≤ 64 KiB) of the output, escapes removed,
+  ASCII whitespace runs collapsed, lowercase. Dialog markers: "accessing workspace",
+  "quick safety check", "trust this folder", "do you trust", "new mcp server",
+  "enter to confirm", "esc to" (but not "esc to interrupt", the busy line). Idle markers:
+  Claude Code's empty input box, the prompt glyph followed by a no-break space (`❯` U+276F
+  + U+00A0, or `>` + U+00A0 in the app's console), and "? for shortcuts". A dialog is
+  open when its marker comes after the last idle marker; the screen is idle when an idle
+  marker comes after the last dialog marker.
+- *Gate* (before every typing cycle): output quiet ≥ 1 s and the screen idle, or quiet
+  ≥ 5 s and no dialog (box not recognised). While a dialog is open: a `notification`
+  event once per dialog (announced after 500 ms of quiet; a new one when dialog markers
+  are drawn after the last announcement; the mark is shared by the start phase and the
+  gate of a session), wait without timeout, never type.
+- *Cycle* (3 for a prompt, 2 for a slash command): gate → (cycles 2+: Ctrl+U × (2 × lines
+  + 2), 300 ms, event "retyping (cycle N)") → write the text (event "typed" in cycle 1)
+  → 400 ms → `\r` written separately → up to 4 s for the confirmation. None: while the
+  first 30 chars of the message (normalized) show in the output written since typing,
+  after its last empty box, and no dialog is open, press Enter again (event "enter again
+  (N)", N = 2..4, 1.5 s apart); otherwise the next cycle. Confirmation: a prompt needs the
+  `submit` hook line (event "submitted"); `/model <m>` fires no hook, so it needs
+  "set model" or the model name in the output since typing, minus the echo of the typed
+  command (events prefixed "/model <m>: …", "confirmed"; not confirmed after 2 cycles →
+  `stderr` event "warning: Claude Code did not confirm /model <m>; continuing").
+- *Clear key*: Ctrl+U (0x15) deletes the box line up to the cursor ("Ctrl+Y to paste
+  deleted text" hint, no other effect; on an empty box nothing). Esc only shows "Esc again
+  to clear" and a second Esc on an empty box opens the rewind menu, so it is not used.
+- *Exclusion*: a session holds a typing lock (`SessionShared::typing`) for the whole
+  delivery, so a node message and a follow-up never interleave. Hook lines read after the
+  `submit` line in the same poll are handed back to the node's Stop wait.
+- *Follow-ups* (`send_message` in terminal mode): the same procedure as a prompt, in a
+  background task (the command returns at once), events on the addressed node; not
+  submitted → `stderr` event with the failure text, the node's status is unchanged.
+- *Fake CLI switches* (`scripts/fake-claude.mjs`, interactive mode; also read from
+  `fake-claude-args.txt` in its cwd so tests in one process can differ):
+  `--fake-swallow-first`, `--fake-drop-enter`, `--fake-dialog-ms=<n>`; the fake draws
+  `>` + U+00A0 as its box, "? for shortcuts", and fires UserPromptSubmit on acceptance.
+  `tests/e2e_delivery.rs` covers recovery from each and the queued-while-dialog run.
 
 **Run loop** (`run.rs`): RunState gets `mode: "terminal"` and `sessions`. The run is
 `cancelled` after `cancel_run`, else `failed` if any node is failed/blocked/skipped/cancelled
@@ -696,8 +742,9 @@ a two-line paste was submitted as one prompt, one Stop). Otherwise:
 (done/failed/cancelled). The loop is registered like a headless run (one active run per
 graph folder, `cancel_run`, `cancel_node`, `send_message`), but the sessions live in
 `AppState::terminals()` until app exit: `cancel_run` on a finished terminal run kills its
-live sessions; `cancel_node` kills the node's session; `send_message` types the text + Enter
-into the node's session (or `not_found` "Session closed; rerun to talk"). A new terminal
+live sessions; `cancel_node` kills the node's session; `send_message` delivers the text
+(one line) into the node's session with the delivery procedure, in the background (or
+`not_found` "Session closed; rerun to talk"). A new terminal
 run of a graph first kills the live sessions of its earlier runs (node event `text`
 "closed sessions of run <old id>" on the new run). Closing a session window does nothing
 (the pty stays alive; reopen it from the main window). App exit kills every session

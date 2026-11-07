@@ -1,13 +1,37 @@
 //! Terminal output as text: UTF-8 across chunk borders, escape sequences
-//! removed, and the dialogs Claude Code shows before it accepts input.
+//! removed, and [`Screen`]: what the end of the output shows (a dialog that
+//! waits for the user, Claude Code's empty input box, the text typed into it).
 
 use std::sync::OnceLock;
 
 use regex::Regex;
 
-/// Screen text (lowercase, escapes removed) of a dialog that waits for the user.
-pub const DIALOG_MARKERS: [&str; 3] = ["enter to confirm", "do you trust", "trust this folder"];
-const SCAN_TAIL: usize = 64;
+/// Screen text (lowercase, escapes removed) of a dialog that waits for the
+/// user: Claude Code's workspace-trust and new-MCP-server dialogs and their
+/// "Enter to confirm · Esc to cancel" footer.
+pub const DIALOG_MARKERS: [&str; 7] = [
+    "accessing workspace",
+    "quick safety check",
+    "trust this folder",
+    "do you trust",
+    "new mcp server",
+    "enter to confirm",
+    "esc to",
+];
+/// "esc to interrupt" (shown while Claude Code works) is not a dialog.
+const ESC_TO: &str = "esc to";
+const NOT_A_DIALOG_AFTER_ESC_TO: &str = " interrupt";
+/// Claude Code's empty input box: the prompt glyph (`❯`, or `>` in some
+/// consoles) followed by a no-break space (typed text follows a plain space,
+/// a dialog's choice cursor a cursor move); and the footer hint of CLIs that
+/// show it.
+pub const IDLE_MARKERS: [&str; 3] = ["\u{276f}\u{a0}", ">\u{a0}", "? for shortcuts"];
+/// The screen is the last this many lines of output …
+pub const SCREEN_LINES: usize = 60;
+/// … and at most this many bytes.
+pub const SCREEN_BYTES: usize = 64 * 1024;
+/// Chars of a message that must show in the input box to count as typed.
+pub const VISIBLE_PREFIX: usize = 30;
 
 /// `pending` + `chunk` as text; an incomplete trailing UTF-8 sequence stays in
 /// `pending`, invalid bytes become U+FFFD.
@@ -61,37 +85,124 @@ fn escapes() -> &'static Regex {
     })
 }
 
-/// Number of [`DIALOG_MARKERS`] that end inside `text`, which follows the
-/// screen text in `tail` (updated to the last few chars).
-pub fn count_dialogs(tail: &mut String, text: &str) -> u64 {
+/// Lowercase text with escapes removed and every run of ASCII whitespace or
+/// control characters as one space. A no-break space stays: it marks the
+/// empty input box.
+pub fn normalize(text: &str) -> String {
     let plain = escapes().replace_all(text, " ");
-    let plain: String = plain
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    if plain.is_empty() {
-        return 0;
+    let mut out = String::with_capacity(plain.len());
+    let mut gap = false;
+    for c in plain.chars() {
+        if c.is_ascii_whitespace() || c.is_control() {
+            gap = true;
+            continue;
+        }
+        if gap && !out.is_empty() {
+            out.push(' ');
+        }
+        gap = false;
+        out.extend(c.to_lowercase());
     }
-    let joined = format!("{tail} {plain}");
-    let fresh_from = tail.len() + 1;
-    let found = DIALOG_MARKERS
-        .iter()
-        .flat_map(|m| joined.match_indices(m).map(move |(i, _)| i + m.len()))
-        .filter(|end| *end > fresh_from)
-        .count();
-    let start = joined
-        .char_indices()
-        .rev()
-        .nth(SCAN_TAIL)
-        .map_or(0, |(i, _)| i);
-    *tail = joined[start..].to_string();
-    u64::try_from(found).unwrap_or(u64::MAX)
+    out
+}
+
+/// The last [`SCREEN_LINES`] lines (at most [`SCREEN_BYTES`]) of `raw`.
+pub fn screen_tail(raw: &str) -> &str {
+    let mut start = raw.len().saturating_sub(SCREEN_BYTES);
+    while !raw.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = &raw[start..];
+    match tail.rmatch_indices('\n').nth(SCREEN_LINES - 1) {
+        Some((i, _)) => &tail[i + 1..],
+        None => tail,
+    }
+}
+
+/// What the end of the output shows, as normalized text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Screen {
+    text: String,
+}
+
+impl Screen {
+    /// The screen of the output `raw` (only its [`screen_tail`] counts).
+    pub fn of(raw: &str) -> Self {
+        Self::of_all(screen_tail(raw))
+    }
+
+    /// All of `raw` (e.g. the output written since a mark).
+    pub fn of_all(raw: &str) -> Self {
+        Self {
+            text: normalize(raw),
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// End of the last dialog marker.
+    fn last_dialog(&self) -> Option<usize> {
+        let t = &self.text;
+        DIALOG_MARKERS
+            .iter()
+            .flat_map(|m| t.match_indices(m).map(move |(i, _)| (*m, i + m.len())))
+            .filter(|(m, end)| *m != ESC_TO || !t[*end..].starts_with(NOT_A_DIALOG_AFTER_ESC_TO))
+            .map(|(_, end)| end)
+            .max()
+    }
+
+    /// Start of the last idle marker.
+    fn last_idle(&self) -> Option<usize> {
+        IDLE_MARKERS.iter().filter_map(|m| self.text.rfind(m)).max()
+    }
+
+    /// Any dialog marker on screen (open or not).
+    pub fn has_dialog(&self) -> bool {
+        self.last_dialog().is_some()
+    }
+
+    /// A dialog waits for the user: its marker comes after the last idle marker.
+    pub fn dialog_open(&self) -> bool {
+        match (self.last_dialog(), self.last_idle()) {
+            (Some(d), Some(i)) => d > i,
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    }
+
+    /// Claude Code's empty input box shows, after the last dialog.
+    pub fn idle(&self) -> bool {
+        self.last_idle().is_some() && !self.dialog_open()
+    }
+
+    /// The first [`VISIBLE_PREFIX`] chars of `message` (normalized) show after
+    /// the last empty input box, or anywhere when no box is on screen.
+    pub fn input_shows(&self, message: &str) -> bool {
+        let want: String = normalize(message).chars().take(VISIBLE_PREFIX).collect();
+        let want = want.trim();
+        if want.is_empty() {
+            return false;
+        }
+        let from = self.last_idle().unwrap_or(0);
+        self.text[from..].contains(want)
+    }
+
+    /// `needle` (lowercase) is on screen.
+    pub fn contains(&self, needle: &str) -> bool {
+        self.text.contains(needle)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Excerpts of real Claude Code 2.1.319 output (ConPTY, Windows 11).
+    const TRUST: &str = "\x1b[1m\x1b[3;2HAccessing\x1b[1Cworkspace:\x1b[m\x1b[7;2HQuick\x1b[1Csafety\x1b[1Ccheck:\x1b[15;2H\u{276f}\x1b[1CNo,\x1b[1Cexit\x1b[m\x1b[16;4HYes,\x1b[1CI\x1b[1Ctrust\x1b[1Cthis\x1b[1Cfolder\x1b[18;2HEnter\x1b[1Cto\x1b[1Cconfirm\x1b[1C\u{b7}\x1b[1CEsc\x1b[1Cto\x1b[1Ccancel\x1b[m";
+    const MCP: &str = "\x1b[3;3HNew\x1b[1CMCP\x1b[1Cserver\x1b[1Cfound\x1b[10;3H>\x1b[1CContinue\x1b[1Cwithout\x1b[12;3HEnter\x1b[1Cto\x1b[1Cconfirm";
+    const IDLE: &str = "\x1b[2;1H\u{2500}\u{2500}\x1b[m>\u{a0}\x1b[2mTry \"how does <filepath> work?\"\x1b[22m\x1b[K\r\n  \u{23f5}\u{23f5} auto mode on (shift+tab to cycle)";
 
     #[test]
     fn utf8_split_across_chunks_is_held_back() {
@@ -105,16 +216,47 @@ mod tests {
     }
 
     #[test]
-    fn dialogs_are_counted_through_escapes_and_chunk_borders() {
-        let mut tail = String::new();
-        let screen = "\x1b[1mQuick\x1b[1Csafety\x1b[1Ccheck\x1b[m ❯ No, exit  Yes, I \x1b[1Ctrust";
-        assert_eq!(count_dialogs(&mut tail, screen), 0);
-        assert_eq!(
-            count_dialogs(&mut tail, " this folder \x1b]0;t\x07 Enter to"),
-            1
+    fn real_dialogs_stay_open_until_the_empty_input_box_follows() {
+        assert!(Screen::of(TRUST).dialog_open());
+        assert!(!Screen::of(TRUST).idle());
+        assert!(Screen::of(&format!("{TRUST}\r\n{MCP}")).dialog_open());
+        let ready = Screen::of(&format!("{TRUST}{MCP}{IDLE}"));
+        assert!(!ready.dialog_open());
+        assert!(ready.idle());
+        assert!(Screen::of(&format!("{IDLE}{MCP}")).dialog_open());
+        assert!(!Screen::of("").idle() && !Screen::of("").dialog_open());
+        let busy = format!("{IDLE} \u{273b} Thinking\u{2026} (esc to interrupt)");
+        assert!(!Screen::of(&busy).dialog_open());
+        let fake = "Do you trust the files in this folder? Enter to confirm \u{b7} Esc to exit";
+        assert!(Screen::of(fake).dialog_open());
+        assert!(Screen::of(&format!("{fake}\r\n  ? for shortcuts")).idle());
+    }
+
+    #[test]
+    fn input_shows_text_typed_after_the_empty_box() {
+        let typed = format!(
+            "{IDLE}\x1b[20;3H\u{276f} \x1b[38;2;255;255;255mReply\x1b[1Cwith the single word ok and create\r\n  no files"
         );
-        assert_eq!(count_dialogs(&mut tail, "\x1b[1C confirm · Esc"), 1);
-        assert_eq!(count_dialogs(&mut tail, "> plain prompt"), 0);
+        let s = Screen::of(&typed);
+        assert!(s.input_shows("Reply with   the single\nword ok and create no files at all"));
+        assert!(!s.input_shows("Something else entirely"));
+        assert!(!s.input_shows("  "));
+        let cleared = Screen::of(&format!("{typed}{IDLE}"));
+        assert!(!cleared.input_shows("Reply with the single word ok"));
+        let model = Screen::of_all("/model opus\r\nSet model to opus");
+        assert!(model.contains("set model") && model.text().starts_with("/model"));
+    }
+
+    #[test]
+    fn screen_tail_keeps_the_last_lines() {
+        let raw = format!("{TRUST}{}{IDLE}", "x\r\n".repeat(SCREEN_LINES));
+        let tail = screen_tail(&raw);
+        assert!(!tail.contains("Accessing"));
+        assert!(tail.ends_with("(shift+tab to cycle)"));
+        assert!(Screen::of(&raw).idle());
+        let big = "\u{2500}".repeat(SCREEN_BYTES);
+        assert!(screen_tail(&big).len() <= SCREEN_BYTES);
+        assert_eq!(normalize("A\x1b[1Cb\r\n \u{a0}C\t"), "a b \u{a0}c");
     }
 
     #[test]

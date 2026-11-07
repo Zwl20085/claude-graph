@@ -1,6 +1,6 @@
 //! The start of a terminal session: folder, hooks.json, window, the pty
-//! process, waiting for Claude Code to start, and settling before the first
-//! message (see [`super::session`] for the rules).
+//! process and waiting for Claude Code to start (see [`super::session`] for
+//! the rules). Readiness for typing is [`super::deliver::gate`]'s job.
 
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -11,8 +11,9 @@ use crate::prompt::{display_dir, resolve_working_dir};
 use crate::runner::permission_flag;
 use crate::store::write_json;
 use crate::terminal::hooks::{hooks_json, Hook, HOOKS_FILE, HOOKS_LOG};
+use crate::terminal::port::Tick;
 use crate::terminal::pty::{Pty, PtySpec};
-use crate::terminal::session::{End, Session, Tick, POLL};
+use crate::terminal::session::{End, Session, POLL};
 use crate::terminal::{session_dir, window_label, DEFAULT_COLS, DEFAULT_ROWS, TRANSCRIPT_FILE};
 
 /// Markers of an enclosing Claude Code session: removed so the session
@@ -29,14 +30,11 @@ pub fn session_env(run_id: &str, sid: &str) -> Vec<(String, Option<String>)> {
 
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 const QUIET_START: Duration = Duration::from_secs(3);
-const SETTLE_QUIET: Duration = Duration::from_secs(1);
-const SETTLE_MAX: Duration = Duration::from_secs(5);
 
 impl Session {
     pub(super) async fn start(&mut self) -> Result<(), End> {
         self.spawn()?;
-        self.wait_started().await?;
-        self.settle().await
+        self.wait_started().await
     }
 
     fn spawn(&mut self) -> Result<(), End> {
@@ -126,21 +124,6 @@ impl Session {
             }
             if self.quiet_for(QUIET_START) {
                 return Ok(());
-            }
-        }
-    }
-
-    /// Wait until no dialog is open and the screen was quiet for a moment.
-    async fn settle(&mut self) -> Result<(), End> {
-        let mut waited = Duration::ZERO;
-        loop {
-            if !self.dialog_open() && (self.quiet_for(SETTLE_QUIET) || waited >= SETTLE_MAX) {
-                return Ok(());
-            }
-            match self.tick(POLL).await {
-                Tick::Killed => return Err(End::Cancelled),
-                Tick::Exited(code) => return Err(End::Exited(code)),
-                Tick::Poll => waited += POLL,
             }
         }
     }

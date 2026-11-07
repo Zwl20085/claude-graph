@@ -115,3 +115,4 @@ pub fn trusted_app(dir: &Path) -> AppState {
     app.trust_graph(&abs(dir)).expect("trust_graph");
     app
 }
+pub mod term;

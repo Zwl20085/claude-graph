@@ -187,9 +187,12 @@ impl TerminalLoop {
                 text,
                 reply,
             } => {
-                let result = self
-                    .terminals
-                    .type_message(&self.ctx.run_id, &node_id, &text);
+                let result = self.terminals.type_message(
+                    &self.ctx.run_id,
+                    &node_id,
+                    &text,
+                    self.ctx.emitter.clone(),
+                );
                 if reply.send(result).is_err() {
                     log::warn!("message to node {node_id}: the caller went away");
                 }

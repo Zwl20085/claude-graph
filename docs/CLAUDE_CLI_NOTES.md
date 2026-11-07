@@ -73,6 +73,33 @@ claude -p "<short instruction>" --output-format stream-json --verbose \
   CLI appends `stop` at the end of every reply (also `-p` turns); `SessionStart` appends
   `start` once at launch, `Notification` when it waits for the user. Forward slashes in the
   path work on Windows.
+- `UserPromptSubmit` runs when the CLI accepts a typed prompt, before the reply (the screen
+  shows "running UserPromptSubmit hook"); with `echo submit>> "<log>"` the hook prints
+  nothing, so nothing is added to the prompt. Verified 2026-11-07 (2.1.319): hooks.log reads
+  `start`, `submit`, `stop` for one prompt. A slash command (`/model haiku`) fires **no**
+  `submit`; the CLI answers on screen (the status line then shows the new model).
+- Screen markers (2.1.319, through ConPTY): the empty input box is the prompt glyph plus a
+  no-break space, `❯` U+276F + U+00A0 (`>` + U+00A0 when started from the app), followed by
+  a dim placeholder (`Try "…"`). Typed text follows the glyph after a plain space. A dialog's
+  choice cursor is the glyph followed by a cursor move (`ESC[1C`), which becomes a space
+  once escapes are stripped. ConPTY writes most spaces as `ESC[1C`. The footer in auto mode
+  reads "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"; "? for shortcuts" did not
+  appear. While working: "<verb>… (esc to interrupt)" / "(running Stop hooks… 3/5)".
+- Dialog texts (2.1.319): "Accessing workspace: <dir>" / "Quick safety check: Is this a
+  project you created or one you trust? …" / "❯ No, exit" / "Yes, I trust this folder" /
+  "Enter to confirm · Esc to cancel"; then "New MCP server found in this project: <name>" /
+  "Use this MCP server" / "Use this and all future MCP servers in this project" /
+  "❯ Continue without using this MCP server" / "Enter to confirm · Esc to cancel". After the
+  folder is trusted (and the MCP choice made) a second session in it shows neither.
+- Clearing the input box: **Ctrl+U** (0x15) deletes back to the start of the current box
+  line and shows "Ctrl+Y to paste deleted text"; on an empty box it does nothing. A
+  three-line paste needed more presses (one per line and one per line break), so the app
+  sends 2 × lines + 2. **Esc** does not clear: the first shows "Esc again to clear"; a
+  double Esc on an empty box opens the rewind menu (side effect), so it is not used.
+- Enter can be lost: in the owner's trial a typed line starting with a slash command name
+  (`/model-tiering Hi, …`) stayed in the box after `\r` (autocomplete took the key). The
+  app's delivery presses Enter again while the text still shows (docs/ARCHITECTURE.md,
+  Terminal mode, "Delivery").
 - Spawned in ConPTY (portable-pty 0.9), the CLI's console first sends `ESC[6n` (cursor
   position query) and waits for the answer; the app answers `ESC[1;1R`.
 - In a folder never trusted before, the workspace-trust dialog ("Quick safety check: Is this
@@ -88,4 +115,6 @@ claude -p "<short instruction>" --output-format stream-json --verbose \
   is off — inherited CLAUDE_CODE_CHILD_SESSION marker"; the app therefore removes
   `CLAUDE_CODE_CHILD_SESSION` and `CLAUDECODE` from the session process's environment.
 - The real smoke test: `cargo test --test real_terminal -- --ignored --nocapture`
-  (one short reply, about one cent).
+  (two short replies with `/model haiku`, about one to two cents): run 1 in a fresh folder
+  leaves the trust dialog alone for 5 s (node `queued`, notification, nothing typed), then
+  answers it like a user; run 2 in the same folder has no dialog.

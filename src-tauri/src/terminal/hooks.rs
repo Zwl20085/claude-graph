@@ -1,8 +1,9 @@
 //! The session's `hooks.json` (passed with `--settings`) and `hooks.log`.
 //!
 //! Claude Code runs the hook commands, which append one word per event to
-//! `hooks.log`: `start` (SessionStart), `stop` (Stop, end of every reply) and
-//! `notify` (Notification: it waits for the user). [`HookLog::poll`] returns
+//! `hooks.log`: `start` (SessionStart), `submit` (UserPromptSubmit: a typed
+//! prompt was accepted), `stop` (Stop, end of every reply) and `notify`
+//! (Notification: it waits for the user). [`HookLog::poll`] returns
 //! the lines added since the last poll.
 
 use std::path::{Path, PathBuf};
@@ -20,6 +21,7 @@ pub const HOOKS_LOG: &str = "hooks.log";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hook {
     Start,
+    Submit,
     Stop,
     Notify,
 }
@@ -28,6 +30,7 @@ impl Hook {
     fn parse(line: &str) -> Option<Hook> {
         match line.trim() {
             "start" => Some(Hook::Start),
+            "submit" => Some(Hook::Submit),
             "stop" => Some(Hook::Stop),
             "notify" => Some(Hook::Notify),
             _ => None,
@@ -46,6 +49,7 @@ pub fn hooks_json(log: &Path) -> Value {
     let log = display_dir(log);
     json!({ "hooks": {
         "SessionStart": echo("start", &log),
+        "UserPromptSubmit": echo("submit", &log),
         "Stop": echo("stop", &log),
         "Notification": echo("notify", &log),
     }})
@@ -61,6 +65,15 @@ pub struct HookLog {
 impl HookLog {
     pub fn new(path: PathBuf) -> Self {
         Self { path, seen: 0 }
+    }
+
+    /// A reader that skips the lines already in the file.
+    pub fn at_end(path: PathBuf) -> Self {
+        let mut log = Self::new(path);
+        if let Err(e) = log.poll() {
+            log::warn!("reading {}: {e}", log.path.display());
+        }
+        log
     }
 
     /// Hooks appended since the last call. A missing file has no lines; a
@@ -94,6 +107,10 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("echo notify>> "));
+        assert_eq!(
+            v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            "echo submit>> \"/tmp/s1/hooks.log\""
+        );
         assert!(!cmd.contains('\\'));
     }
 
@@ -106,7 +123,11 @@ mod tests {
         std::fs::write(&path, "start\r\nstop \r\nst").unwrap();
         assert_eq!(log.poll().unwrap(), vec![Hook::Start, Hook::Stop]);
         assert!(log.poll().unwrap().is_empty());
-        std::fs::write(&path, "start\r\nstop \r\nstop\nnotify\nweird\n").unwrap();
-        assert_eq!(log.poll().unwrap(), vec![Hook::Stop, Hook::Notify]);
+        std::fs::write(&path, "start\r\nstop \r\nstop\nnotify\nweird\nsubmit\n").unwrap();
+        assert_eq!(
+            log.poll().unwrap(),
+            vec![Hook::Stop, Hook::Notify, Hook::Submit]
+        );
+        assert!(HookLog::at_end(path).poll().unwrap().is_empty());
     }
 }

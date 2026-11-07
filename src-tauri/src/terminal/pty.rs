@@ -3,7 +3,7 @@
 //!
 //! The reader thread appends every chunk to `transcript.log`, keeps the last
 //! [`REPLAY_CAP`] bytes in memory for `pty_replay`, emits `pty:data` to the
-//! session window, and notices blocking dialogs ([`crate::terminal::screen::DIALOG_MARKERS`]). ConPTY
+//! session window, and counts the bytes emitted (marks for [`Output::since`]). ConPTY
 //! asks the terminal for the cursor position (`ESC[6n`) once at start and
 //! waits for the answer; the reader answers it and drops it from the output,
 //! so the process starts even with no window attached.
@@ -16,7 +16,6 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -26,7 +25,7 @@ use tokio::sync::watch;
 use crate::contract::{AppError, AppResult, PtyData, PtyReplay};
 use crate::events::Emitter;
 use crate::job::Job;
-use crate::terminal::screen::{count_dialogs, take_utf8};
+use crate::terminal::screen::{take_utf8, Screen};
 
 /// Bytes of output kept in memory for `pty_replay`.
 pub const REPLAY_CAP: usize = 512 * 1024;
@@ -57,13 +56,10 @@ pub struct PtySpec {
 /// Output state shared by the reader thread and the session.
 #[derive(Default)]
 pub struct Output {
-    /// Text of the emitted chunks (last [`REPLAY_CAP`] bytes) and their count.
-    replay: Mutex<(String, u64)>,
+    /// Text of the emitted chunks (last [`REPLAY_CAP`] bytes), their count
+    /// and the number of bytes emitted in all.
+    replay: Mutex<(String, u64, u64)>,
     last: Mutex<Option<Instant>>,
-    /// Dialog markers seen so far.
-    dialogs: AtomicU64,
-    /// `dialogs` at the user's last keystroke.
-    answered: AtomicU64,
 }
 
 impl Output {
@@ -81,14 +77,25 @@ impl Output {
         *lock(&self.last)
     }
 
-    /// A dialog appeared after the user's last keystroke.
-    pub fn dialog_open(&self) -> bool {
-        self.dialogs.load(Ordering::SeqCst) > self.answered.load(Ordering::SeqCst)
+    /// What the end of the output shows now.
+    pub fn screen(&self) -> Screen {
+        Screen::of(&lock(&self.replay).0)
     }
 
-    fn user_typed(&self) {
-        let seen = self.dialogs.load(Ordering::SeqCst);
-        self.answered.store(seen, Ordering::SeqCst);
+    /// Bytes emitted so far, a mark for [`Output::since`].
+    pub fn mark(&self) -> u64 {
+        lock(&self.replay).2
+    }
+
+    /// Text emitted after `mark` (as much as the replay still holds).
+    pub fn since(&self, mark: u64) -> String {
+        let buf = lock(&self.replay);
+        let new = usize::try_from(buf.2.saturating_sub(mark)).unwrap_or(usize::MAX);
+        let mut start = buf.0.len().saturating_sub(new);
+        while !buf.0.is_char_boundary(start) {
+            start += 1;
+        }
+        buf.0[start..].to_string()
     }
 
     /// Note output activity.
@@ -100,6 +107,7 @@ impl Output {
     fn push(&self, text: &str) -> u64 {
         let mut buf = lock(&self.replay);
         buf.0.push_str(text);
+        buf.2 += text.len() as u64;
         if buf.0.len() > REPLAY_CAP {
             let mut cut = buf.0.len() - REPLAY_CAP;
             while !buf.0.is_char_boundary(cut) {
@@ -211,8 +219,8 @@ impl Pty {
         self.exit.clone()
     }
 
-    /// Write raw bytes. `user`: typed in the window (answers an open dialog).
-    pub fn write(&self, bytes: &[u8], user: bool) -> AppResult<()> {
+    /// Write raw bytes (keys) to the process.
+    pub fn write(&self, bytes: &[u8]) -> AppResult<()> {
         if self.exit_code().is_some() {
             return Err(AppError::new(
                 "not_found",
@@ -222,11 +230,7 @@ impl Pty {
         let mut w = lock(&self.writer);
         w.write_all(bytes)
             .and_then(|_| w.flush())
-            .map_err(|e| AppError::new("io", format!("writing to the terminal failed: {e}")))?;
-        if user {
-            self.output.user_typed();
-        }
-        Ok(())
+            .map_err(|e| AppError::new("io", format!("writing to the terminal failed: {e}")))
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> AppResult<()> {
@@ -298,7 +302,6 @@ fn read_loop(
     let mut buf = vec![0u8; READ_BUF];
     let mut pending: Vec<u8> = Vec::new();
     let mut answered_dsr = false;
-    let mut scan_tail = String::new();
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) => break,
@@ -327,10 +330,6 @@ fn read_loop(
         }
         output.touch();
         let text = take_utf8(&mut pending, &chunk);
-        let found = count_dialogs(&mut scan_tail, &text);
-        if found > 0 {
-            output.dialogs.fetch_add(found, Ordering::SeqCst);
-        }
         if !text.is_empty() {
             // Counted into the replay before it is emitted: a window that
             // replayed seq N drops live chunks up to N.
@@ -351,7 +350,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn output_keeps_the_last_bytes_and_tracks_dialogs() {
+    fn output_keeps_the_last_bytes_and_marks() {
         let out = Output::default();
         assert_eq!(out.push(&"a".repeat(REPLAY_CAP)), 1);
         assert_eq!(out.push("✻z"), 2);
@@ -362,10 +361,14 @@ mod tests {
         assert!(out.last_output().is_none());
         out.touch();
         assert!(out.last_output().is_some());
-        assert!(!out.dialog_open());
-        out.dialogs.fetch_add(1, Ordering::SeqCst);
-        assert!(out.dialog_open());
-        out.user_typed();
-        assert!(!out.dialog_open());
+        let mark = out.mark();
+        assert_eq!(mark, (REPLAY_CAP + "✻z".len()) as u64);
+        assert_eq!(out.since(mark), "");
+        out.push("Do you trust this? Enter to confirm");
+        assert_eq!(out.since(mark), "Do you trust this? Enter to confirm");
+        assert!(out.screen().dialog_open());
+        out.push("\r\n>\u{a0}");
+        assert!(out.screen().idle());
+        assert_eq!(out.since(0).len(), out.replay().text.len());
     }
 }

@@ -36,16 +36,26 @@
 // interactive Claude Code in a pty. It reads the `--settings` JSON the way the
 // CLI does and runs its hook commands through the platform shell
 // (`child_process.execSync`: cmd.exe /d /s /c on Windows, /bin/sh -c elsewhere):
-// SessionStart once at launch (unless `--fake-no-start`), Stop after every
-// handled prompt, Notification for a prompt containing FAKE_NOTIFY. It prints
-// a banner and a fake `> ` prompt, then reads stdin line by line. A bracketed
-// paste (ESC[200~ ... ESC[201~) is one prompt. `/model <m>` prints a line and
-// fires no hook. For any other prompt it appends the prompt to
+// SessionStart once at launch (unless `--fake-no-start`), UserPromptSubmit when
+// it accepts a prompt, Stop after every handled prompt, Notification for a
+// prompt containing FAKE_NOTIFY. It prints a banner, a "? for shortcuts" hint
+// and Claude Code's empty input box (`>` + no-break space), then reads stdin
+// line by line. A bracketed paste (ESC[200~ ... ESC[201~) is one prompt.
+// Ctrl+U (0x15) in a line drops what came before it (clears the box).
+// `/model <m>` prints "Set model to <m>" and fires no hook. For any other
+// prompt it appends the prompt to
 // `fake-received.log` next to the settings file (newlines as a literal \n),
 // and if the prompt names a brief (`read the brief at <path>`) writes every
 // deliverable of that brief, unless the brief or prompt contains FAKE_FAIL.
 // Markers in the prompt or brief: FAKE_SLEEP_MS=<n> waits n ms before
 // answering; FAKE_EXIT=<code> exits with that code instead of answering.
+// Delivery failure switches (interactive mode; also read, one per line or
+// space-separated, from `fake-claude-args.txt` in the cwd, so tests sharing
+// one process environment can differ): `--fake-swallow-first` ignores the
+// first input line entirely; `--fake-drop-enter` needs two Enters per line
+// (the first leaves the text in the box); `--fake-dialog-ms=<n>` shows a
+// "Do you trust the files in this folder? Enter to confirm · Esc to exit"
+// dialog for n ms after SessionStart, discarding input, then the input box.
 import { execSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -333,8 +343,29 @@ async function scheduler(prompt, sessionId, started) {
   });
 }
 
+/** argv plus the switches in `fake-claude-args.txt` in the cwd. */
+function interactiveArgs() {
+  let extra = [];
+  try {
+    extra = readFileSync(join(process.cwd(), 'fake-claude-args.txt'), 'utf8').split(/\s+/).filter(Boolean);
+  } catch {
+    // no file: argv only
+  }
+  return [...process.argv, ...extra];
+}
+
+const BOX = '\n>\u00a0';
+
 /** Interactive mode: see the header comment. */
 async function interactive() {
+  const args = interactiveArgs();
+  const dialogMs = Number(args.find((a) => a.startsWith('--fake-dialog-ms='))?.split('=')[1] ?? 0) || 0;
+  const state = {
+    swallow: args.includes('--fake-swallow-first'),
+    dropEnter: args.includes('--fake-drop-enter'),
+    held: null,
+    dialogUntil: 0,
+  };
   const settingsPath = argValue('--settings');
   const settings = settingsPath ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {};
   const runHooks = (event) => {
@@ -346,15 +377,23 @@ async function interactive() {
   };
   const received = join(settingsPath ? dirname(settingsPath) : process.cwd(), 'fake-received.log');
   const out = (text) => process.stdout.write(text.replace(/\r?\n/g, '\r\n'));
-  out(`fake-claude ${VERSION} interactive (cwd ${process.cwd()})\n`);
+  out(`fake-claude ${VERSION} interactive (cwd ${process.cwd()})\n  ? for shortcuts`);
   if (!process.argv.includes('--fake-no-start')) runHooks('SessionStart');
-  out('> ');
+  if (dialogMs > 0) {
+    state.dialogUntil = Date.now() + dialogMs;
+    out('\n\nDo you trust the files in this folder?\n\n \u276f Yes, proceed\n   No, exit\n\nEnter to confirm \u00b7 Esc to exit\n');
+    setTimeout(() => out(BOX), dialogMs);
+  } else {
+    out(BOX);
+  }
   const PASTE_START = '\u001b[200~';
   const PASTE_END = '\u001b[201~';
   let paste = null;
   const rl = createInterface({ input: process.stdin, terminal: false, crlfDelay: Infinity });
   for await (const raw of rl) {
     let line = raw.replace(/\r$/, '');
+    if (Date.now() < state.dialogUntil) continue; // the dialog eats input
+    if (line.includes('\u0015')) line = line.slice(line.lastIndexOf('\u0015') + 1);
     if (paste === null && line.includes(PASTE_START)) {
       paste = [];
       line = line.replace(PASTE_START, '');
@@ -366,21 +405,40 @@ async function interactive() {
       line = paste.join('\n');
       paste = null;
     }
-    await answer(line.trim(), runHooks, received, out);
+    const text = accept(line.trim(), state, out);
+    if (text !== null) await answer(text, runHooks, received, out);
   }
   return 0;
 }
 
-async function answer(text, runHooks, received, out) {
-  if (!text) {
-    out('> ');
-    return;
+/** The prompt an input line submits, or null (swallowed, held, empty). */
+function accept(text, state, out) {
+  if (state.swallow) {
+    state.swallow = false;
+    out(BOX);
+    return null;
   }
+  if (state.dropEnter && text) {
+    state.held = text;
+    out(`${BOX}${text.split('\n')[0]}`);
+    return null;
+  }
+  const held = state.held;
+  state.held = null;
+  if (!text && held === null) {
+    out(BOX);
+    return null;
+  }
+  return text || held;
+}
+
+async function answer(text, runHooks, received, out) {
   const model = text.match(/^\/model\s+(\S+)/);
   if (model) {
-    out(`Set model to ${model[1]}\n> `);
+    out(`\nSet model to ${model[1]}${BOX}`);
     return;
   }
+  runHooks('UserPromptSubmit');
   appendFileSync(received, `${text.replace(/\n/g, '\\n')}\n`, 'utf8');
   const briefPath = text.match(/read the brief at (.+?brief\.md)/)?.[1];
   const brief = briefPath ? readFileSync(briefPath, 'utf8') : '';
@@ -401,9 +459,9 @@ async function answer(text, runHooks, received, out) {
       written += 1;
     }
   }
-  out(`you said: ${text.split('\n')[0]}\nok (${written} file(s) written)\n`);
+  out(`\nyou said: ${text.split('\n')[0]}\nok (${written} file(s) written)\n`);
   runHooks('Stop');
-  out('> ');
+  out(BOX);
 }
 
 main().then(

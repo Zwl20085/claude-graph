@@ -51,7 +51,7 @@ impl Typed {
 }
 
 /// Control characters become spaces; tabs too (Tab is a key in the TUI).
-fn one_line(s: &str) -> String {
+pub(crate) fn one_line(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()

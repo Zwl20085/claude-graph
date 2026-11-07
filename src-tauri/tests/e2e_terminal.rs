@@ -4,99 +4,16 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use claude_graph_lib::contract::{
     Graph, NodeEventKind, NodeStatus, RunMode, RunState, RunStatus, RunTarget, SessionStatus,
 };
-use claude_graph_lib::run_api::AppState;
 use claude_graph_lib::run_store;
 use claude_graph_lib::terminal::api as term;
+use common::term::*;
 use common::*;
 use serde_json::{json, Value};
-
-/// `nodes`: JSON node objects (id, prompt, position, …); `edges`: (from, to).
-fn graph(nodes: Vec<Value>, edges: &[(&str, &str)], settings: Value) -> Graph {
-    serde_json::from_value(json!({
-        "version": 1,
-        "name": "term",
-        "settings": settings,
-        "nodes": nodes,
-        "edges": edges.iter().enumerate().map(|(i, (f, t))| json!({
-            "id": format!("e{i}"), "from": f, "to": t
-        })).collect::<Vec<_>>(),
-    }))
-    .unwrap()
-}
-
-fn node(id: &str, x: f64, y: f64, extra: Value) -> Value {
-    let mut v = json!({ "id": id, "title": format!("T {id}"), "position": { "x": x, "y": y } });
-    if let (Value::Object(m), Value::Object(e)) = (&mut v, extra) {
-        m.extend(e);
-    }
-    v
-}
-
-fn settings(max_parallel: u32, stop_on_failure: bool) -> Value {
-    json!({ "max_parallel": max_parallel, "stop_on_failure": stop_on_failure,
-            "default_permission_mode": "claude_settings" })
-}
-
-async fn run(
-    app: &AppState,
-    dir: &Path,
-    target: RunTarget,
-    rec: &Arc<Recorder>,
-) -> (String, RunState) {
-    let (run_id, join) = app.start_by_mode(dir, target, rec.clone()).unwrap();
-    (run_id, finish(join).await)
-}
-
-fn received(dir: &Path, run_id: &str, sid: &str) -> Vec<String> {
-    let path = dir
-        .join("runs")
-        .join(run_id)
-        .join("sessions")
-        .join(sid)
-        .join("fake-received.log");
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect()
-}
-
-async fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
-    let deadline = Instant::now() + TIMEOUT;
-    while !f() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-fn process_alive(pid: u32) -> bool {
-    if cfg!(windows) {
-        let out = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
-    } else {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .unwrap()
-            .success()
-    }
-}
-
-/// Kill the run's sessions and wait for their processes to be gone.
-async fn kill_sessions(app: &AppState, run_id: &str) {
-    app.cancel_run(run_id).unwrap();
-    wait_until("session tasks to end", || app.terminals().live_count() == 0).await;
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn terminal_run_types_messages_in_order_and_keeps_sessions_alive() {

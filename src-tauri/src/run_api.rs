@@ -485,8 +485,9 @@ impl AppState {
         }
         let graph_dir = abs(dir);
         if self.terminals.has_run(run_id) {
-            // Terminal mode: type the message into the node's session.
-            self.terminals.type_message(run_id, node_id, text)?;
+            // Terminal mode: deliver the message into the node's session.
+            self.terminals
+                .type_message(run_id, node_id, text, emitter.clone())?;
             return Ok(None);
         }
         let graph = read_graph(&graph_dir)?;
