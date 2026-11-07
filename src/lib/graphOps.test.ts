@@ -107,7 +107,7 @@ describe('renameNode', () => {
 
   it.each([
     ['taken', 'design', /already used/],
-    ['bad slug', 'Bad Id', /slug/],
+    ['bad id', 'Bad Id', /letters, digits/],
   ])('refuses %s', (_n, newId, pattern) => {
     const r = ops.renameNode(load(), 'survey', newId);
     expect(r.ok).toBe(false);

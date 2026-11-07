@@ -3,43 +3,49 @@ import { useEffect, useRef, useState } from 'react';
 import { Send } from 'lucide-react';
 import type { NodeMessage } from '../types/contract';
 import { api } from '../lib/api';
-import { composerState, displayMessages, pruneLocal, type LocalMessage } from '../lib/messages';
+import {
+  composerState,
+  createMessageHistory,
+  displayMessages,
+  pruneLocal,
+  type LocalMessage,
+  type MessageHistory,
+} from '../lib/messages';
 import { useGraphStore } from '../store/graphStore';
 import { errorMessage } from '../store/runHelpers';
 import { btnCls, inputCls } from './ui';
 
-/** History from list_messages, extended live by user_message events; refetched on result events. */
+/** History from list_messages merged with live user_message events (M5); refetched on result events. */
 function useHistory(dir: string | null, runId: string | null, nodeId: string) {
   const [history, setHistory] = useState<NodeMessage[]>([]);
-  const [reload, setReload] = useState(0);
   const lines = useGraphStore((s) => (s.eventsRunId === runId ? s.events[nodeId] : undefined));
+  const controller = useRef<MessageHistory | null>(null);
   const seen = useRef(0);
 
   useEffect(() => {
+    setHistory([]);
     if (!dir || !runId) {
-      setHistory([]);
+      controller.current = null;
       return;
     }
-    let live = true;
-    api
-      .listMessages(dir, runId, nodeId)
-      .then((h) => live && setHistory(h))
-      .catch((err) => {
-        if (live) setHistory([]);
-        console.warn('list_messages failed', err);
-      });
-    return () => {
-      live = false;
-    };
-  }, [dir, runId, nodeId, reload]);
+    const h = createMessageHistory(
+      () => api.listMessages(dir, runId, nodeId),
+      setHistory,
+      (err) => console.warn('list_messages failed', err),
+    );
+    controller.current = h;
+    void h.refresh();
+    return () => h.dispose();
+  }, [dir, runId, nodeId]);
 
   useEffect(() => {
     const fresh = (lines ?? []).filter((l) => l.seq > seen.current);
     if (fresh.length === 0) return;
     seen.current = fresh[fresh.length - 1]?.seq ?? seen.current;
-    const users = fresh.filter((l) => l.kind === 'user_message').map((l): NodeMessage => ({ role: 'user', text: l.text, ts: l.ts }));
-    if (users.length > 0) setHistory((h) => [...h, ...users]);
-    if (fresh.some((l) => l.kind === 'result')) setReload((n) => n + 1);
+    const h = controller.current;
+    if (!h) return;
+    h.addLive(fresh.filter((l) => l.kind === 'user_message').map((l): NodeMessage => ({ role: 'user', text: l.text, ts: l.ts })));
+    if (fresh.some((l) => l.kind === 'result')) void h.refresh();
   }, [lines]);
 
   return history;
@@ -50,6 +56,7 @@ export function MessagesTab({ nodeId }: { nodeId: string }) {
   const runId = useGraphStore((s) => s.runState?.run_id ?? null);
   const status = useGraphStore((s) => s.runState?.nodes[nodeId]?.status ?? null);
   const pushToast = useGraphStore((s) => s.pushToast);
+  const ensureTrusted = useGraphStore((s) => s.ensureTrusted);
   const history = useHistory(dir, runId, nodeId);
   const [local, setLocal] = useState<LocalMessage[]>([]);
   const [draft, setDraft] = useState('');
@@ -66,6 +73,8 @@ export function MessagesTab({ nodeId }: { nodeId: string }) {
   const send = async (): Promise<void> => {
     const text = draft.trim();
     if (!text || !dir || !runId || !composer.enabled) return;
+    // A follow-up resumes Claude with the graph's permissions: same trust gate as a run.
+    if (!(await ensureTrusted(dir))) return;
     const entry: LocalMessage = { text, ts: new Date().toISOString() };
     setLocal((l) => [...l, entry]);
     setDraft('');
@@ -100,6 +109,7 @@ export function MessagesTab({ nodeId }: { nodeId: string }) {
       {composer.hint && <p className="text-[11px] text-[#9a9a9a]">{composer.hint}</p>}
       <div className="flex gap-1">
         <textarea
+          aria-label="message to this node"
           className={`${inputCls} resize-none`}
           rows={3}
           disabled={!composer.enabled}

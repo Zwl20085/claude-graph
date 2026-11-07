@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use claude_graph_lib::contract::{MessageRole, NodeEventKind, NodeStatus, RunStatus, RunTarget};
-use claude_graph_lib::run_api::AppState;
 use claude_graph_lib::run_store;
 use common::*;
 
@@ -21,7 +20,7 @@ async fn message_to_running_node_is_drained_before_dependents_start() {
     graph.edges.retain(|e| e.to != "report");
     let tmp = graph_dir(&graph);
     let dir = tmp.path();
-    let app = AppState::default();
+    let app = trusted_app(dir);
     let recorder = Arc::new(Recorder::default());
 
     let (run_id, join) = app
@@ -109,7 +108,7 @@ async fn cancel_run_kills_running_nodes() {
     use_fake_claude("--fake-delay-ms 150");
     let tmp = graph_dir(&example_graph());
     let dir = tmp.path();
-    let app = AppState::default();
+    let app = trusted_app(dir);
     let recorder = Arc::new(Recorder::default());
     let (run_id, join) = app
         .start_run(dir, RunTarget::All, recorder.clone())
@@ -135,4 +134,36 @@ async fn cancel_run_kills_running_nodes() {
         );
     }
     assert_eq!(app.cancel_run(&run_id).unwrap_err().code, "not_found");
+}
+
+/// A follow-up to an old run must not start a second loop on a graph that
+/// already has an active run.
+#[tokio::test(flavor = "multi_thread")]
+async fn follow_up_to_old_run_is_refused_while_another_run_is_active() {
+    use_fake_claude("--fake-delay-ms 150");
+    let mut graph = example_graph();
+    graph.nodes.retain(|n| n.id == "survey");
+    graph.edges.clear();
+    let tmp = graph_dir(&graph);
+    let dir = tmp.path();
+    let app = trusted_app(dir);
+    let recorder = Arc::new(Recorder::default());
+    let (old, join) = app
+        .start_run(dir, RunTarget::All, recorder.clone())
+        .unwrap();
+    assert_eq!(finish(join).await.status, RunStatus::Succeeded);
+    let (current, join) = app
+        .start_run(dir, RunTarget::All, recorder.clone())
+        .unwrap();
+    let err = app
+        .send_message(dir, &old, "survey", "more please", recorder.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "run_active");
+    app.cancel_run(&current).unwrap();
+    finish(join).await;
+    assert!(run_store::list_messages(dir, &old, "survey")
+        .unwrap()
+        .iter()
+        .all(|m| m.text != "more please"));
 }

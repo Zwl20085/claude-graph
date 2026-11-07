@@ -15,8 +15,10 @@ import {
   type OnSelectionChangeParams,
 } from '@xyflow/react';
 import {
+  committedPositions,
   flowPositions,
   graphToFlowEdges,
+  selectOnly,
   graphToFlowNodes,
   mergeFlowEdges,
   mergeFlowNodes,
@@ -36,6 +38,7 @@ const snap = (v: number): number => Math.round(v / GRID) * GRID;
 export function Canvas() {
   const graph = useGraphStore((s) => s.graph);
   const runState = useGraphStore((s) => s.runState);
+  const selectedNodeId = useGraphStore((s) => s.selectedNodeId);
   const { screenToFlowPosition } = useReactFlow();
   const [nodes, setNodes] = useState<BriefFlowNode[]>(() => (graph ? graphToFlowNodes(graph, runState) : []));
   const [edges, setEdges] = useState<WireFlowEdge[]>(() => (graph ? graphToFlowEdges(graph, runState) : []));
@@ -46,10 +49,15 @@ export function Canvas() {
     setEdges((prev) => mergeFlowEdges(graphToFlowEdges(graph, runState), prev));
   }, [graph, runState]);
 
-  const onNodesChange = useCallback(
-    (changes: NodeChange<BriefFlowNode>[]) => setNodes((ns) => applyNodeChanges(changes, ns)),
-    [],
-  );
+  // M2: RF selection follows the store; a programmatic selection deselects the others.
+  useEffect(() => setNodes((ns) => selectOnly(ns, selectedNodeId)), [selectedNodeId, graph]);
+
+  const onNodesChange = useCallback((changes: NodeChange<BriefFlowNode>[]) => {
+    setNodes((ns) => applyNodeChanges(changes, ns));
+    // M1: keyboard (arrow) moves and drag ends arrive as position changes with dragging === false.
+    const moved = committedPositions(changes);
+    if (Object.keys(moved).length > 0) graphStore().getState().moveNodes(moved);
+  }, []);
   const onEdgesChange = useCallback(
     (changes: EdgeChange<WireFlowEdge>[]) => setEdges((es) => applyEdgeChanges(changes, es)),
     [],
@@ -96,7 +104,7 @@ export function Canvas() {
         onDelete={onDelete}
         onSelectionChange={onSelectionChange}
         isValidConnection={(c) => c.source !== c.target}
-        deleteKeyCode={['Delete', 'Backspace']}
+        deleteKeyCode="Delete"
         zoomOnDoubleClick={false}
         snapToGrid
         snapGrid={[GRID, GRID]}

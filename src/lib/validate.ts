@@ -163,6 +163,106 @@ function parseEdge(v: unknown, i: number): Edge {
   return { id: str(o, 'id', where), from: str(o, 'from', where), to: str(o, 'to', where) };
 }
 
+// ---------------------------------------------------------------------------
+// Field rules (mirror of the backend's node validation, FIX_CONTRACT / §6)
+// Each returns null when the value is acceptable, else a short user message.
+// ---------------------------------------------------------------------------
+
+const NODE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const RESERVED_STEMS = new Set([
+  'con', 'prn', 'aux', 'nul',
+  'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
+  'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9',
+]);
+// eslint-disable-next-line no-control-regex
+const TOOL_RE = /^(mcp__[A-Za-z0-9_]+(__[A-Za-z0-9_]+)?|[A-Za-z][A-Za-z0-9_]*)(\([^\x00-\x1f"&|<>^%!]*\))?$/;
+const DRIVE_ABS_RE = /^[A-Za-z]:[\\/]/;
+const UNC_RE = /^(\\\\|\/\/)/;
+const DRIVE_RE = /^[A-Za-z]:/;
+
+/** Node id: folder-safe on every OS, unique case-insensitively among `otherIds`. */
+export function nodeIdError(id: string, otherIds: readonly string[] = []): string | null {
+  if (!NODE_ID_RE.test(id)) {
+    return "Id must start with a letter or digit and use only letters, digits, '.', '_' or '-' (max 128).";
+  }
+  if (id.endsWith('.')) return 'Id must not end with a dot.';
+  const stem = id.split('.')[0]?.toLowerCase() ?? '';
+  if (RESERVED_STEMS.has(stem)) return `"${id}" is a reserved name on Windows.`;
+  const lower = id.toLowerCase();
+  if (otherIds.some((o) => o.toLowerCase() === lower)) return `Id "${id}" is already used (ids are case-insensitive).`;
+  return null;
+}
+
+/** One --allowedTools entry, e.g. `Read`, `Bash(python:*)`, `mcp__server__tool`. */
+export function toolEntryError(entry: string): string | null {
+  if (entry.startsWith('-')) return `"${entry}" must not start with "-".`;
+  return TOOL_RE.test(entry) ? null : `"${entry}" is not a tool name like Read, Bash(git:*) or mcp__server__tool.`;
+}
+
+function segments(path: string): string[] {
+  return path.split(/[\\/]+/);
+}
+
+/** A relative path that stays inside its base: no `..`, no root, no drive. Empty is an error. */
+export function relativePathError(path: string): string | null {
+  if (path.trim() === '') return 'Path is empty.';
+  if (/^[\\/]/.test(path)) return 'Path must be relative (no leading slash).';
+  if (DRIVE_RE.test(path)) return 'Path must be relative (no drive letter).';
+  if (segments(path).includes('..')) return 'Path must not contain "..".';
+  return null;
+}
+
+/** True for `C:\x`, `C:/x` and `/x` (not UNC `\\server` or `//server`). */
+export function isAbsolutePath(path: string): boolean {
+  return DRIVE_ABS_RE.test(path) || (path.startsWith('/') && !path.startsWith('//'));
+}
+
+/** working_dir: null, a safe relative path, or an absolute local path (the latter needs trust). */
+export function workingDirError(dir: string | null): string | null {
+  if (dir === null) return null;
+  if (UNC_RE.test(dir)) return 'Network (UNC) paths are not allowed.';
+  if (isAbsolutePath(dir)) return segments(dir).includes('..') ? 'Path must not contain "..".' : null;
+  return relativePathError(dir);
+}
+
+/** Deliverable path, relative to nodes/<id>/deliverables/. */
+export function deliverablePathError(path: string): string | null {
+  return relativePathError(path);
+}
+
+/** continue_session_of must name a direct upstream node. */
+export function continueSessionError(value: string | null, upstream: readonly string[]): string | null {
+  if (value === null || upstream.includes(value)) return null;
+  return `"${value}" is not a direct upstream node.`;
+}
+
+/** Shape of an app-settings claude path (the backend also checks that the file exists). */
+export function claudeBinError(path: string): string | null {
+  if (UNC_RE.test(path)) return 'Network (UNC) paths are not allowed.';
+  if (!isAbsolutePath(path)) return 'Use an absolute path to the claude executable.';
+  const file = segments(path).pop() ?? '';
+  const dot = file.lastIndexOf('.');
+  const stem = (dot > 0 ? file.slice(0, dot) : file).toLowerCase();
+  const ext = dot > 0 ? file.slice(dot).toLowerCase() : '';
+  if (stem === 'claude' || ((ext === '.exe' || ext === '.cmd') && stem.startsWith('claude'))) return null;
+  return 'The file must be claude, claude.exe or claude.cmd.';
+}
+
+/** First rule violation of a node in its graph, prefixed with the field name. */
+export function nodeRuleError(graph: Graph, node: Node): string | null {
+  const others = graph.nodes.filter((n) => n !== node).map((n) => n.id);
+  const upstream = graph.edges.filter((e) => e.to === node.id).map((e) => e.from);
+  const checks: Array<[string, string | null]> = [
+    ['id', nodeIdError(node.id, others)],
+    ['allowed_tools', (node.allowed_tools ?? []).map(toolEntryError).find((e) => e !== null) ?? null],
+    ['working_dir', workingDirError(node.working_dir)],
+    ['deliverables', node.deliverables.map((d) => deliverablePathError(d.path)).find((e) => e !== null) ?? null],
+    ['continue_session_of', continueSessionError(node.continue_session_of, upstream)],
+  ];
+  const hit = checks.find(([, err]) => err !== null);
+  return hit ? `${hit[0]}: ${hit[1]}` : null;
+}
+
 function checkStructure(graph: Graph): void {
   const ids = new Set<string>();
   for (const n of graph.nodes) {
@@ -178,6 +278,10 @@ function checkStructure(graph: Graph): void {
   }
   const cycle = findCycle(graph.nodes, graph.edges);
   if (cycle) fail(`graph has a cycle through: ${cycle.join(', ')}`);
+  for (const n of graph.nodes) {
+    const err = nodeRuleError(graph, n);
+    if (err) fail(`node "${n.id}" ${err}`);
+  }
 }
 
 /** Validate untrusted JSON as a Graph. Returns the normalised Graph or an Error. */

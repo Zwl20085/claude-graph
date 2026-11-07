@@ -4,26 +4,42 @@
 //! [`ClaudeCommand::command`], writes stdin and closes it, streams stdout into
 //! `events.jsonl` + `node:event`, stderr into `stderr.log` + `stderr` events,
 //! kills the process tree on cancel, and [`evaluate`] decides the status.
+//!
+//! Lines longer than [`LINE_CAP`] are truncated and reported as `parse_error`.
+//! The stream accumulator is shared with the reader task, so a pipe held open
+//! by a grandchild never loses the parsed result: after the process exits with
+//! a `result` seen, the reader gets [`RESULT_GRACE`] to reach EOF, then the
+//! leftover tree is killed (Windows: the turn's Job Object is closed; Unix: the
+//! process group) and the reader is aborted.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use crate::claude_bin::ClaudeCommand;
 use crate::contract::{
     Model, Node, NodeEvent, NodeEventKind, NodeStatus, PermissionMode, Settings,
 };
 use crate::events::{truncate_chars, Emitter, ResultInfo, StreamAccumulator};
+use crate::job::Job;
 use crate::run_store::{EVENTS_FILE, STDERR_FILE};
 
-/// How long to wait for the output pipes after the process exited (a grandchild
-/// may still hold them open).
+/// How long to wait for the output pipes after the process exited when no
+/// `result` was seen (a grandchild may still hold them open).
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// After a normal exit with a `result`, wait this long for EOF, then kill leftovers.
+pub const RESULT_GRACE: Duration = Duration::from_secs(2);
+/// Longest stdout/stderr line kept; longer lines are truncated (`parse_error`).
+pub const LINE_CAP: usize = 1024 * 1024;
+/// A deliverable counts only if written no earlier than this before the turn started.
+const FRESHNESS_SLACK: Duration = Duration::from_secs(2);
 const STDERR_TAIL_LINES: usize = 5;
 const REASON_MAX: usize = 400;
 
@@ -59,14 +75,24 @@ pub fn permission_flag(node: PermissionMode, default: PermissionMode) -> Option<
     }
 }
 
+/// A session to resume. `fork` adds `--fork-session` (used for
+/// `continue_session_of`, so the upstream's own session is left untouched;
+/// follow-up messages continue the node's session in place).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resume<'a> {
+    pub session_id: &'a str,
+    pub fork: bool,
+}
+
 /// `-p <instruction> --output-format stream-json --verbose [--model m]
-/// [--permission-mode pm] --add-dir <graph dir> [--max-turns N] [--resume id]
-/// [--allowedTools t…]` (allowedTools is variadic, so it goes last).
+/// [--permission-mode pm] --add-dir <graph dir> [--max-turns N]
+/// [--resume id [--fork-session]] [--allowedTools t…]` (allowedTools is
+/// variadic, so it goes last). The session id must already be validated.
 pub fn build_args(
     node: &Node,
     settings: &Settings,
     graph_dir: &Path,
-    resume: Option<&str>,
+    resume: Option<Resume<'_>>,
     instruction: &str,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
@@ -86,8 +112,11 @@ pub fn build_args(
     if let Some(n) = node.max_turns {
         args.extend(["--max-turns".into(), n.to_string()]);
     }
-    if let Some(id) = resume.filter(|s| !s.is_empty()) {
-        args.extend(["--resume".into(), id.into()]);
+    if let Some(r) = resume.filter(|r| !r.session_id.is_empty()) {
+        args.extend(["--resume".into(), r.session_id.into()]);
+        if r.fork {
+            args.push("--fork-session".into());
+        }
     }
     let tools: Vec<String> = node
         .allowed_tools
@@ -114,7 +143,7 @@ pub struct TurnSpec {
     pub cwd: PathBuf,
     /// `runs/<run>/<node>/`; events.jsonl and stderr.log are appended here.
     pub out_dir: PathBuf,
-    /// Absolute paths that must exist after the turn.
+    /// Absolute paths that must exist, written during this turn, after it.
     pub required: Vec<PathBuf>,
 }
 
@@ -190,6 +219,13 @@ async fn open_append(path: &Path) -> std::io::Result<tokio::fs::File> {
         .await
 }
 
+type SharedAcc = Arc<Mutex<StreamAccumulator>>;
+type SharedTail = Arc<Mutex<VecDeque<String>>>;
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Run one turn. `kill` flipping to `true` kills the process tree.
 pub async fn run_turn(
     spec: TurnSpec,
@@ -197,6 +233,7 @@ pub async fn run_turn(
     mut kill: watch::Receiver<bool>,
 ) -> TurnOutcome {
     let started = Instant::now();
+    let started_wall = SystemTime::now();
     let already_killed = *kill.borrow();
     if already_killed {
         return evaluate_cancelled(started);
@@ -233,6 +270,7 @@ pub async fn run_turn(
             return TurnOutcome::failed(reason, started);
         }
     };
+    let mut job = Job::assign(&child);
     let pid = child.id();
 
     let stdin = child.stdin.take();
@@ -242,23 +280,30 @@ pub async fn run_turn(
             if let Err(e) = stdin.write_all(text.as_bytes()).await {
                 log::warn!("writing the brief to claude's stdin failed: {e}");
             }
-            let _ = stdin.shutdown().await;
+            if let Err(e) = stdin.shutdown().await {
+                log::warn!("closing claude's stdin failed: {e}");
+            }
         }
     });
-    let stdout = tokio::spawn(read_stdout(
+    let acc: SharedAcc = Arc::new(Mutex::new(StreamAccumulator::new()));
+    let tail: SharedTail = Arc::new(Mutex::new(VecDeque::new()));
+    let mut stdout = tokio::spawn(read_stdout(
         child.stdout.take(),
         spec.clone(),
         emitter.clone(),
+        acc.clone(),
     ));
-    let stderr = tokio::spawn(read_stderr(
+    let mut stderr = tokio::spawn(read_stderr(
         child.stderr.take(),
         spec.clone(),
         emitter.clone(),
+        tail.clone(),
     ));
 
+    // A dropped kill sender (loop gone) is not a kill: only `Ok` counts.
     let exited = tokio::select! {
         status = child.wait() => Some(status.ok()),
-        _ = kill.wait_for(|k| *k) => None,
+        Ok(_) = kill.wait_for(|k| *k) => None,
     };
     let (exit, cancelled) = match exited {
         Some(status) => (status, false),
@@ -266,38 +311,34 @@ pub async fn run_turn(
             if let Some(pid) = pid {
                 kill_tree(pid).await;
             }
-            let _ = child.start_kill();
+            if let Err(e) = child.start_kill() {
+                log::debug!("start_kill after taskkill: {e}");
+            }
             (child.wait().await.ok(), true)
         }
     };
     writer.abort();
-    let acc = match tokio::time::timeout(DRAIN_TIMEOUT, stdout).await {
-        Ok(Ok(acc)) => acc,
-        _ => StreamAccumulator::new(),
-    };
-    let stderr_tail = match tokio::time::timeout(DRAIN_TIMEOUT, stderr).await {
-        Ok(Ok(tail)) => tail,
-        _ => String::new(),
-    };
+    drain(&mut stdout, &mut stderr, &acc, pid, &mut job, &spec.node_id).await;
+    drop(job);
+    let acc = lock(&acc).clone();
+    let stderr_tail = Vec::from(lock(&tail).clone()).join("\n");
     if cancelled {
         return TurnOutcome {
             session_id: acc.session_id().map(str::to_string),
             ..evaluate_cancelled(started)
         };
     }
-    let missing: Vec<String> = spec
-        .required
-        .iter()
-        .filter(|p| !p.is_file())
-        .map(|p| p.display().to_string())
-        .collect();
+    let (missing, stale) = check_deliverables(&spec.required, started_wall);
     let final_text = acc.final_text();
     let code = exit.and_then(|s| s.code());
     let (status, reason) = evaluate(
         code,
         acc.result(),
         final_text.as_deref(),
-        &missing,
+        &Deliverables {
+            missing: &missing,
+            stale: &stale,
+        },
         &stderr_tail,
     );
     let result = acc.result();
@@ -315,6 +356,56 @@ pub async fn run_turn(
     }
 }
 
+/// Wait for the readers to reach EOF. With a `result` seen, only
+/// [`RESULT_GRACE`]; else up to [`DRAIN_TIMEOUT`]. Then kill whatever still
+/// holds the pipes and abort the readers (their shared state is kept).
+async fn drain(
+    stdout: &mut JoinHandle<()>,
+    stderr: &mut JoinHandle<()>,
+    acc: &SharedAcc,
+    pid: Option<u32>,
+    job: &mut Option<Job>,
+    node_id: &str,
+) {
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
+    let mut done = tokio::time::timeout(RESULT_GRACE, &mut *stdout)
+        .await
+        .is_ok();
+    if !done && lock(acc).result().is_none() {
+        let rest = deadline.saturating_duration_since(Instant::now());
+        done = tokio::time::timeout(rest, &mut *stdout).await.is_ok();
+    }
+    if !done {
+        log::warn!("node {node_id}: stdout still open after the process exited; killing leftovers");
+        kill_leftovers(pid, job).await;
+        if tokio::time::timeout(Duration::from_millis(500), &mut *stdout)
+            .await
+            .is_err()
+        {
+            stdout.abort();
+        }
+    }
+    if tokio::time::timeout(Duration::from_secs(1), &mut *stderr)
+        .await
+        .is_err()
+    {
+        kill_leftovers(pid, job).await;
+        stderr.abort();
+    }
+}
+
+/// Kill processes left behind by a finished child: close its Job Object
+/// (Windows) or kill its process group (Unix).
+async fn kill_leftovers(pid: Option<u32>, job: &mut Option<Job>) {
+    drop(job.take());
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        kill_tree(pid).await;
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
 fn evaluate_cancelled(started: Instant) -> TurnOutcome {
     TurnOutcome {
         status: NodeStatus::Cancelled,
@@ -323,26 +414,85 @@ fn evaluate_cancelled(started: Instant) -> TurnOutcome {
     }
 }
 
+/// `(missing, stale)` required deliverables: absent, or last written before
+/// `since` minus [`FRESHNESS_SLACK`] (left over from an earlier run).
+pub fn check_deliverables(required: &[PathBuf], since: SystemTime) -> (Vec<String>, Vec<String>) {
+    let floor = since.checked_sub(FRESHNESS_SLACK).unwrap_or(since);
+    let mut missing = Vec::new();
+    let mut stale = Vec::new();
+    for p in required {
+        let shown = p.display().to_string();
+        match std::fs::metadata(p) {
+            Ok(m) if m.is_file() => {
+                let fresh = m.modified().map(|t| t >= floor).unwrap_or(true);
+                if !fresh {
+                    stale.push(shown);
+                }
+            }
+            _ => missing.push(shown),
+        }
+    }
+    (missing, stale)
+}
+
+enum Line {
+    Eof,
+    Read { truncated: bool },
+}
+
+/// Read one line into `buf` (cleared first), keeping at most `cap` bytes and
+/// discarding the rest of an overlong line.
+async fn read_line_capped<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<Line> {
+    buf.clear();
+    let mut truncated = false;
+    let mut any = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(if any {
+                Line::Read { truncated }
+            } else {
+                Line::Eof
+            });
+        }
+        any = true;
+        let (len, end) = match available.iter().position(|b| *b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (available.len(), false),
+        };
+        let take = len.min(cap.saturating_sub(buf.len()));
+        buf.extend_from_slice(&available[..take]);
+        truncated |= take < len;
+        reader.consume(len);
+        if end {
+            return Ok(Line::Read { truncated });
+        }
+    }
+}
+
 async fn read_stdout(
     stdout: Option<tokio::process::ChildStdout>,
     spec: TurnSpec,
     emitter: Arc<dyn Emitter>,
-) -> StreamAccumulator {
-    let mut acc = StreamAccumulator::new();
-    let Some(stdout) = stdout else { return acc };
+    acc: SharedAcc,
+) {
+    let Some(stdout) = stdout else { return };
     let mut file = open_append(&spec.out_dir.join(EVENTS_FILE)).await.ok();
     let mut reader = BufReader::new(stdout);
     let mut buf = Vec::new();
     loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => break,
-            Ok(_) => {}
+        let truncated = match read_line_capped(&mut reader, &mut buf, LINE_CAP).await {
+            Ok(Line::Eof) => break,
+            Ok(Line::Read { truncated }) => truncated,
             Err(e) => {
                 log::warn!("reading claude stdout failed: {e}");
                 break;
             }
-        }
+        };
         let line = String::from_utf8_lossy(&buf);
         let line = line.trim_end_matches(['\r', '\n']);
         if let Some(f) = file.as_mut() {
@@ -350,50 +500,69 @@ async fn read_stdout(
                 log::warn!("appending to {EVENTS_FILE} failed: {e}");
             }
         }
-        for (kind, text) in acc.feed(line) {
+        let events = if truncated {
+            vec![(
+                NodeEventKind::ParseError,
+                format!(
+                    "line longer than {LINE_CAP} bytes truncated: {}",
+                    truncate_chars(line, 200)
+                ),
+            )]
+        } else {
+            lock(&acc).feed(line)
+        };
+        for (kind, text) in events {
             emit(&*emitter, &spec, kind, text);
         }
     }
     if let Some(mut f) = file {
-        let _ = f.flush().await;
+        if let Err(e) = f.flush().await {
+            log::warn!("flushing {EVENTS_FILE} failed: {e}");
+        }
     }
-    acc
 }
 
-/// Returns the last few stderr lines (for failure reasons).
+/// Keeps the last few stderr lines in `tail` (for failure reasons).
 async fn read_stderr(
     stderr: Option<tokio::process::ChildStderr>,
     spec: TurnSpec,
     emitter: Arc<dyn Emitter>,
-) -> String {
-    let Some(stderr) = stderr else {
-        return String::new();
-    };
+    tail: SharedTail,
+) {
+    let Some(stderr) = stderr else { return };
     let mut file = open_append(&spec.out_dir.join(STDERR_FILE)).await.ok();
     let mut reader = BufReader::new(stderr);
     let mut buf = Vec::new();
-    let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-    while let Ok(n) = reader.read_until(b'\n', &mut buf).await {
-        if n == 0 {
-            break;
-        }
+    while let Ok(Line::Read { truncated }) = read_line_capped(&mut reader, &mut buf, LINE_CAP).await
+    {
         let line = String::from_utf8_lossy(&buf).trim_end().to_string();
-        buf.clear();
         if let Some(f) = file.as_mut() {
-            let _ = f.write_all(format!("{line}\n").as_bytes()).await;
+            if let Err(e) = f.write_all(format!("{line}\n").as_bytes()).await {
+                log::warn!("appending to {STDERR_FILE} failed: {e}");
+            }
+        }
+        if truncated {
+            emit(
+                &*emitter,
+                &spec,
+                NodeEventKind::ParseError,
+                format!("stderr line longer than {LINE_CAP} bytes truncated"),
+            );
         }
         if !line.trim().is_empty() {
             emit(&*emitter, &spec, NodeEventKind::Stderr, line.clone());
-            if tail.len() == STDERR_TAIL_LINES {
-                tail.pop_front();
+            let mut t = lock(&tail);
+            if t.len() == STDERR_TAIL_LINES {
+                t.pop_front();
             }
-            tail.push_back(line);
+            t.push_back(line);
         }
     }
     if let Some(mut f) = file {
-        let _ = f.flush().await;
+        if let Err(e) = f.flush().await {
+            log::warn!("flushing {STDERR_FILE} failed: {e}");
+        }
     }
-    Vec::from(tail).join("\n")
 }
 
 /// Kill the process and all its children.
@@ -436,12 +605,19 @@ pub fn final_status(text: &str) -> Option<(bool, String)> {
     })
 }
 
+/// Required deliverables that are absent, or present but not written this turn.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Deliverables<'a> {
+    pub missing: &'a [String],
+    pub stale: &'a [String],
+}
+
 /// Decide a finished (not cancelled) turn's status and reason.
 pub fn evaluate(
     exit_code: Option<i32>,
     result: Option<&ResultInfo>,
     final_text: Option<&str>,
-    missing: &[String],
+    deliverables: &Deliverables<'_>,
     stderr_tail: &str,
 ) -> (NodeStatus, Option<String>) {
     let failed = |r: String| (NodeStatus::Failed, Some(truncate_chars(&r, REASON_MAX)));
@@ -470,9 +646,18 @@ pub fn evaluate(
     match final_text.and_then(final_status) {
         Some((false, why)) => failed(format!("agent reported ## Status: BLOCKED: {why}")),
         None => failed("final message has no '## Status: DONE' line".to_string()),
-        Some((true, _)) if !missing.is_empty() => {
-            failed(format!("missing deliverables: {}", missing.join(", ")))
-        }
+        Some((true, _)) if !deliverables.missing.is_empty() => failed(format!(
+            "missing deliverables: {}",
+            deliverables.missing.join(", ")
+        )),
+        Some((true, _)) if !deliverables.stale.is_empty() => failed(
+            deliverables
+                .stale
+                .iter()
+                .map(|p| format!("deliverable {p} was not written in this run"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
         Some((true, _)) => (NodeStatus::Succeeded, None),
     }
 }

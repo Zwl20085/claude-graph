@@ -34,9 +34,31 @@ export function samePath(a: string | null, b: string | null): boolean {
   return norm(a) === norm(b);
 }
 
-/** Whether an incoming run:state belongs to the open graph. */
-export function acceptsRunState(rs: RunState, dir: string | null, current: RunState | null, starting: boolean): boolean {
-  return starting || rs.run_id === current?.run_id || samePath(rs.graph_dir, dir);
+/**
+ * Whether an incoming run:state belongs to the open graph: the shown run, or
+ * any run of the open folder. Runs whose folder spelling differs (the backend
+ * canonicalises paths) are buffered by the store while a start is pending.
+ */
+export function acceptsRunState(rs: RunState, dir: string | null, current: RunState | null): boolean {
+  return rs.run_id === current?.run_id || samePath(rs.graph_dir, dir);
+}
+
+const TERMINAL = new Set(['succeeded', 'failed', 'skipped', 'cancelled']);
+
+/** Number of nodes in a terminal status, plus one when the run itself has finished. */
+export function progressOf(rs: RunState): number {
+  const done = Object.values(rs.nodes).filter((n) => TERMINAL.has(n.status)).length;
+  return done + (rs.status === 'running' ? 0 : 1);
+}
+
+/**
+ * Which state to keep when a fetched RunState (get_run reply) lands: the
+ * fetched one only if nothing of that run is shown yet, or if it is strictly
+ * further along. Live run:state events never go through this.
+ */
+export function preferFetched(current: RunState | null, fetched: RunState): RunState {
+  if (current === null || current.run_id !== fetched.run_id) return fetched;
+  return progressOf(fetched) > progressOf(current) ? fetched : current;
 }
 
 /** Newest run first (run ids are UTC timestamps, started_at as tie-break). */

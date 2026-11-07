@@ -14,12 +14,12 @@ function ToastItem({ toast }: { toast: Toast }) {
   }, [toast.id, toast.kind, dismiss]);
   return (
     <div
-      role="status"
+      role={toast.kind === 'error' ? 'alert' : 'status'}
       className="flex max-w-[420px] items-start gap-2 rounded border bg-[#252526] px-3 py-2 text-[13px] shadow-lg"
       style={{ borderColor: COLORS[toast.kind] }}
     >
       <span className="flex-1 whitespace-pre-wrap">{toast.text}</span>
-      <button aria-label="dismiss" onClick={() => dismiss(toast.id)}>
+      <button aria-label="dismiss notification" onClick={() => dismiss(toast.id)}>
         <X size={13} />
       </button>
     </div>

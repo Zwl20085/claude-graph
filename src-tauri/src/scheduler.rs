@@ -167,7 +167,9 @@ impl Scheduler {
     }
 
     /// Scheduler for follow-up turns in a run that already finished: slots come
-    /// from `run.json`, nothing new ever starts.
+    /// from `run.json`, nothing new ever starts. Slots still `running`, `queued`
+    /// or `pending` (a run left behind by an app exit or crash) become
+    /// `cancelled` with reason `interrupted`; no process of theirs is alive.
     pub fn resume(graph: &Graph, run: &RunState) -> AppResult<Self> {
         let mut scheduler = Self::new(graph, &RunTarget::All, &[])?;
         scheduler.target = run
@@ -181,9 +183,18 @@ impl Scheduler {
             .iter()
             .filter(|(id, _)| scheduler.target.contains(*id))
             .map(|(id, s)| {
-                let slot = Slot {
-                    status: s.status,
-                    reason: s.reason.clone(),
+                let slot = match s.status {
+                    NodeStatus::Pending | NodeStatus::Queued | NodeStatus::Running => Slot {
+                        status: NodeStatus::Cancelled,
+                        reason: Some(crate::run_store::INTERRUPTED.to_string()),
+                    },
+                    NodeStatus::Succeeded
+                    | NodeStatus::Failed
+                    | NodeStatus::Skipped
+                    | NodeStatus::Cancelled => Slot {
+                        status: s.status,
+                        reason: s.reason.clone(),
+                    },
                 };
                 (id.clone(), slot)
             })

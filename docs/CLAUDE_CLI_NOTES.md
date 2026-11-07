@@ -41,7 +41,21 @@ claude -p "<short instruction>" --output-format stream-json --verbose \
 - Native installer puts `claude.exe` in `%USERPROFILE%\.local\bin\claude.exe`. npm global install gives
   `claude.cmd` shim in `%APPDATA%\npm` (common knowledge, unverified in docs).
 - Rust `Command::new("claude")` finds `.exe` on PATH but not `.cmd`. Resolution order in the app:
-  1. `settings.claude_bin` if set; 2. env `CLAUDE_GRAPH_CLAUDE_BIN` (may be `node path/to/fake-claude.mjs`, i.e. a command line, split on whitespace);
-  3. `%USERPROFILE%\.local\bin\claude.exe`; 4. `where claude` / `which claude`; if the hit ends with `.cmd`/`.bat`, spawn `cmd /C <path> args…`.
+  1. the app settings' `claude_bin` (`<data_dir>/claude-graph/settings.json`; graph.json's
+  `settings.claude_bin` is ignored); 2. env `CLAUDE_GRAPH_CLAUDE_BIN` (may be `node path/to/fake-claude.mjs`, i.e. a command line, split on whitespace);
+  3. `%USERPROFILE%\.local\bin\claude.exe`; 4. a PATH search (PATHEXT order).
+- Spawn strategy, never `cmd /C`: an `.exe` is spawned directly. A `.cmd`/`.bat` npm shim is
+  resolved to `node.exe <shim dir>\node_modules\@anthropic-ai\claude-code\cli.js` when that file
+  exists (node.exe next to the shim or on PATH); else, when
+  `<shim dir>\node_modules\@anthropic-ai\claude-code\bin\claude.exe` exists, that `.exe` is spawned
+  directly (no cmd.exe); otherwise the `.cmd` itself is the program and Rust's std applies
+  batch-file argument escaping (it errors on arguments it cannot pass safely; the node fails with
+  `spawn_failed`). Verified 2026-11-07: the npm 2.1.319 shim is
+  `"%dp0%\node_modules\@anthropic-ai\claude-code\bin\claude.exe" %*` (no cli.js), so such installs
+  now run the bundled `claude.exe` directly; the `.cmd` fallback (only for other layouts) was
+  checked not to inject with a graph folder named `g & mkdir INJECTED`.
+- `--resume <id>` is only passed for ids matching `^[0-9a-fA-F-]{36}$`; `continue_session_of`
+  adds `--fork-session` so the upstream's own session is not continued in place.
 - Kill: `taskkill /T /F /PID <pid>` on Windows (process tree); on Unix spawn in its own process group and kill the group.
+  Each child is also in a kill-on-close Job Object, closed at the end of the turn and by the OS on a crash.
 - No sandbox on native Windows.

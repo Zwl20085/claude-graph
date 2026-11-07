@@ -1,10 +1,12 @@
 /** Past runs of the graph and this node's result in each. */
 import { useEffect, useState } from 'react';
+import { ExternalLink } from 'lucide-react';
 import type { NodeResult, RunSummary } from '../types/contract';
 import { api } from '../lib/api';
 import { formatCost, STATUS_COLORS } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
 import { errorMessage, newestFirst } from '../store/runHelpers';
+import { btnCls } from './ui';
 
 type Detail = { kind: 'none' } | { kind: 'loading' } | { kind: 'ok'; result: NodeResult } | { kind: 'error'; message: string };
 
@@ -29,6 +31,16 @@ export function ResultsTab({ nodeId }: { nodeId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [openRun, setOpenRun] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail>({ kind: 'none' });
+  const pushToast = useGraphStore((s) => s.pushToast);
+  const reveal = (): void => {
+    if (!dir) return;
+    api.revealNodeDir(dir, nodeId).catch((err) => pushToast('error', `Could not open the folder: ${errorMessage(err)}`));
+  };
+  const openFolder = (
+    <button className={`${btnCls} border border-[#3c3c3c]`} onClick={reveal} title={`Show nodes/${nodeId}/deliverables in the file manager`}>
+      <ExternalLink size={13} />Open deliverables folder
+    </button>
+  );
 
   useEffect(() => {
     if (!dir) return;
@@ -56,10 +68,11 @@ export function ResultsTab({ nodeId }: { nodeId: string }) {
 
   if (error) return <p className="text-[12px] text-[#ef4444]">Could not list runs: {error}</p>;
   if (runs === null) return <p className="text-[12px] text-[#777]">Loading runs…</p>;
-  if (runs.length === 0) return <p className="text-[12px] text-[#777]">No runs yet.</p>;
+  if (runs.length === 0) return <div className="space-y-2">{openFolder}<p className="text-[12px] text-[#777]">No runs yet.</p></div>;
 
   return (
     <div className="space-y-2">
+      {openFolder}
       <ul className="space-y-1">
         {runs.map((r) => (
           <li key={r.run_id}>

@@ -5,7 +5,7 @@ import type { NodeEventKind } from '../types/contract';
 import { api } from '../lib/api';
 import { isRunActive } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
-import type { LogLine } from '../store/runHelpers';
+import { errorMessage, type LogLine } from '../store/runHelpers';
 import { btnCls } from './ui';
 
 const KIND_COLORS: Record<NodeEventKind | 'raw', string> = {
@@ -23,25 +23,27 @@ const STICK_PX = 24;
 const EMPTY: readonly LogLine[] = [];
 
 /** events.jsonl tail of a finished run, when no live lines were captured in this session. */
-function useHistoricTail(nodeId: string | null, live: number): string[] {
+function useHistoricTail(nodeId: string | null, live: number): { tail: string[]; error: string | null } {
   const dir = useGraphStore((s) => s.dir);
   const runState = useGraphStore((s) => s.runState);
   const [tail, setTail] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const runId = runState?.run_id ?? null;
   const finished = runState !== null && !isRunActive(runState);
   useEffect(() => {
     setTail([]);
+    setError(null);
     if (!dir || !runId || !nodeId || !finished || live > 0) return;
     let on = true;
     api
       .readNodeResult(dir, runId, nodeId)
       .then((r) => on && setTail(r.events_tail))
-      .catch(() => undefined);
+      .catch((err) => on && setError(errorMessage(err)));
     return () => {
       on = false;
     };
   }, [dir, runId, nodeId, finished, live]);
-  return tail;
+  return { tail, error };
 }
 
 export function LogPanel() {
@@ -51,7 +53,7 @@ export function LogPanel() {
   );
   const clear = useGraphStore((s) => s.clearEvents);
   const pushToast = useGraphStore((s) => s.pushToast);
-  const tail = useHistoricTail(nodeId, lines.length);
+  const { tail, error: tailError } = useHistoricTail(nodeId, lines.length);
   const box = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
@@ -103,7 +105,10 @@ export function LogPanel() {
               {t}
             </div>
           ))}
-        {lines.length === 0 && tail.length === 0 && <p className="text-[#777]">No output for this node in the shown run.</p>}
+        {lines.length === 0 && tailError !== null && (
+          <p className="text-[#ef4444]">could not read events tail: {tailError}</p>
+        )}
+        {lines.length === 0 && tail.length === 0 && tailError === null && <p className="text-[#777]">No output for this node in the shown run.</p>}
       </div>
     </div>
   );

@@ -67,8 +67,27 @@ describe('App smoke (mock mode)', () => {
     await act(async () => store.getState().updateNode('design', { title: 'Rules' }));
     expect(document.title).toBe('Claude Graph — hello-pipeline*');
 
+    // Escape closes the preview dialog.
+    await act(async () => {
+      document.querySelector('[role="dialog"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    // The example's design node allows Bash(python:*): the trust dialog asks first.
     await click(button('Run all'));
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Node design allows Bash tools');
+    await click(button('Trust this graph and run'));
+    await act(async () => new Promise((r) => setTimeout(r, 50)));
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(store.getState().runState?.status).toBe('running');
+
+    await click(button('Open folder'));
+    await click(document.querySelector('[aria-label="settings"]'));
+    expect(document.body.textContent).toContain('App settings (this machine)');
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(document.body.textContent).not.toContain('App settings (this machine)');
     await act(async () => root.unmount());
     expect(errors).not.toHaveBeenCalled();
   });

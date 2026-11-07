@@ -23,8 +23,8 @@ export default defineConfig({
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
     coverage: {
       provider: 'v8',
-      include: ['src/lib/**/*.ts'],
-      exclude: ['src/lib/**/*.test.ts', 'src/lib/ipc.ts'],
+      include: ['src/lib/**/*.ts', 'src/store/**/*.ts'],
+      exclude: ['src/**/*.test.ts', 'src/lib/ipc.ts'],
       thresholds: { lines: COVERAGE_THRESHOLD },
     },
   },

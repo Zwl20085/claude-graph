@@ -47,7 +47,10 @@ pub struct Settings {
     pub stop_on_failure: bool,
     pub default_model: Model,
     pub default_permission_mode: PermissionMode,
-    /// `None` = find `claude` on PATH; otherwise an explicit path.
+    /// Deprecated and ignored: kept so older graph.json files load and round-trip.
+    /// The backend never reads, touches or executes this path; the CLI location
+    /// lives in the app settings ([`AppSettings::claude_bin`]). A non-null value
+    /// is reported as an informational `claude_bin_in_graph` trust item.
     pub claude_bin: Option<String>,
 }
 
@@ -335,14 +338,65 @@ pub struct ClaudeCheck {
     pub version: Option<String>,
 }
 
+/// Return value of `launch_options`: what the command line / env asked for at startup.
+/// `autorun` is only true when `open_dir` is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchOptions {
+    pub open_dir: Option<String>,
+    pub autorun: bool,
+}
+
+/// Per-user app settings (`<data_dir>/claude-graph/settings.json`), not per graph.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppSettings {
+    /// Explicit `claude` executable; `None` = env override, `~/.local/bin`, PATH.
+    pub claude_bin: Option<String>,
+}
+
+/// Why a graph needs the user's explicit trust before it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustKind {
+    BypassPermissions,
+    DontAsk,
+    BashTool,
+    AbsoluteWorkingDir,
+    /// Informational only: `settings.claude_bin` in graph.json is ignored.
+    ClaudeBinInGraph,
+}
+
+impl TrustKind {
+    /// Informational items never make a graph untrusted on their own.
+    pub fn is_informational(self) -> bool {
+        self == TrustKind::ClaudeBinInGraph
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustItem {
+    /// `None` for graph-wide settings.
+    pub node_id: Option<String>,
+    pub kind: TrustKind,
+    pub detail: String,
+}
+
+/// Return value of `graph_trust_status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustStatus {
+    pub trusted: bool,
+    pub items: Vec<TrustItem>,
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
 /// Error returned by every command: `{ code, message }`.
 ///
-/// Codes in use: `not_implemented`, `io`, `json`, `invalid_graph`,
-/// `not_found`, `claude_not_found`, `spawn_failed`, `run_active`, `cancelled`, `internal`.
+/// Codes in use: `not_implemented`, `io`, `json`, `invalid_graph`, `invalid_input`,
+/// `not_found`, `claude_not_found`, `spawn_failed`, `run_active`, `untrusted_graph`,
+/// `cancelled`, `internal`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct AppError {

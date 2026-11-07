@@ -11,6 +11,8 @@ import { LogPanel } from './components/LogPanel';
 import { StartScreen } from './components/StartScreen';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
+import { TrustDialog } from './components/TrustDialog';
+import { errorMessage } from './store/runHelpers';
 
 const APP_NAME = 'Claude Graph';
 
@@ -39,12 +41,43 @@ function useSaveShortcut(): void {
   }, []);
 }
 
-/** Save pending edits when the window is closed or reloaded. */
-function useSaveOnUnload(): void {
+/**
+ * Save pending edits before the window goes away.
+ * Tauri: intercept the close request, await the save, then destroy the window
+ * (capability core:window:allow-destroy); a failed save keeps the window open.
+ * Browser (mock mode): best-effort save on beforeunload.
+ */
+function useSaveOnClose(): void {
   useEffect(() => {
-    const onUnload = () => void graphStore().getState().save();
-    window.addEventListener('beforeunload', onUnload);
-    return () => window.removeEventListener('beforeunload', onUnload);
+    const toast = (text: string): void => graphStore().getState().pushToast('error', text);
+    if (!isTauri()) {
+      const onUnload = () => void graphStore().getState().saveAll();
+      window.addEventListener('beforeunload', onUnload);
+      return () => window.removeEventListener('beforeunload', onUnload);
+    }
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    import('@tauri-apps/api/window')
+      .then(({ getCurrentWindow }) => {
+        const win = getCurrentWindow();
+        return win.onCloseRequested(async (event) => {
+          event.preventDefault();
+          if (!(await graphStore().getState().saveAll())) {
+            toast('Not closing: the graph could not be saved. Fix the error or undo the change, then close again.');
+            return;
+          }
+          await win.destroy().catch((err: unknown) => toast(`Could not close the window: ${errorMessage(err)}`));
+        });
+      })
+      .then((off) => {
+        if (disposed) off();
+        else unlisten = off;
+      })
+      .catch((err: unknown) => toast(`Close handler not installed (unsaved edits may be lost on close): ${errorMessage(err)}`));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 }
 
@@ -56,7 +89,7 @@ export default function App() {
   const [inspectorOpen, setInspectorOpen] = useStoredFlag('cg.inspectorOpen', true);
   useWindowTitle(name, dirty);
   useSaveShortcut();
-  useSaveOnUnload();
+  useSaveOnClose();
 
   return (
     <div className="flex h-screen flex-col bg-[#1e1e1e] text-[#d4d4d4]">
@@ -80,6 +113,8 @@ export default function App() {
               className="w-4 shrink-0 border-l border-[#3c3c3c] bg-[#252526] text-[#9a9a9a] hover:text-white"
               onClick={() => setInspectorOpen(!inspectorOpen)}
               title={inspectorOpen ? 'Collapse inspector' : 'Expand inspector'}
+              aria-label={inspectorOpen ? 'collapse inspector' : 'expand inspector'}
+              aria-expanded={inspectorOpen}
             >
               {inspectorOpen ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
             </button>
@@ -91,6 +126,7 @@ export default function App() {
           </div>
         </ReactFlowProvider>
       )}
+      <TrustDialog />
       <Toasts />
     </div>
   );

@@ -3,7 +3,9 @@
 //! Every command uses `rename_all = "snake_case"` so the frontend passes
 //! argument names exactly as written in the brief (`run_id`, `node_id`, …);
 //! Tauri's default would expect camelCase. The logic lives in `store`,
-//! `run_store`, `run_api` and `prompt`; these wrappers only adapt arguments.
+//! `run_store`, `run_api`, `trust` and `prompt`; these wrappers only adapt
+//! arguments. Every `dir` is checked by [`crate::paths`] (absolute, local, no
+//! UNC, canonicalised) and file I/O runs on the blocking pool.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,24 +16,19 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::claude_bin;
 use crate::contract::{
-    AppError, AppResult, ClaudeCheck, Graph, NodeMessage, NodeResult, RunState, RunSummary,
-    RunTarget,
+    AppError, AppResult, AppSettings, ClaudeCheck, Graph, LaunchOptions, NodeMessage, NodeResult,
+    RunState, RunSummary, RunTarget, TrustStatus,
 };
 use crate::events::{Emitter, TauriEmitter};
+use crate::paths::{canonical, dir_for_create, existing_dir};
 use crate::prompt::{render_brief as render, upstream_placeholders, PREVIEW_DIR};
 use crate::run_api::AppState;
-use crate::{run_store, store};
+use crate::run_loop::blocking;
+use crate::run_store::check_id;
+use crate::{launch, run_store, store};
 
 fn emitter(app: &AppHandle) -> Arc<dyn Emitter> {
     Arc::new(TauriEmitter(app.clone()))
-}
-
-fn graph_dir(dir: &str) -> AppResult<PathBuf> {
-    let trimmed = dir.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::new("not_found", "no graph folder given"));
-    }
-    Ok(PathBuf::from(trimmed))
 }
 
 fn remember(dir: &Path) {
@@ -42,38 +39,77 @@ fn remember(dir: &Path) {
     }
 }
 
-/// `claude_bin` is optional and may be omitted by the frontend (see ARCHITECTURE.md §6).
+/// Sweep runs left `running` by an earlier app exit or crash; never fails the caller.
+fn sweep(state: &AppState, dir: &Path) {
+    match state.sweep_stale(dir) {
+        Ok(swept) if !swept.is_empty() => {
+            log::info!("marked interrupted runs: {}", swept.join(", "))
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("stale-run sweep of {} failed: {e}", dir.display()),
+    }
+}
+
+/// Uses the app settings, env `CLAUDE_GRAPH_CLAUDE_BIN`, `~/.local/bin`, PATH.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn check_claude(claude_bin: Option<String>) -> AppResult<ClaudeCheck> {
-    Ok(claude_bin::check(claude_bin).await)
+pub async fn check_claude(state: State<'_, AppState>) -> AppResult<ClaudeCheck> {
+    let st = state.inner().clone();
+    let configured = blocking(move || Ok(st.app_settings().claude_bin)).await?;
+    Ok(claude_bin::check(configured).await)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_app_settings(state: State<'_, AppState>) -> AppResult<AppSettings> {
+    let st = state.inner().clone();
+    blocking(move || Ok(st.app_settings())).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_app_settings(
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> AppResult<AppSettings> {
+    let st = state.inner().clone();
+    blocking(move || st.set_app_settings(&settings)).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn create_graph(dir: String, name: String) -> AppResult<Graph> {
-    let dir = graph_dir(&dir)?;
-    let graph = store::create_graph(&dir, &name)?;
-    remember(&dir);
-    Ok(graph)
+    blocking(move || {
+        let dir = dir_for_create(&dir)?;
+        let graph = store::create_graph(&dir, &name)?;
+        remember(&dir);
+        Ok(graph)
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn open_graph(dir: String) -> AppResult<Graph> {
-    let dir = graph_dir(&dir)?;
-    let graph = store::read_graph(&dir)?;
-    remember(&dir);
-    Ok(graph)
+pub async fn open_graph(state: State<'_, AppState>, dir: String) -> AppResult<Graph> {
+    let st = state.inner().clone();
+    blocking(move || {
+        let dir = existing_dir(&dir)?;
+        let graph = store::read_graph(&dir)?;
+        sweep(&st, &dir);
+        remember(&dir);
+        Ok(graph)
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn save_graph(dir: String, graph: Graph) -> AppResult<()> {
-    store::save_graph(&graph_dir(&dir)?, &graph)
+    blocking(move || store::save_graph(&existing_dir(&dir)?, &graph)).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_recent() -> AppResult<Vec<String>> {
-    Ok(store::default_recent_file()
-        .map(|f| store::load_recent(&f))
-        .unwrap_or_default())
+    blocking(|| {
+        Ok(store::default_recent_file()
+            .map(|f| store::load_recent(&f))
+            .unwrap_or_default())
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -83,12 +119,27 @@ pub async fn pick_folder(app: AppHandle, title: String) -> AppResult<Option<Stri
         .file()
         .set_title(title)
         .pick_folder(move |picked| {
-            let _ = tx.send(picked.map(|p| p.to_string()));
+            if tx.send(picked.map(|p| p.to_string())).is_err() {
+                log::warn!("folder dialog answered after the command gave up");
+            }
         });
     rx.await
         .map_err(|_| AppError::new("internal", "folder dialog closed unexpectedly"))
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub async fn graph_trust_status(state: State<'_, AppState>, dir: String) -> AppResult<TrustStatus> {
+    let st = state.inner().clone();
+    blocking(move || st.trust_status(&existing_dir(&dir)?)).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn trust_graph(state: State<'_, AppState>, dir: String) -> AppResult<()> {
+    let st = state.inner().clone();
+    blocking(move || st.trust_graph(&existing_dir(&dir)?)).await
+}
+
+/// `untrusted_graph` when the graph's elevated settings were not accepted.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn start_run(
     app: AppHandle,
@@ -96,8 +147,13 @@ pub async fn start_run(
     dir: String,
     target: RunTarget,
 ) -> AppResult<String> {
-    let (run_id, _join) = state.start_run(&graph_dir(&dir)?, target, emitter(&app))?;
-    Ok(run_id)
+    let st = state.inner().clone();
+    let em = emitter(&app);
+    blocking(move || {
+        let (run_id, _join) = st.start_run(&existing_dir(&dir)?, target, em)?;
+        Ok(run_id)
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -116,15 +172,21 @@ pub async fn cancel_node(
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_run(dir: String, run_id: String) -> AppResult<RunState> {
-    run_store::read_run_state(&graph_dir(&dir)?, &run_id)
+    blocking(move || run_store::read_run_state(&existing_dir(&dir)?, &run_id)).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn list_runs(dir: String) -> AppResult<Vec<RunSummary>> {
-    Ok(run_store::list_run_states(&graph_dir(&dir)?)?
-        .iter()
-        .map(run_store::summarize_run)
-        .collect())
+pub async fn list_runs(state: State<'_, AppState>, dir: String) -> AppResult<Vec<RunSummary>> {
+    let st = state.inner().clone();
+    blocking(move || {
+        let dir = existing_dir(&dir)?;
+        sweep(&st, &dir);
+        Ok(run_store::list_run_states(&dir)?
+            .iter()
+            .map(run_store::summarize_run)
+            .collect())
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -133,7 +195,7 @@ pub async fn read_node_result(
     run_id: String,
     node_id: String,
 ) -> AppResult<NodeResult> {
-    run_store::read_node_result(&graph_dir(&dir)?, &run_id, &node_id)
+    blocking(move || run_store::read_node_result(&existing_dir(&dir)?, &run_id, &node_id)).await
 }
 
 /// Preview without a folder: paths use the `<graph folder>` placeholder and
@@ -149,16 +211,53 @@ pub async fn render_brief(graph: Graph, node_id: String) -> AppResult<String> {
     Ok(render(PREVIEW_DIR, &graph, node, &upstream))
 }
 
-#[tauri::command(rename_all = "snake_case")]
-pub async fn open_path(app: AppHandle, path: String) -> AppResult<()> {
-    if !Path::new(&path).exists() {
-        return Err(AppError::new("not_found", format!("{path} does not exist")));
+/// The canonical path to reveal: `<dir>/graph.json`, or a node's deliverables
+/// folder (created if missing; the node must exist in the saved graph). The
+/// result must lie inside the canonical graph folder.
+pub fn reveal_target(dir: &str, node_id: Option<&str>) -> AppResult<PathBuf> {
+    let root = existing_dir(dir)?;
+    let target = match node_id {
+        None => root.join(store::GRAPH_FILE),
+        Some(id) => {
+            check_id("node id", id)?;
+            let graph = store::read_graph(&root)?;
+            if !graph.nodes.iter().any(|n| n.id == id) {
+                return Err(AppError::new("not_found", format!("no node {id:?}")));
+            }
+            let d = store::deliverables_dir(&root, id);
+            std::fs::create_dir_all(&d)?;
+            d
+        }
+    };
+    let canon = canonical(&target)?;
+    if !canon.starts_with(&root) {
+        return Err(AppError::new(
+            "invalid_input",
+            format!("{} is outside the graph folder", canon.display()),
+        ));
     }
+    Ok(canon)
+}
+
+fn reveal(app: &AppHandle, path: &Path) -> AppResult<()> {
     app.opener()
-        .open_path(path, None::<&str>)
+        .reveal_item_in_dir(path)
         .map_err(|e| AppError::new("io", e.to_string()))
 }
 
+#[tauri::command(rename_all = "snake_case")]
+pub async fn reveal_graph_dir(app: AppHandle, dir: String) -> AppResult<()> {
+    let path = blocking(move || reveal_target(&dir, None)).await?;
+    reveal(&app, &path)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn reveal_node_dir(app: AppHandle, dir: String, node_id: String) -> AppResult<()> {
+    let path = blocking(move || reveal_target(&dir, Some(&node_id))).await?;
+    reveal(&app, &path)
+}
+
+/// `untrusted_graph` when the graph's elevated settings were not accepted.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn send_message(
     app: AppHandle,
@@ -168,8 +267,9 @@ pub async fn send_message(
     node_id: String,
     text: String,
 ) -> AppResult<()> {
+    let dir = blocking(move || existing_dir(&dir)).await?;
     state
-        .send_message(&graph_dir(&dir)?, &run_id, &node_id, &text, emitter(&app))
+        .send_message(&dir, &run_id, &node_id, &text, emitter(&app))
         .await
         .map(|_| ())
 }
@@ -180,5 +280,45 @@ pub async fn list_messages(
     run_id: String,
     node_id: String,
 ) -> AppResult<Vec<NodeMessage>> {
-    run_store::list_messages(&graph_dir(&dir)?, &run_id, &node_id)
+    blocking(move || run_store::list_messages(&existing_dir(&dir)?, &run_id, &node_id)).await
+}
+
+/// Startup request from argv (`claude-graph <dir> [--run]`) or env
+/// (`CLAUDE_GRAPH_OPEN`, `CLAUDE_GRAPH_AUTORUN`); see ARCHITECTURE.md "Launching".
+#[tauri::command(rename_all = "snake_case")]
+pub async fn launch_options() -> AppResult<LaunchOptions> {
+    Ok(launch::from_process())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reveal_targets_stay_inside_the_graph() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g: Graph =
+            serde_json::from_str(include_str!("../../examples/hello-pipeline/graph.json")).unwrap();
+        store::save_graph(tmp.path(), &g).unwrap();
+        let dir = tmp.path().display().to_string();
+        let root = crate::paths::abs(tmp.path());
+        assert_eq!(
+            reveal_target(&dir, None).unwrap(),
+            root.join(store::GRAPH_FILE)
+        );
+        let node = reveal_target(&dir, Some("survey")).unwrap();
+        assert!(node.starts_with(&root) && node.ends_with("deliverables"));
+        assert_eq!(
+            reveal_target(&dir, Some("../..")).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(
+            reveal_target(&dir, Some("nope")).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(
+            reveal_target("relative", None).unwrap_err().code,
+            "invalid_input"
+        );
+    }
 }

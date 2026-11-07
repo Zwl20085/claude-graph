@@ -1,15 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: IPC, events, folder dialog, opening paths.",
+  "description": "Main window: IPC, events, folder dialog. Reveal runs backend-side (no opener permission for the webview).",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
     "core:window:allow-set-title",
+    "core:window:allow-destroy",
     "dialog:default",
-    "opener:default",
     "log:default"
   ]
 }

@@ -6,7 +6,8 @@
  */
 import type { AppError, Edge, Graph, Node, Position, RunState, RunTarget, Settings } from '../types/contract';
 import { findCycle } from './graph';
-import { isValidSlug, uniqueSlug } from './slug';
+import { uniqueSlug } from './slug';
+import { nodeIdError, toolEntryError } from './validate';
 
 export type NodePatch = Partial<Omit<Node, 'id'>>;
 
@@ -36,7 +37,7 @@ export function newNode(id: string, title: string, position: Position): Node {
 
 /** Adds a node with a unique slug id derived from `title`. Returns the graph and the id. */
 export function addNode(graph: Graph, title: string, position: Position): { graph: Graph; id: string } {
-  const id = uniqueSlug(title, graph.nodes.map((n) => n.id));
+  const id = uniqueSlug(title, graph.nodes.map((n) => n.id.toLowerCase()));
   return { graph: { ...graph, nodes: [...graph.nodes, newNode(id, title, position)] }, id };
 }
 
@@ -130,10 +131,11 @@ export type RenameResult = { ok: true; graph: Graph } | { ok: false; error: stri
 export function renameNode(graph: Graph, oldId: string, newId: string): RenameResult {
   if (oldId === newId) return { ok: true, graph };
   if (!graph.nodes.some((n) => n.id === oldId)) return { ok: false, error: `Unknown node "${oldId}".` };
-  if (!isValidSlug(newId)) {
-    return { ok: false, error: 'Id must be a slug: lowercase letters, digits and single dashes.' };
-  }
-  if (graph.nodes.some((n) => n.id === newId)) return { ok: false, error: `Id "${newId}" is already used.` };
+  const error = nodeIdError(
+    newId,
+    graph.nodes.filter((n) => n.id !== oldId).map((n) => n.id),
+  );
+  if (error) return { ok: false, error };
   const swap = (id: string): string => (id === oldId ? newId : id);
   return {
     ok: true,
@@ -210,8 +212,40 @@ export function emptyNodeIds(graph: Graph, ids: readonly string[]): string[] {
   return graph.nodes.filter((n) => wanted.has(n.id) && isEmptyNode(n)).map((n) => n.id);
 }
 
-/** Comma text -> array; empty -> null (= no --allowedTools flag). */
+/** Split on commas outside parentheses: `Bash(git add, git commit), Read` is two entries. */
+export function splitTopLevel(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of text) {
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) {
+      parts.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  parts.push(current);
+  return parts.map((s) => s.trim()).filter((s) => s !== '');
+}
+
+/** Comma text -> array; empty -> null (= no --allowedTools flag). Commas inside (...) do not split. */
 export function parseToolList(text: string): string[] | null {
-  const items = text.split(',').map((s) => s.trim()).filter((s) => s !== '');
+  const items = splitTopLevel(text);
   return items.length === 0 ? null : items;
+}
+
+/**
+ * Tools text as typed: the valid entries (what is committed; null = none) and
+ * the first error message (shown inline). Invalid entries are never committed.
+ */
+export function readToolList(text: string): { valid: string[] | null; error: string | null } {
+  const entries = splitTopLevel(text);
+  const errors = entries.map(toolEntryError).filter((e): e is string => e !== null);
+  const valid = entries.filter((e) => toolEntryError(e) === null);
+  const more = errors.length > 1 ? ` (+${errors.length - 1} more)` : '';
+  const error = errors.length === 0 ? null : `${errors[0]}${more} Invalid entries are not saved.`;
+  return { valid: valid.length === 0 ? null : valid, error };
 }

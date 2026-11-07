@@ -11,6 +11,7 @@ use std::time::Duration;
 use claude_graph_lib::claude_bin::ENV_CLAUDE_BIN;
 use claude_graph_lib::contract::{Graph, NodeEvent, NodeEventKind, RunState};
 use claude_graph_lib::events::Emitter;
+use claude_graph_lib::run_api::{abs, AppState};
 use claude_graph_lib::store;
 use tokio::task::JoinHandle;
 
@@ -79,4 +80,18 @@ pub async fn finish(join: JoinHandle<RunState>) -> RunState {
         .await
         .expect("run finished in time")
         .expect("run task did not panic")
+}
+
+/// An app state with its own temp data folder (no user settings, no trust
+/// records), so tests never read or write the real app data.
+pub fn fresh_app() -> AppState {
+    let data = tempfile::tempdir().unwrap().keep();
+    AppState::new(data)
+}
+
+/// [`fresh_app`] that has already trusted the graph saved in `dir`.
+pub fn trusted_app(dir: &Path) -> AppState {
+    let app = fresh_app();
+    app.trust_graph(&abs(dir)).expect("trust_graph");
+    app
 }

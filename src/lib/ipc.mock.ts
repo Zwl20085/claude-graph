@@ -9,8 +9,10 @@
 import example from '../../examples/hello-pipeline/graph.json';
 import type {
   AppError,
+  AppSettings,
   ClaudeCheck,
   Graph,
+  LaunchOptions,
   NodeEvent,
   NodeEventKind,
   NodeResult,
@@ -24,7 +26,8 @@ import { defaultTimers, type Timers } from './debounce';
 import { emptyGraph } from './graphOps';
 import { createMockRunner, type MockRun } from './mockRunner';
 import { countStatuses } from './status';
-import { validateGraph } from './validate';
+import { trustFingerprint, trustItems } from './trust';
+import { claudeBinError, validateGraph } from './validate';
 
 export const MOCK_EXAMPLE_DIR = '/mock/hello-pipeline';
 
@@ -37,6 +40,8 @@ export interface MockOptions {
   seed?: boolean;
   /** Folder answer for pick_folder (default: window.prompt). */
   pickFolder?: (title: string) => string | null;
+  /** Treat every graph as trusted (skips the trust dialog; default false). */
+  trustAll?: boolean;
 }
 
 const appError = (code: string, message: string): AppError => ({ code, message });
@@ -47,6 +52,13 @@ function promptFolder(title: string): string | null {
   if (typeof p !== 'function') return null;
   const answer = p(`${title}\n(mock mode: type any folder path)`, '/mock/new-graph');
   return answer === null || answer.trim() === '' ? null : answer.trim();
+}
+
+/** `window.__CG_LAUNCH__` stands in for argv/env in mock mode (tests, browser dev). */
+function mockLaunchOptions(): LaunchOptions {
+  const raw = (globalThis as { __CG_LAUNCH__?: Partial<LaunchOptions> }).__CG_LAUNCH__;
+  const dir = typeof raw?.open_dir === 'string' && raw.open_dir.trim() !== '' ? raw.open_dir.trim() : null;
+  return { open_dir: dir, autorun: dir !== null && raw?.autorun === true };
 }
 
 function summarise(run: MockRun): RunSummary {
@@ -68,6 +80,15 @@ export function createMockIpc(options: MockOptions = {}): Api {
   let recent: string[] = [];
   const stateListeners = new Set<(s: RunState) => void>();
   const eventListeners = new Set<(e: NodeEvent) => void>();
+  /** dir -> accepted fingerprint of the elevated fields (stand-in for trusted.json). */
+  const trusted = new Map<string, string>();
+  let appSettings: AppSettings = { claude_bin: null };
+
+  const trustStatus = (dir: string) => {
+    const items = trustItems(requireGraph(dir));
+    const ok = options.trustAll === true || items.length === 0 || trusted.get(dir) === trustFingerprint(items);
+    return { trusted: ok, items };
+  };
 
   const touchRecent = (dir: string): void => {
     recent = [dir, ...recent.filter((d) => d !== dir)].slice(0, 20);
@@ -106,7 +127,23 @@ export function createMockIpc(options: MockOptions = {}): Api {
   };
 
   return {
-    checkClaude: async (): Promise<ClaudeCheck> => ({ found: true, path: '/mock/claude', version: '2.1.0 (mock)' }),
+    checkClaude: async (): Promise<ClaudeCheck> => ({
+      found: true,
+      path: appSettings.claude_bin ?? '/mock/claude',
+      version: '2.1.0 (mock)',
+    }),
+    getAppSettings: async () => ({ ...appSettings }),
+    setAppSettings: async (settings) => {
+      const bin = settings.claude_bin === null || settings.claude_bin.trim() === '' ? null : settings.claude_bin.trim();
+      const err = bin === null ? null : claudeBinError(bin);
+      if (err) throw appError('invalid_input', err);
+      appSettings = { claude_bin: bin };
+      return { ...appSettings };
+    },
+    graphTrustStatus: async (dir) => clone(trustStatus(dir)),
+    trustGraph: async (dir) => {
+      trusted.set(dir, trustFingerprint(trustStatus(dir).items));
+    },
     createGraph: async (dir, name) => {
       if (graphs.has(dir)) throw appError('io', `graph.json already exists in ${dir}`);
       const g = emptyGraph(name);
@@ -127,7 +164,10 @@ export function createMockIpc(options: MockOptions = {}): Api {
     },
     listRecent: async () => [...recent],
     pickFolder: async (title) => (options.pickFolder ?? promptFolder)(title),
-    startRun: async (dir, target: RunTarget) => runner.start(dir, clone(requireGraph(dir)), target),
+    startRun: async (dir, target: RunTarget) => {
+      if (!trustStatus(dir).trusted) throw appError('untrusted_graph', 'graph has elevated settings that were not trusted');
+      return runner.start(dir, clone(requireGraph(dir)), target);
+    },
     cancelRun: async (runId) => {
       if (!runner.get(runId)) throw appError('not_found', `run ${runId} not found`);
       runner.cancel(runId);
@@ -160,7 +200,13 @@ export function createMockIpc(options: MockOptions = {}): Api {
       if (text.trim() === '') throw appError('invalid_input', 'message is empty');
       runner.sendMessage(runId, nodeId, text);
     },
-    openPath: async () => undefined,
+    revealGraphDir: async (dir) => {
+      requireGraph(dir);
+    },
+    revealNodeDir: async (dir, nodeId) => {
+      if (!requireGraph(dir).nodes.some((n) => n.id === nodeId)) throw appError('not_found', `node ${nodeId} not found`);
+    },
+    launchOptions: async () => mockLaunchOptions(),
     onRunState: async (handler): Promise<Unlisten> => {
       stateListeners.add(handler);
       return () => stateListeners.delete(handler);

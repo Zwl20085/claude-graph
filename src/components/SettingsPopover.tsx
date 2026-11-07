@@ -1,21 +1,19 @@
-/** Graph settings: concurrency, resource capacities, defaults, claude path. */
-import { useState } from 'react';
+/** Graph settings (concurrency, resources, defaults) and per-machine app settings (claude path). */
+import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { MODELS, PERMISSION_MODES, type Settings } from '../types/contract';
-import { useGraphStore } from '../store/graphStore';
-import { btnCls, Field, inputCls, Select } from './ui';
-
-const toInt = (raw: string, min: number): number | null => {
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= min ? n : null;
-};
+import { IGNORED_CLAUDE_BIN_TEXT, useGraphStore } from '../store/graphStore';
+import { btnCls, errorCls, Field, Input, inputCls, NumberInput, Select, tagError } from './ui';
 
 function ResourcesTable({ resources, onChange }: { resources: Settings['resources']; onChange: (r: Settings['resources']) => void }) {
   const [tag, setTag] = useState('');
+  const [error, setError] = useState<string | null>(null);
   const entries = Object.entries(resources);
   const add = (): void => {
     const t = tag.trim();
-    if (t === '' || t in resources) return;
+    const err = t in resources ? `"${t}" already exists.` : tagError(t);
+    setError(err);
+    if (err) return;
     onChange({ ...resources, [t]: 1 });
     setTag('');
   };
@@ -24,19 +22,16 @@ function ResourcesTable({ resources, onChange }: { resources: Settings['resource
       {entries.map(([k, cap]) => (
         <div key={k} className="flex items-center gap-1">
           <span className="flex-1 truncate font-mono text-[12px]">{k}</span>
-          <input
-            type="number"
-            min={0}
+          <NumberInput
             className={`${inputCls} w-20`}
             value={cap}
-            onChange={(e) => {
-              const n = toInt(e.target.value, 0);
-              if (n !== null) onChange({ ...resources, [k]: n });
-            }}
+            min={0}
+            aria-label={`capacity of ${k}`}
+            onCommit={(n) => n !== null && onChange({ ...resources, [k]: n })}
           />
           <button
             className={btnCls}
-            aria-label={`remove ${k}`}
+            aria-label={`remove resource ${k}`}
             onClick={() => onChange(Object.fromEntries(entries.filter(([x]) => x !== k)))}
           >
             <Trash2 size={13} />
@@ -44,35 +39,79 @@ function ResourcesTable({ resources, onChange }: { resources: Settings['resource
         </div>
       ))}
       <div className="flex items-center gap-1">
-        <input className={inputCls} placeholder="new tag" value={tag} onChange={(e) => setTag(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} />
+        <input
+          className={inputCls}
+          placeholder="new tag"
+          aria-label="new resource tag"
+          value={tag}
+          onChange={(e) => setTag(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && add()}
+        />
         <button className={btnCls} onClick={add} aria-label="add resource">
           <Plus size={13} />
         </button>
       </div>
+      {error && <span className={errorCls}>{error}</span>}
     </div>
+  );
+}
+
+/** Per-machine claude path: get_app_settings / set_app_settings, backend errors inline. */
+function AppSettingsSection() {
+  const appSettings = useGraphStore((s) => s.appSettings);
+  const saveAppSettings = useGraphStore((s) => s.saveAppSettings);
+  const loadAppSettings = useGraphStore((s) => s.loadAppSettings);
+  const [draft, setDraft] = useState(appSettings?.claude_bin ?? '');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (appSettings === null) void loadAppSettings();
+  }, [appSettings, loadAppSettings]);
+  useEffect(() => setDraft(appSettings?.claude_bin ?? ''), [appSettings]);
+
+  const apply = async (): Promise<void> => {
+    const next = draft.trim() === '' ? null : draft.trim();
+    if (next === (appSettings?.claude_bin ?? null)) return setError(null);
+    setBusy(true);
+    setError(await saveAppSettings({ claude_bin: next }));
+    setBusy(false);
+  };
+
+  return (
+    <section className="space-y-2 border-t border-[#3c3c3c] pt-3" aria-label="App settings (this machine)">
+      <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[#d4d4d4]">App settings (this machine)</h3>
+      <Field label="claude path" hint="Empty = CLAUDE_GRAPH_CLAUDE_BIN, then claude on PATH. Applied on Enter or when the field loses focus." error={error}>
+        <Input
+          className={`${inputCls} font-mono ${error ? 'border-[#ef4444]' : ''}`}
+          value={draft}
+          disabled={busy}
+          placeholder="claude on PATH"
+          aria-invalid={error !== null}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => void apply()}
+          onKeyDown={(e) => e.key === 'Enter' && void apply()}
+        />
+      </Field>
+    </section>
   );
 }
 
 export function SettingsPopover() {
   const settings = useGraphStore((s) => s.graph?.settings);
   const update = useGraphStore((s) => s.updateSettings);
-  const [binDraft, setBinDraft] = useState<string>(settings?.claude_bin ?? '');
   if (!settings) return null;
   return (
-    <div className="absolute right-0 top-9 z-40 w-[340px] space-y-3 rounded border border-[#3c3c3c] bg-[#252526] p-3 shadow-xl">
+    <div
+      role="dialog"
+      aria-label="Settings"
+      className="absolute right-0 top-9 z-40 max-h-[80vh] w-[340px] space-y-3 overflow-auto rounded border border-[#3c3c3c] bg-[#252526] p-3 shadow-xl"
+    >
+      <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[#d4d4d4]">Graph settings</h3>
       <Field label="max_parallel">
-        <input
-          type="number"
-          min={1}
-          className={inputCls}
-          value={settings.max_parallel}
-          onChange={(e) => {
-            const n = toInt(e.target.value, 1);
-            if (n !== null) update({ max_parallel: n });
-          }}
-        />
+        <NumberInput value={settings.max_parallel} min={1} onCommit={(n) => n !== null && update({ max_parallel: n })} />
       </Field>
-      <Field label="Resource capacities">
+      <Field label="Resource capacities" composite>
         <ResourcesTable resources={settings.resources} onChange={(resources) => update({ resources })} />
       </Field>
       <Field label="default_model">
@@ -94,18 +133,12 @@ export function SettingsPopover() {
         <input type="checkbox" checked={settings.stop_on_failure} onChange={(e) => update({ stop_on_failure: e.target.checked })} />
         stop_on_failure
       </label>
-      <Field label="claude_bin" hint="Empty = find claude on PATH. Applied when the field loses focus.">
-        <input
-          className={inputCls}
-          value={binDraft}
-          placeholder="claude on PATH"
-          onChange={(e) => setBinDraft(e.target.value)}
-          onBlur={() => {
-            const next = binDraft.trim() === '' ? null : binDraft.trim();
-            if (next !== settings.claude_bin) update({ claude_bin: next });
-          }}
-        />
-      </Field>
+      {settings.claude_bin !== null && (
+        <p className="text-[11px] text-[#f59e0b]" title={settings.claude_bin}>
+          graph.json sets claude_bin: {IGNORED_CLAUDE_BIN_TEXT}.
+        </p>
+      )}
+      <AppSettingsSection />
     </div>
   );
 }

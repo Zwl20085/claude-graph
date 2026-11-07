@@ -1,22 +1,36 @@
-//! Active runs: start, cancel, follow-up messages. Used by the Tauri commands
-//! and directly by the end-to-end tests (no Tauri needed).
+//! Active runs: start, cancel, follow-up messages, the stale-run sweep and
+//! app-exit shutdown. Used by the Tauri commands and directly by the
+//! end-to-end tests (no Tauri needed).
+//!
+//! One run per graph folder: the folder is reserved under the registry lock
+//! before any I/O (a placeholder entry, released on error), so two concurrent
+//! `start_run` calls cannot both pass the check. A follow-up to a finished run
+//! starts a "resumed" loop under the same rule.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::app_settings::{self, default_data_dir};
 use crate::claude_bin::{resolve, ClaudeCommand, Resolution, ResolveEnv};
-use crate::contract::{AppError, AppResult, Graph, RunState, RunTarget};
+use crate::contract::{AppError, AppResult, AppSettings, RunState, RunTarget, TrustStatus};
 use crate::events::Emitter;
 use crate::run_loop::{initial_state, LoopMsg, RunLoop};
-use crate::run_store::{check_id, list_run_states, new_run_id, read_run_state};
+use crate::run_store::{check_id, list_run_states, new_run_id, read_run_state, sweep_run};
 use crate::scheduler::Scheduler;
 use crate::store::read_graph;
-use crate::turns::RunCtx;
+use crate::trust;
+use crate::turns::{checked_session, RunCtx};
+
+pub use crate::paths::abs;
+
+/// How long a follow-up waits for another follow-up that is resuming the same run.
+const RESUME_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 struct RunHandle {
@@ -24,86 +38,212 @@ struct RunHandle {
     tx: mpsc::UnboundedSender<LoopMsg>,
 }
 
-/// Tauri-managed state: the runs whose loop is alive, by run id.
-#[derive(Clone, Default)]
+#[derive(Default)]
+struct Registry {
+    /// Live loops by run id.
+    runs: HashMap<String, RunHandle>,
+    /// Graph folders being set up (placeholder), with the run id for a resume.
+    reserved: HashMap<PathBuf, Option<String>>,
+}
+
+impl Registry {
+    fn owns_dir(&self, dir: &Path) -> bool {
+        self.reserved.contains_key(dir) || self.runs.values().any(|h| h.graph_dir == dir)
+    }
+
+    fn is_live(&self, run_id: &str) -> bool {
+        self.runs.contains_key(run_id)
+            || self.reserved.values().any(|r| r.as_deref() == Some(run_id))
+    }
+}
+
+/// Tauri-managed state: the runs whose loop is alive, and where the app keeps
+/// its settings and trust records.
+#[derive(Clone)]
 pub struct AppState {
-    runs: Arc<Mutex<HashMap<String, RunHandle>>>,
+    registry: Arc<Mutex<Registry>>,
+    data_dir: PathBuf,
 }
 
-/// The graph folder in long, absolute form. On Windows an 8.3 short segment
-/// (`C:\Users\ZHANGW~1\…`, common in `%TEMP%`) makes Claude Code refuse
-/// writes as a "suspicious Windows path", so the path is canonicalised and the
-/// verbatim `\\?\` prefix dropped again for a plain drive path.
-pub fn abs(dir: &Path) -> PathBuf {
-    let plain = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
-    match std::fs::canonicalize(&plain) {
-        Ok(long) => strip_verbatim(long).unwrap_or(plain),
-        Err(_) => plain,
+impl Default for AppState {
+    /// Uses `<data_dir>/claude-graph` (temp dir if the OS has none).
+    fn default() -> Self {
+        Self::new(default_data_dir().unwrap_or_else(|| std::env::temp_dir().join("claude-graph")))
     }
 }
 
-/// `\\?\C:\x` -> `C:\x`; `None` for verbatim UNC or other forms we keep as given.
-fn strip_verbatim(path: PathBuf) -> Option<PathBuf> {
-    let s = path.to_str()?;
-    match s.strip_prefix(r"\\?\") {
-        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => Some(PathBuf::from(rest)),
-        Some(_) => None,
-        None => Some(path),
+/// A graph folder reserved for a run being set up; released on drop unless
+/// [`AppState::commit`] turned it into a live run.
+struct Reservation {
+    state: AppState,
+    dir: PathBuf,
+    armed: bool,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.state.lock().reserved.remove(&self.dir);
+        }
     }
 }
 
-fn find_claude(graph: &Graph) -> AppResult<ClaudeCommand> {
-    match resolve(&ResolveEnv::from_process(graph.settings.claude_bin.clone())) {
-        Resolution::Found(c) => Ok(c),
-        Resolution::Missing { tried } => Err(AppError::new(
-            "claude_not_found",
-            match tried {
-                Some(t) => format!("claude CLI not found at {t}"),
-                None => "claude CLI not found; install Claude Code or set its path in settings"
-                    .to_string(),
-            },
-        )),
+/// Removes the registry entry when the loop task ends, also by panic.
+struct Deregister {
+    state: AppState,
+    run_id: String,
+}
+
+impl Drop for Deregister {
+    fn drop(&mut self) {
+        self.state.lock().runs.remove(&self.run_id);
     }
+}
+
+enum Claim {
+    Reserved(Reservation),
+    Active(RunHandle),
+    /// Another follow-up is resuming this very run right now.
+    Starting,
+    Busy,
+}
+
+fn run_active() -> AppError {
+    AppError::new(
+        "run_active",
+        "a run of this graph is already active; cancel it first",
+    )
 }
 
 impl AppState {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, RunHandle>> {
-        self.runs.lock().unwrap_or_else(|p| p.into_inner())
+    pub fn new(data_dir: PathBuf) -> Self {
+        Self {
+            registry: Arc::new(Mutex::new(Registry::default())),
+            data_dir,
+        }
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Registry> {
+        self.registry.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn handle(&self, run_id: &str) -> Option<RunHandle> {
-        self.lock().get(run_id).cloned()
+        self.lock().runs.get(run_id).cloned()
     }
 
     pub fn is_active(&self, run_id: &str) -> bool {
-        self.lock().contains_key(run_id)
+        self.lock().runs.contains_key(run_id)
     }
 
-    /// Register the loop and spawn it; the entry is removed when the loop ends.
-    fn launch(
+    pub fn active_count(&self) -> usize {
+        self.lock().runs.len()
+    }
+
+    pub fn app_settings(&self) -> AppSettings {
+        app_settings::load(&self.data_dir)
+    }
+
+    pub fn set_app_settings(&self, settings: &AppSettings) -> AppResult<AppSettings> {
+        app_settings::save(&self.data_dir, settings)
+    }
+
+    /// The CLI per the resolution order (app settings, env, ~/.local/bin, PATH).
+    pub fn find_claude(&self) -> AppResult<ClaudeCommand> {
+        let env = ResolveEnv::from_process(self.app_settings().claude_bin);
+        match resolve(&env) {
+            Resolution::Found(c) => Ok(c),
+            Resolution::Missing { tried } => Err(AppError::new(
+                "claude_not_found",
+                match tried {
+                    Some(t) => format!("claude CLI not found at {t}"),
+                    None => "claude CLI not found; install Claude Code or set its path in the app settings"
+                        .to_string(),
+                },
+            )),
+        }
+    }
+
+    /// Trust status of the graph saved in canonical folder `dir`.
+    pub fn trust_status(&self, dir: &Path) -> AppResult<TrustStatus> {
+        let graph = read_graph(dir)?;
+        Ok(trust::status(&self.data_dir, dir, &graph))
+    }
+
+    /// Accept the current elevated settings of the graph saved in `dir`.
+    pub fn trust_graph(&self, dir: &Path) -> AppResult<()> {
+        let graph = read_graph(dir)?;
+        trust::trust(&self.data_dir, dir, &graph)
+    }
+
+    fn reserve(&self, dir: &Path) -> AppResult<Reservation> {
+        let mut reg = self.lock();
+        if reg.owns_dir(dir) {
+            return Err(run_active());
+        }
+        reg.reserved.insert(dir.to_path_buf(), None);
+        Ok(Reservation {
+            state: self.clone(),
+            dir: dir.to_path_buf(),
+            armed: true,
+        })
+    }
+
+    fn claim_resume(&self, dir: &Path, run_id: &str) -> Claim {
+        let mut reg = self.lock();
+        if let Some(h) = reg.runs.get(run_id) {
+            return Claim::Active(h.clone());
+        }
+        if reg.runs.values().any(|h| h.graph_dir == dir) {
+            return Claim::Busy;
+        }
+        match reg.reserved.get(dir) {
+            Some(Some(r)) if r == run_id => Claim::Starting,
+            Some(_) => Claim::Busy,
+            None => {
+                reg.reserved
+                    .insert(dir.to_path_buf(), Some(run_id.to_string()));
+                Claim::Reserved(Reservation {
+                    state: self.clone(),
+                    dir: dir.to_path_buf(),
+                    armed: true,
+                })
+            }
+        }
+    }
+
+    /// Turn a reservation into a live run and spawn its loop.
+    fn commit(
         &self,
+        mut reservation: Reservation,
         run_loop: RunLoop,
         run_id: String,
-        graph_dir: PathBuf,
     ) -> JoinHandle<RunState> {
         let handle = RunHandle {
-            graph_dir,
+            graph_dir: reservation.dir.clone(),
             tx: run_loop.sender(),
         };
-        self.lock().insert(run_id.clone(), handle);
-        self.spawn_loop(run_loop, run_id)
-    }
-
-    fn spawn_loop(&self, run_loop: RunLoop, run_id: String) -> JoinHandle<RunState> {
-        let registry = self.clone();
+        {
+            let mut reg = self.lock();
+            reg.reserved.remove(&reservation.dir);
+            reg.runs.insert(run_id.clone(), handle);
+        }
+        reservation.armed = false;
+        let guard = Deregister {
+            state: self.clone(),
+            run_id,
+        };
         tokio::spawn(async move {
-            let final_state = run_loop.run().await;
-            registry.lock().remove(&run_id);
-            final_state
+            let _guard = guard;
+            run_loop.run().await
         })
     }
 
     /// Start a run; returns at once with its id and the loop's join handle.
+    /// `dir` should already be canonical ([`crate::paths::existing_dir`]).
     pub fn start_run(
         &self,
         dir: &Path,
@@ -111,18 +251,14 @@ impl AppState {
         emitter: Arc<dyn Emitter>,
     ) -> AppResult<(String, JoinHandle<RunState>)> {
         let graph_dir = abs(dir);
-        if self.lock().values().any(|h| h.graph_dir == graph_dir) {
-            return Err(AppError::new(
-                "run_active",
-                "a run of this graph is already active; cancel it first",
-            ));
-        }
+        let reservation = self.reserve(&graph_dir)?;
         let graph = read_graph(&graph_dir)?;
-        let claude = find_claude(&graph)?;
+        trust::require_trusted(&self.data_dir, &graph_dir, &graph)?;
+        let claude = self.find_claude()?;
         let sched = Scheduler::new(&graph, &target, &list_run_states(&graph_dir)?)?;
         let run_id = new_run_id(&graph_dir, Utc::now())?;
         let ctx = Arc::new(RunCtx {
-            graph_dir: graph_dir.clone(),
+            graph_dir,
             graph,
             run_id: run_id.clone(),
             claude,
@@ -130,7 +266,7 @@ impl AppState {
         });
         let state = initial_state(&ctx, &sched);
         let run_loop = RunLoop::new(ctx, sched, state);
-        let join = self.launch(run_loop, run_id.clone(), graph_dir);
+        let join = self.commit(reservation, run_loop, run_id.clone());
         Ok((run_id, join))
     }
 
@@ -152,6 +288,58 @@ impl AppState {
         self.send(run_id, LoopMsg::CancelNode(node_id.to_string()))
     }
 
+    /// App exit: cancel every active run and wait up to `timeout` for the
+    /// loops to finish (they kill their process trees and write run.json).
+    /// Returns how many loops were still alive at the deadline.
+    pub async fn shutdown(&self, timeout: Duration) -> usize {
+        let handles: Vec<(String, RunHandle)> = self
+            .lock()
+            .runs
+            .iter()
+            .map(|(id, h)| (id.clone(), h.clone()))
+            .collect();
+        for (id, h) in &handles {
+            if h.tx.send(LoopMsg::CancelRun).is_err() {
+                log::warn!("shutdown: run {id} already finished");
+            }
+        }
+        let deadline = Instant::now() + timeout;
+        while self.active_count() > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let left = self.active_count();
+        if left > 0 {
+            log::warn!("shutdown: {left} run loop(s) still alive after {timeout:?}");
+        }
+        left
+    }
+
+    /// Rewrite every run of `dir` that run.json says is `running` but that has
+    /// no live loop (the app exited or crashed) as cancelled / interrupted.
+    /// Returns the swept run ids. Errors on single runs are logged.
+    pub fn sweep_stale(&self, dir: &Path) -> AppResult<Vec<String>> {
+        let running: Vec<String> = list_run_states(dir)?
+            .into_iter()
+            .filter(|r| r.status == crate::contract::RunStatus::Running)
+            .map(|r| r.run_id)
+            .collect();
+        let mut swept = Vec::new();
+        for run_id in running {
+            // Holding the registry: no loop for this run can start or end meanwhile.
+            let reg = self.lock();
+            if reg.is_live(&run_id) {
+                continue;
+            }
+            match sweep_run(dir, &run_id) {
+                Ok(true) => swept.push(run_id),
+                Ok(false) => {}
+                Err(e) => log::warn!("sweeping run {run_id} failed: {e}"),
+            }
+            drop(reg);
+        }
+        Ok(swept)
+    }
+
     /// Follow-up message to a node. In an active run the loop handles it; in a
     /// finished run a resumed loop is started for it, whose join handle is returned.
     pub async fn send_message(
@@ -168,64 +356,66 @@ impl AppState {
         if text.is_empty() {
             return Err(AppError::new("invalid_input", "message is empty"));
         }
-        if let Some(handle) = self.handle(run_id) {
-            if let Some(result) = deliver(&handle, node_id, text).await {
-                return result.map(|_| None);
-            }
-            // The loop ended between lookup and delivery: fall through.
-        }
         let graph_dir = abs(dir);
+        let graph = read_graph(&graph_dir)?;
+        trust::require_trusted(&self.data_dir, &graph_dir, &graph)?;
+        let started = Instant::now();
+        let reservation = loop {
+            match self.claim_resume(&graph_dir, run_id) {
+                Claim::Reserved(r) => break r,
+                Claim::Active(handle) => {
+                    if handle.graph_dir != graph_dir {
+                        return Err(AppError::new(
+                            "not_found",
+                            format!("run {run_id} belongs to another graph"),
+                        ));
+                    }
+                    match deliver(&handle, node_id, text).await {
+                        Some(result) => return result.map(|_| None),
+                        // The loop ended between lookup and delivery: try again.
+                        None => continue,
+                    }
+                }
+                Claim::Starting if started.elapsed() < RESUME_WAIT => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Claim::Starting | Claim::Busy => return Err(run_active()),
+            }
+        };
         let state = read_run_state(&graph_dir, run_id)?;
+        if state.run_id != run_id {
+            return Err(AppError::new("invalid_input", "run.json names another run"));
+        }
         let node = state.nodes.get(node_id).ok_or_else(|| {
             AppError::new("not_found", format!("node {node_id} is not in this run"))
         })?;
-        if node.session_id.is_none() {
-            return Err(AppError::new("not_found", "node has not run yet"));
+        match node.session_id.as_deref() {
+            None => return Err(AppError::new("not_found", "node has not run yet")),
+            Some(sid) => {
+                checked_session(sid)?;
+            }
         }
-        let graph = read_graph(&graph_dir)?;
-        let claude = find_claude(&graph)?;
+        let claude = self.find_claude()?;
         let sched = Scheduler::resume(&graph, &state)?;
         let ctx = Arc::new(RunCtx {
-            graph_dir: graph_dir.clone(),
+            graph_dir,
             graph,
             run_id: run_id.to_string(),
             claude,
             emitter,
         });
         let run_loop = RunLoop::new(ctx, sched, state);
-        let handle = RunHandle {
-            graph_dir: graph_dir.clone(),
-            tx: run_loop.sender(),
-        };
         // Queue the message before the loop starts so it cannot finish first.
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .tx
+        run_loop
+            .sender()
             .send(LoopMsg::SendMessage {
                 node_id: node_id.to_string(),
                 text: text.to_string(),
                 reply: reply_tx,
             })
             .map_err(|_| AppError::new("internal", "run loop closed"))?;
-        let registered = {
-            let mut runs = self.lock();
-            let free = !runs.contains_key(run_id);
-            if free {
-                runs.insert(run_id.to_string(), handle);
-            }
-            free
-        };
-        if !registered {
-            // Another message resumed this run concurrently: hand it over.
-            let other = self
-                .handle(run_id)
-                .ok_or_else(|| AppError::new("internal", "run loop closed"))?;
-            return deliver(&other, node_id, text)
-                .await
-                .unwrap_or_else(|| Err(AppError::new("internal", "run loop closed")))
-                .map(|_| None);
-        }
-        let join = self.spawn_loop(run_loop, run_id.to_string());
+        let join = self.commit(reservation, run_loop, run_id.to_string());
         match reply_rx.await {
             Ok(result) => result.map(|_| Some(join)),
             Err(_) => Err(AppError::new("internal", "run loop closed")),
@@ -243,33 +433,4 @@ async fn deliver(handle: &RunHandle, node_id: &str, text: &str) -> Option<AppRes
     };
     handle.tx.send(msg).ok()?;
     reply_rx.await.ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strip_verbatim_keeps_plain_drive_paths() {
-        let verbatim = format!("{}{}", r"\\?\", r"C:\Users\x");
-        assert_eq!(
-            strip_verbatim(PathBuf::from(verbatim)),
-            Some(PathBuf::from(r"C:\Users\x"))
-        );
-        let unc = format!("{}{}", r"\\?\", r"UNC\host\share");
-        assert_eq!(strip_verbatim(PathBuf::from(unc)), None);
-        assert_eq!(
-            strip_verbatim(PathBuf::from("/work/g")),
-            Some(PathBuf::from("/work/g"))
-        );
-    }
-
-    #[test]
-    fn abs_gives_an_existing_absolute_long_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let got = abs(tmp.path());
-        assert!(got.is_absolute() && got.is_dir());
-        assert!(!got.to_string_lossy().starts_with(r"\\?\"));
-        assert!(!got.to_string_lossy().contains('~'), "{}", got.display());
-    }
 }

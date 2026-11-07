@@ -3,12 +3,14 @@
 //! All mutation happens on the loop task. Node turns run as spawned tasks and
 //! report back through the same channel that carries cancel and follow-up
 //! messages, so ordering is decided in one place. After every message the loop
-//! rewrites run.json and emits `run:state` if anything changed.
+//! rewrites run.json and emits `run:state` if anything changed. File I/O runs
+//! on tokio's blocking pool ([`blocking`]) so it never stalls a runtime worker.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::contract::{
@@ -19,8 +21,12 @@ use crate::run_store::{append_log, write_run_state};
 use crate::runner::{run_turn, TurnOutcome, TurnSpec};
 use crate::scheduler::{CancelEffect, Scheduler};
 use crate::turns::{
-    followup_turn, initial_turn, record_followup, record_initial, save_message, RunCtx,
+    followup_status, followup_turn, initial_turn, record_followup, record_initial, save_message,
+    RunCtx,
 };
+
+/// Attempts for the final run.json write.
+const FINAL_WRITE_ATTEMPTS: u32 = 3;
 
 pub enum LoopMsg {
     TurnDone {
@@ -45,6 +51,12 @@ pub struct RunLoop {
     initially_terminal: BTreeSet<String>,
     kills: HashMap<String, watch::Sender<bool>>,
     queues: HashMap<String, VecDeque<String>>,
+    /// Status and reason of each node after its latest turn; the base a
+    /// follow-up's outcome is combined with ([`followup_status`]).
+    effective: HashMap<String, (NodeStatus, Option<String>)>,
+    // Unbounded on purpose: senders are user actions (cancel, messages) and one
+    // TurnDone per finished turn, and the loop drains continuously, so the
+    // queue stays small; a bounded channel could block a turn's final report.
     tx: mpsc::UnboundedSender<LoopMsg>,
     rx: mpsc::UnboundedReceiver<LoopMsg>,
     persisted: Option<RunState>,
@@ -55,6 +67,20 @@ fn is_terminal(s: NodeStatus) -> bool {
         s,
         NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Skipped | NodeStatus::Cancelled
     )
+}
+
+/// Run blocking file I/O on tokio's blocking pool.
+pub async fn blocking<T, F>(f: F) -> AppResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> AppResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| {
+        Err(AppError::new(
+            "internal",
+            format!("blocking task failed: {e}"),
+        ))
+    })
 }
 
 /// Fresh `RunState` for a new run of `sched`'s target.
@@ -96,6 +122,7 @@ impl RunLoop {
             initially_terminal,
             kills: HashMap::new(),
             queues: HashMap::new(),
+            effective: HashMap::new(),
             tx,
             rx,
             persisted: None,
@@ -110,33 +137,33 @@ impl RunLoop {
         self.state.status = RunStatus::Running;
         self.state.finished_at = None;
         loop {
-            self.start_ready();
-            self.sync_and_publish();
+            self.start_ready().await;
+            self.sync_and_publish().await;
             if self.sched.is_done() {
                 // Messages already in the channel (a follow-up request) still count.
                 match self.rx.try_recv() {
                     Ok(msg) => {
-                        self.handle(msg);
+                        self.handle(msg).await;
                         continue;
                     }
                     Err(_) => break,
                 }
             }
             match self.rx.recv().await {
-                Some(msg) => self.handle(msg),
+                Some(msg) => self.handle(msg).await,
                 None => break,
             }
         }
-        self.finish()
+        self.finish().await
     }
 
-    fn handle(&mut self, msg: LoopMsg) {
+    async fn handle(&mut self, msg: LoopMsg) {
         match msg {
             LoopMsg::TurnDone {
                 node_id,
                 followup,
                 outcome,
-            } => self.on_turn_done(&node_id, followup, outcome),
+            } => self.on_turn_done(&node_id, followup, outcome).await,
             LoopMsg::CancelRun => {
                 for id in self.sched.cancel_all() {
                     self.kill(&id);
@@ -154,27 +181,38 @@ impl RunLoop {
                 text,
                 reply,
             } => {
-                let result = self.on_message(&node_id, text);
-                let _ = reply.send(result);
+                let result = self.on_message(&node_id, text).await;
+                if reply.send(result).is_err() {
+                    log::warn!("message to node {node_id}: the caller went away before the reply");
+                }
             }
         }
     }
 
     fn kill(&self, id: &str) {
         if let Some(k) = self.kills.get(id) {
-            let _ = k.send(true);
+            if k.send(true).is_err() {
+                log::warn!("kill node {id}: its turn already ended");
+            }
         }
     }
 
-    fn start_ready(&mut self) {
+    async fn start_ready(&mut self) {
         for id in self.sched.ready() {
             let now = Utc::now();
             if let Some(node) = self.state.nodes.get_mut(&id) {
                 node.started_at = Some(now);
                 node.status = NodeStatus::Running;
             }
-            self.sync_and_publish();
-            match initial_turn(&self.ctx, &self.state, &self.sched, &id, now) {
+            self.sync_and_publish().await;
+            let (ctx, state, sched, node_id) = (
+                self.ctx.clone(),
+                self.state.clone(),
+                self.sched.clone(),
+                id.clone(),
+            );
+            let spec = blocking(move || initial_turn(&ctx, &state, &sched, &node_id, now)).await;
+            match spec {
                 Ok(spec) => self.spawn_turn(spec, false),
                 Err(e) => {
                     let reason = format!("could not prepare the node: {}", e.message);
@@ -193,11 +231,14 @@ impl RunLoop {
         tokio::spawn(async move {
             let node_id = spec.node_id.clone();
             let outcome = run_turn(spec, emitter, kill_rx).await;
-            let _ = tx.send(LoopMsg::TurnDone {
-                node_id,
+            let done = LoopMsg::TurnDone {
+                node_id: node_id.clone(),
                 followup,
                 outcome,
-            });
+            };
+            if tx.send(done).is_err() {
+                log::warn!("node {node_id}: the run loop ended before the turn reported");
+            }
         });
     }
 
@@ -211,17 +252,45 @@ impl RunLoop {
         });
     }
 
-    fn on_turn_done(&mut self, id: &str, followup: bool, outcome: TurnOutcome) {
+    /// Write result.md / summary.json / messages for a finished turn.
+    async fn record(
+        &self,
+        id: &str,
+        followup: bool,
+        outcome: &TurnOutcome,
+        status: NodeStatus,
+        now: DateTime<Utc>,
+    ) -> AppResult<(Option<f64>, Option<u32>)> {
+        let (ctx, id, outcome) = (self.ctx.clone(), id.to_string(), outcome.clone());
+        blocking(move || {
+            if followup {
+                record_followup(&ctx, &id, &outcome, status, now).map(|s| (s.cost_usd, s.num_turns))
+            } else {
+                record_initial(&ctx, &id, &outcome).map(|_| (outcome.cost_usd, outcome.num_turns))
+            }
+        })
+        .await
+    }
+
+    async fn on_turn_done(&mut self, id: &str, followup: bool, outcome: TurnOutcome) {
         self.kills.remove(id);
         let now = Utc::now();
         if followup {
             self.sched.release(id);
         }
-        let recorded = if followup {
-            record_followup(&self.ctx, id, &outcome, now).map(|s| (s.cost_usd, s.num_turns))
+        let (status, reason) = if followup {
+            let base = self
+                .effective
+                .get(id)
+                .cloned()
+                .unwrap_or((outcome.status, outcome.reason.clone()));
+            followup_status(base, &outcome)
         } else {
-            record_initial(&self.ctx, id, &outcome).map(|_| (outcome.cost_usd, outcome.num_turns))
+            (outcome.status, outcome.reason.clone())
         };
+        self.effective
+            .insert(id.to_string(), (status, reason.clone()));
+        let recorded = self.record(id, followup, &outcome, status, now).await;
         if let Err(e) = &recorded {
             log::error!("recording node {id} of run {} failed: {e}", self.ctx.run_id);
         }
@@ -236,21 +305,23 @@ impl RunLoop {
         let log_status = if followup {
             "followup".to_string()
         } else {
-            status_text(outcome.status)
+            status_text(status)
         };
-        if let Err(e) = append_log(
-            &self.ctx.graph_dir,
-            &self.ctx.run_id,
-            id,
-            &log_status,
-            outcome.cost_usd,
-            Some(outcome.duration_ms),
-        ) {
+        let (dir, run_id, node_id) = (
+            self.ctx.graph_dir.clone(),
+            self.ctx.run_id.clone(),
+            id.to_string(),
+        );
+        let (cost, duration) = (outcome.cost_usd, outcome.duration_ms);
+        let logged = blocking(move || {
+            append_log(&dir, &run_id, &node_id, &log_status, cost, Some(duration))
+        })
+        .await;
+        if let Err(e) = logged {
             log::error!("GRAPH_LOG append failed: {e}");
         }
         self.next_followup(id, &outcome);
-        self.sched
-            .on_finished(id, outcome.status, outcome.reason.clone());
+        self.sched.on_finished(id, status, reason);
     }
 
     /// Start the next queued follow-up of `id`, or drop the queue if impossible.
@@ -264,7 +335,13 @@ impl RunLoop {
         };
         let spec = match (outcome.status, session) {
             (NodeStatus::Cancelled, _) => None,
-            (_, Some(sid)) => followup_turn(&self.ctx, id, &sid, &text).ok(),
+            (_, Some(sid)) => match followup_turn(&self.ctx, id, &sid, &text) {
+                Ok(spec) => Some(spec),
+                Err(e) => {
+                    log::warn!("follow-up for node {id} not started: {e}");
+                    None
+                }
+            },
             (_, None) => None,
         };
         match spec {
@@ -286,7 +363,12 @@ impl RunLoop {
         }
     }
 
-    fn on_message(&mut self, id: &str, text: String) -> AppResult<()> {
+    async fn save(&self, id: &str, text: &str) -> AppResult<()> {
+        let (ctx, id, text) = (self.ctx.clone(), id.to_string(), text.to_string());
+        blocking(move || save_message(&ctx, &id, MessageRole::User, &text)).await
+    }
+
+    async fn on_message(&mut self, id: &str, text: String) -> AppResult<()> {
         let status = self
             .sched
             .status(id)
@@ -294,13 +376,14 @@ impl RunLoop {
         let session = self.state.nodes.get(id).and_then(|n| n.session_id.clone());
         match status {
             NodeStatus::Running => {
+                // Persist first: a failed write leaves the queue untouched.
+                self.save(id, &text).await?;
                 self.sched.hold(id);
                 self.queues
                     .entry(id.to_string())
                     .or_default()
                     .push_back(text.clone());
-                save_message(&self.ctx, id, MessageRole::User, &text)?;
-                self.emit_event(id, NodeEventKind::UserMessage, text.clone());
+                self.emit_event(id, NodeEventKind::UserMessage, text);
                 Ok(())
             }
             NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Cancelled
@@ -308,12 +391,14 @@ impl RunLoop {
             {
                 let sid = session.unwrap_or_default();
                 let spec = followup_turn(&self.ctx, id, &sid, &text)?;
+                self.save(id, &text).await?;
+                let reason = self.sched.reason(id).map(str::to_string);
+                self.effective.insert(id.to_string(), (status, reason));
                 self.sched.reopen(id);
                 if let Some(node) = self.state.nodes.get_mut(id) {
                     node.status = NodeStatus::Running;
                     node.reason = None;
                 }
-                save_message(&self.ctx, id, MessageRole::User, &text)?;
                 self.emit_event(id, NodeEventKind::UserMessage, text);
                 self.spawn_turn(spec, true);
                 Ok(())
@@ -322,8 +407,7 @@ impl RunLoop {
         }
     }
 
-    /// Copy scheduler statuses into the run state; persist and emit on change.
-    fn sync_and_publish(&mut self) {
+    fn sync_statuses(&mut self) {
         for (id, node) in self.state.nodes.iter_mut() {
             if let Some(status) = self.sched.status(id) {
                 if status != node.status {
@@ -332,30 +416,48 @@ impl RunLoop {
                 }
             }
         }
+    }
+
+    async fn write_state(&self) -> AppResult<()> {
+        let (dir, state) = (self.ctx.graph_dir.clone(), self.state.clone());
+        blocking(move || write_run_state(&dir, &state)).await
+    }
+
+    /// Copy scheduler statuses into the run state; persist and emit on change.
+    /// `persisted` only advances when the write succeeded, so a failed write is
+    /// retried on the next change.
+    async fn sync_and_publish(&mut self) {
+        self.sync_statuses();
         if self.persisted.as_ref() == Some(&self.state) {
             return;
         }
-        if let Err(e) = write_run_state(&self.ctx.graph_dir, &self.state) {
-            log::error!("writing run.json failed: {e}");
+        match self.write_state().await {
+            Ok(()) => self.persisted = Some(self.state.clone()),
+            Err(e) => log::error!("writing run.json failed: {e}"),
         }
         self.ctx.emitter.run_state(&self.state);
-        self.persisted = Some(self.state.clone());
     }
 
-    fn finish(mut self) -> RunState {
+    async fn finish(mut self) -> RunState {
         self.sched.finalize();
-        self.sync_and_publish();
-        for (id, node) in &self.state.nodes {
-            let never_ran = node.started_at.is_none() && !self.initially_terminal.contains(id);
-            if never_ran && is_terminal(node.status) {
-                let _ = append_log(
-                    &self.ctx.graph_dir,
-                    &self.ctx.run_id,
-                    id,
-                    &status_text(node.status),
-                    None,
-                    None,
-                );
+        self.sync_statuses();
+        let never_ran: Vec<(String, NodeStatus)> = self
+            .state
+            .nodes
+            .iter()
+            .filter(|(id, n)| {
+                n.started_at.is_none()
+                    && !self.initially_terminal.contains(*id)
+                    && is_terminal(n.status)
+            })
+            .map(|(id, n)| (id.clone(), n.status))
+            .collect();
+        for (id, status) in never_ran {
+            let (dir, run_id) = (self.ctx.graph_dir.clone(), self.ctx.run_id.clone());
+            let text = status_text(status);
+            let logged = blocking(move || append_log(&dir, &run_id, &id, &text, None, None)).await;
+            if let Err(e) = logged {
+                log::warn!("GRAPH_LOG append failed: {e}");
             }
         }
         self.state.status = if self.sched.is_cancelled() {
@@ -366,7 +468,21 @@ impl RunLoop {
             RunStatus::Failed
         };
         self.state.finished_at = Some(Utc::now());
-        self.sync_and_publish();
+        for attempt in 1..=FINAL_WRITE_ATTEMPTS {
+            match self.write_state().await {
+                Ok(()) => {
+                    self.persisted = Some(self.state.clone());
+                    break;
+                }
+                Err(e) => {
+                    log::error!(
+                        "writing the final run.json (attempt {attempt}/{FINAL_WRITE_ATTEMPTS}) failed: {e}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100 * u64::from(attempt))).await;
+                }
+            }
+        }
+        self.ctx.emitter.run_state(&self.state);
         self.state
     }
 }

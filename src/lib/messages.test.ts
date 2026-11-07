@@ -52,7 +52,7 @@ describe('mock send_message', () => {
   afterEach(() => vi.useRealTimers());
 
   it('resumes a finished node and echoes a reply after 1.5 s', async () => {
-    const api = createMockIpc({ stepMs: 10 });
+    const api = createMockIpc({ stepMs: 10, trustAll: true });
     const states: RunState[] = [];
     const events: NodeEvent[] = [];
     void api.onRunState((s) => states.push(s));
@@ -72,7 +72,7 @@ describe('mock send_message', () => {
   });
 
   it('refuses nodes that never ran and empty text', async () => {
-    const api = createMockIpc({ stepMs: 10 });
+    const api = createMockIpc({ stepMs: 10, trustAll: true });
     const runId = await api.startRun(MOCK_EXAMPLE_DIR, { from: 'report' });
     await expect(api.sendMessage(MOCK_EXAMPLE_DIR, runId, 'report', 'hi')).rejects.toMatchObject({ code: 'not_found' });
     await expect(api.sendMessage(MOCK_EXAMPLE_DIR, runId, 'survey', 'hi')).rejects.toMatchObject({ code: 'not_found' });

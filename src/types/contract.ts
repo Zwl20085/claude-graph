@@ -39,7 +39,11 @@ export interface Settings {
   stop_on_failure: boolean;
   default_model: Model;
   default_permission_mode: PermissionMode;
-  /** null = find `claude` on PATH. */
+  /**
+   * Kept for compatibility with older graph.json files only. The backend
+   * ignores it and the UI hides it: the claude path is a per-machine
+   * setting (`AppSettings.claude_bin`).
+   */
   claude_bin: string | null;
 }
 
@@ -204,10 +208,52 @@ export interface ClaudeCheck {
 }
 
 /**
+ * Return value of `launch_options`: graph folder from argv / `CLAUDE_GRAPH_OPEN`,
+ * and whether to start `run all` once it is open (`--run` / `CLAUDE_GRAPH_AUTORUN`).
+ * `autorun` is only true when `open_dir` is set.
+ */
+export interface LaunchOptions {
+  open_dir: string | null;
+  autorun: boolean;
+}
+
+/** Per-machine app settings (`get_app_settings` / `set_app_settings`). */
+export interface AppSettings {
+  /** Absolute path of the claude CLI; null = env CLAUDE_GRAPH_CLAUDE_BIN, then PATH. */
+  claude_bin: string | null;
+}
+
+export const TRUST_ITEM_KINDS = [
+  'bypass_permissions',
+  'dont_ask',
+  'bash_tool',
+  'absolute_working_dir',
+  'claude_bin_in_graph',
+] as const;
+export type TrustItemKind = (typeof TRUST_ITEM_KINDS)[number];
+
+/** One elevated setting of a graph that needs the user's trust before a run. */
+export interface TrustItem {
+  /** null for graph-level items (default permission mode, claude_bin). */
+  node_id: string | null;
+  kind: TrustItemKind;
+  detail: string;
+}
+
+/** Return value of `graph_trust_status`. */
+export interface TrustStatus {
+  /** true when `items` is empty or their fingerprint was accepted via `trust_graph`. */
+  trusted: boolean;
+  items: TrustItem[];
+}
+
+/**
  * Error returned by every command. Codes in use: not_implemented, io, json,
  * invalid_graph, not_found, claude_not_found, run_active, internal, spawn_failed,
- * invalid_input. send_message: a node that never ran -> not_found; empty text
- * -> invalid_input.
+ * invalid_input, untrusted_graph (start_run on a graph whose elevated settings
+ * were not accepted via trust_graph). send_message: a node that never ran ->
+ * not_found; empty text -> invalid_input. `interrupted` appears as a node
+ * `reason` for runs found stale at startup.
  */
 export interface AppError {
   code: string;
@@ -220,5 +266,19 @@ export function isAppError(value: unknown): value is AppError {
     value !== null &&
     typeof (value as AppError).code === 'string' &&
     typeof (value as AppError).message === 'string'
+  );
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const isNullableString = (v: unknown): boolean => v === null || typeof v === 'string';
+
+/** Shape check of a RunState payload (event or command reply) before it enters the store. */
+export function isRunState(value: unknown): value is RunState {
+  if (!isObject(value)) return false;
+  const { run_id, graph_dir, started_at, finished_at, status, nodes } = value;
+  if (typeof run_id !== 'string' || typeof graph_dir !== 'string' || typeof started_at !== 'string') return false;
+  if (!isNullableString(finished_at) || !(RUN_STATUSES as readonly unknown[]).includes(status) || !isObject(nodes)) return false;
+  return Object.values(nodes).every(
+    (n) => isObject(n) && (NODE_STATUSES as readonly unknown[]).includes(n.status) && isNullableString(n.reason ?? null),
   );
 }

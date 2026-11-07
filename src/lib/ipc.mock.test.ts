@@ -9,7 +9,7 @@ const last = <T>(a: readonly T[]): T | undefined => a[a.length - 1];
 const DIR = MOCK_EXAMPLE_DIR;
 
 function setup() {
-  const api = createMockIpc({ stepMs: STEP, now: () => new Date(Date.now()), pickFolder: () => '/mock/picked' });
+  const api = createMockIpc({ stepMs: STEP, now: () => new Date(Date.now()), pickFolder: () => '/mock/picked', trustAll: true });
   const states: RunState[] = [];
   const events: NodeEvent[] = [];
   void api.onRunState((s) => states.push(s));
@@ -140,7 +140,9 @@ describe('mock graph commands', () => {
     await expect(api.getRun(DIR, 'none')).rejects.toMatchObject({ code: 'not_found' });
     await expect(api.cancelRun('none')).rejects.toMatchObject({ code: 'not_found' });
     await expect(api.startRun(DIR, { from: 'ghost' })).rejects.toMatchObject({ code: 'not_found' });
-    await expect(api.openPath('/x')).resolves.toBeUndefined();
+    await expect(api.revealGraphDir(DIR)).resolves.toBeUndefined();
+    await expect(api.revealNodeDir(DIR, 'survey')).resolves.toBeUndefined();
+    await expect(api.revealNodeDir(DIR, 'ghost')).rejects.toMatchObject({ code: 'not_found' });
   });
 
   it('unlisten stops delivery; mutating a returned graph does not touch the store', async () => {

@@ -12,7 +12,13 @@
 //
 // `--version` prints a version line and exits. Optional env FAKE_CLAUDE_DELAY_MS
 // (or arg `--fake-delay-ms N`) adds a pause between lines (useful to watch or
-// cancel a run). `--resume <id>` reuses that session id.
+// cancel a run). `--resume <id>` reuses that session id unless `--fork-session`
+// is also given (then a new id, as the real CLI does). A prompt containing
+// FAKE_NO_STATUS ends without any "## Status:" line.
+// `--hold-stdout-ms N` starts a child process that inherits stdout and sleeps
+// N ms, so the pipe stays open after this process exits (tests the runner's
+// drain grace and leftover kill).
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
@@ -74,8 +80,16 @@ async function main() {
   }
   const started = Date.now();
   const prompt = await readStdin();
-  // `--resume <id>` continues that session, as the real CLI does.
-  const sessionId = argValue('--resume') ?? randomUUID();
+  // `--resume <id>` continues that session, as the real CLI does; `--fork-session` branches it.
+  const forked = process.argv.includes('--fork-session');
+  const sessionId = (!forked && argValue('--resume')) || randomUUID();
+  const holdMs = Number(argValue('--hold-stdout-ms') ?? 0) || 0;
+  if (holdMs > 0) {
+    spawn(process.execPath, ['-e', `setTimeout(() => {}, ${holdMs})`], {
+      stdio: ['ignore', 'inherit', 'ignore'],
+      windowsHide: true,
+    }).unref();
+  }
   const model = argValue('--model') ?? 'sonnet';
   const cwd = process.cwd();
   const fail = prompt.includes('FAKE_FAIL');
@@ -133,7 +147,10 @@ async function main() {
   }
 
   const list = written.map((d) => `- ${d.path} — ${d.description || 'stub'}`).join('\n');
-  const finalText = fail
+  const noStatus = prompt.includes('FAKE_NO_STATUS');
+  const finalText = noStatus
+    ? 'Answered the message without a status line.'
+    : fail
     ? `Could not finish.\n\n## Deliverables\n${list}\n## Status: BLOCKED\nFAKE_FAIL was present in the prompt, so this fake run reports BLOCKED.`
     : `All deliverables written.\n\n## Deliverables\n${list}\n## Status: DONE`;
   await emit({

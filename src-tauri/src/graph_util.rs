@@ -1,34 +1,143 @@
 //! Graph validation and topology helpers shared by the store and the scheduler.
 //!
-//! Rules (docs/graph-format.md, "Loading rules"): version 1, unique node ids that
-//! are safe folder names, unique edge ids, edges name existing nodes, no cycles
-//! (Kahn), deliverable paths relative and inside the deliverables folder.
+//! Rules (docs/graph-format.md "Loading rules", ARCHITECTURE.md "Trust and
+//! validation"): version 1; node ids match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`,
+//! do not end in `.`, are not a Windows device name (CON, PRN, AUX, NUL, COM1-9,
+//! LPT1-9) and are unique ignoring case; unique edge ids; edges name existing
+//! nodes; no cycles (Kahn); deliverable paths relative and inside the
+//! deliverables folder; `allowed_tools` entries are tool names (optionally with
+//! a `(...)` rule) and never start with `-`; `working_dir` is a safe relative
+//! path or an absolute local path (never UNC / device); `continue_session_of`
+//! names a direct upstream node.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Component, Path};
+use std::sync::LazyLock;
 
-use crate::contract::{AppError, AppResult, Graph, GRAPH_VERSION};
+use regex::Regex;
+
+use crate::contract::{AppError, AppResult, Graph, Node, GRAPH_VERSION};
+use crate::paths::is_unc_or_device;
+
+static NODE_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$").expect("valid regex"));
+
+static TOOL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"^(mcp__[A-Za-z0-9_]+(__[A-Za-z0-9_]+)?|[A-Za-z][A-Za-z0-9_]*)(\([^\x00-\x1f"&|<>^%!]*\))?$"#,
+    )
+    .expect("valid regex")
+});
+
+/// Session ids passed to `--resume` (the CLI's UUIDs).
+static SESSION_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[0-9a-fA-F-]{36}$").expect("valid regex"));
 
 fn invalid(msg: impl Into<String>) -> AppError {
     AppError::new("invalid_graph", msg)
 }
 
-/// A node id is used as a folder name, so it must be a plain, portable name.
-pub fn is_valid_node_id(id: &str) -> bool {
-    !id.is_empty()
-        && id != "."
-        && id != ".."
-        && id.len() <= 128
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+/// Windows device names that cannot be folder names (with or without extension).
+fn is_reserved_stem(id: &str) -> bool {
+    let stem = id.split('.').next().unwrap_or(id).to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        s if s.len() == 4 && (s.starts_with("COM") || s.starts_with("LPT")) => {
+            matches!(s.as_bytes()[3], b'1'..=b'9')
+        }
+        _ => false,
+    }
 }
 
-/// Relative, no `..`, no root/prefix. Empty paths are allowed (ignored when run).
+/// A node id is used as a folder name, so it must be a plain, portable name.
+/// Run ids are checked with the same rule.
+pub fn is_valid_node_id(id: &str) -> bool {
+    NODE_ID.is_match(id) && !id.ends_with('.') && !is_reserved_stem(id)
+}
+
+/// An `allowed_tools` entry: `Read`, `Bash(python:*)`, `mcp__server__tool`.
+pub fn is_valid_tool(entry: &str) -> bool {
+    !entry.starts_with('-') && TOOL.is_match(entry)
+}
+
+/// A CLI session id safe to pass to `--resume`.
+pub fn is_valid_session_id(id: &str) -> bool {
+    SESSION_ID.is_match(id)
+}
+
+/// Relative, no `..`, no root/prefix/drive, on any OS (both separators are
+/// checked). Empty paths are allowed (ignored when run).
 pub fn is_safe_relative_path(p: &str) -> bool {
-    Path::new(p)
-        .components()
-        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+    let drive = p.len() >= 2 && p.as_bytes()[1] == b':';
+    !drive
+        && !p.starts_with(['/', '\\'])
+        && !p.split(['/', '\\']).any(|seg| seg == "..")
+        && Path::new(p)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// `working_dir` as given (trimmed), `None` when unset or blank.
+pub fn working_dir_of(node: &Node) -> Option<&str> {
+    node.working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+}
+
+/// True when `working_dir` is an absolute path (a trust item).
+pub fn is_absolute_working_dir(wd: &str) -> bool {
+    Path::new(wd).is_absolute()
+}
+
+fn validate_node(node: &Node, upstream: &BTreeSet<String>) -> AppResult<()> {
+    let id = &node.id;
+    if let Some(d) = node
+        .deliverables
+        .iter()
+        .find(|d| !is_safe_relative_path(d.path.trim()))
+    {
+        return Err(invalid(format!(
+            "node {id:?}: deliverable path {:?} must be relative to its deliverables folder",
+            d.path
+        )));
+    }
+    if let Some(t) = node
+        .allowed_tools
+        .iter()
+        .flatten()
+        .map(|t| t.trim())
+        .find(|t| !t.is_empty() && !is_valid_tool(t))
+    {
+        return Err(invalid(format!(
+            "node {id:?}: allowed tool {t:?} is not a tool name (like Read or Bash(python:*))"
+        )));
+    }
+    if let Some(wd) = working_dir_of(node) {
+        if is_unc_or_device(wd) {
+            return Err(invalid(format!(
+                "node {id:?}: working_dir {wd:?} is a network (UNC) or device path; use a local folder"
+            )));
+        }
+        if !is_safe_relative_path(wd) && !is_absolute_working_dir(wd) {
+            return Err(invalid(format!(
+                "node {id:?}: working_dir {wd:?} must be a relative path inside the graph folder (no ..) or an absolute path"
+            )));
+        }
+    }
+    if let Some(up) = node
+        .continue_session_of
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        if !upstream.contains(up) {
+            return Err(invalid(format!(
+                "node {id:?}: continue_session_of {up:?} must be a direct upstream node"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Validate a graph; the error message names the first problem found.
@@ -40,26 +149,21 @@ pub fn validate(graph: &Graph) -> AppResult<()> {
         )));
     }
     let mut ids = BTreeSet::new();
+    let mut folded = BTreeSet::new();
     for node in &graph.nodes {
         if !is_valid_node_id(&node.id) {
             return Err(invalid(format!(
-                "node id {:?} is not a valid folder name (use letters, digits, '-', '_', '.')",
+                "node id {:?} is not a valid folder name (start with a letter or digit, then letters, digits, '-', '_', '.'; at most 128 chars; no trailing '.'; not a Windows device name)",
                 node.id
             )));
         }
-        if !ids.insert(node.id.as_str()) {
-            return Err(invalid(format!("duplicate node id {:?}", node.id)));
-        }
-        if let Some(d) = node
-            .deliverables
-            .iter()
-            .find(|d| !is_safe_relative_path(&d.path))
-        {
+        if !folded.insert(node.id.to_ascii_lowercase()) {
             return Err(invalid(format!(
-                "node {:?}: deliverable path {:?} must be relative to its deliverables folder",
-                node.id, d.path
+                "duplicate node id {:?} (ids are compared ignoring case)",
+                node.id
             )));
         }
+        ids.insert(node.id.as_str());
     }
     let mut edge_ids = BTreeSet::new();
     for edge in &graph.edges {
@@ -77,6 +181,10 @@ pub fn validate(graph: &Graph) -> AppResult<()> {
         if edge.from == edge.to {
             return Err(invalid(format!("edge {:?} is a self-loop", edge.id)));
         }
+    }
+    let upstream = upstream_map(graph);
+    for node in &graph.nodes {
+        validate_node(node, &upstream[&node.id])?;
     }
     topo_order(graph).map(|_| ())
 }
@@ -215,6 +323,125 @@ mod tests {
             description: String::new(),
         });
         assert_eq!(validate(&escaping).unwrap_err().code, "invalid_graph");
+    }
+
+    #[test]
+    fn node_id_rules() {
+        let long_ok = "a".repeat(128);
+        let long_bad = "a".repeat(129);
+        for ok in [
+            "a",
+            "A1",
+            "survey-2",
+            "x_y.z",
+            long_ok.as_str(),
+            "com0",
+            "console",
+        ] {
+            assert!(is_valid_node_id(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "-a",
+            "_a",
+            ".a",
+            "a.",
+            "a/b",
+            "a b",
+            "con",
+            "CON",
+            "Nul.txt",
+            "com1",
+            "LPT9",
+            r"a\b",
+            long_bad.as_str(),
+        ] {
+            assert!(!is_valid_node_id(bad), "{bad}");
+        }
+        let err = validate(&graph(&["Survey", "survey"], &[])).unwrap_err();
+        assert!(err.message.contains("ignoring case"), "{}", err.message);
+    }
+
+    #[test]
+    fn tool_entries() {
+        for ok in [
+            "Read",
+            "Bash(python:*)",
+            "Bash(npm run test:*)",
+            "mcp__srv",
+            "mcp__srv__tool_1",
+            "WebFetch(domain:example.com)",
+        ] {
+            assert!(is_valid_tool(ok), "{ok}");
+        }
+        for bad in [
+            "-p",
+            "--dangerously-skip-permissions",
+            "Bash(a & b)",
+            "Bash(a|b)",
+            r#"Bash("x")"#,
+            "Bash(%PATH%)",
+            "Bash(x)y",
+            "1Read",
+            "Read Write",
+            "Bash(a\nb)",
+        ] {
+            assert!(!is_valid_tool(bad), "{bad}");
+        }
+        let mut g = graph(&["a"], &[]);
+        g.nodes[0].allowed_tools = Some(vec!["Read".into(), "--add-dir".into()]);
+        assert_eq!(validate(&g).unwrap_err().code, "invalid_graph");
+        g.nodes[0].allowed_tools = Some(vec!["Read".into(), " ".into()]);
+        validate(&g).unwrap();
+    }
+
+    #[test]
+    fn working_dir_and_continue_session_rules() {
+        let mut g = graph(&["a", "b", "c"], &[("a", "b")]);
+        for ok in ["sub", "sub/dir", "./x"] {
+            g.nodes[1].working_dir = Some(ok.into());
+            validate(&g).unwrap();
+        }
+        let abs = if cfg!(windows) { r"C:\work" } else { "/work" };
+        g.nodes[1].working_dir = Some(abs.into());
+        validate(&g).unwrap();
+        for bad in ["../x", "a/../../x", r"a\..\x", "C:x", r"\x"] {
+            g.nodes[1].working_dir = Some(bad.into());
+            assert_eq!(validate(&g).unwrap_err().code, "invalid_graph", "{bad}");
+        }
+        // UNC and verbatim-UNC working dirs are refused even though they are absolute.
+        for unc in [
+            r"\\server\share",
+            r"\\?\UNC\server\share\x",
+            "//server/share",
+        ] {
+            g.nodes[1].working_dir = Some(unc.into());
+            let err = validate(&g).unwrap_err();
+            assert_eq!(err.code, "invalid_graph", "{unc}");
+            assert!(err.message.contains("UNC"), "{unc}: {}", err.message);
+        }
+        g.nodes[1].working_dir = None;
+        g.nodes[1].continue_session_of = Some("a".into());
+        validate(&g).unwrap();
+        g.nodes[1].continue_session_of = Some("c".into());
+        assert!(validate(&g)
+            .unwrap_err()
+            .message
+            .contains("direct upstream"));
+        g.nodes[1].continue_session_of = Some(" ".into());
+        validate(&g).unwrap();
+    }
+
+    #[test]
+    fn session_ids() {
+        assert!(is_valid_session_id("0f8fad5b-d9cb-469f-a165-70867728950e"));
+        assert!(!is_valid_session_id("--dangerously-skip-permissions"));
+        assert!(!is_valid_session_id("sess-1"));
+        assert!(!is_valid_session_id(
+            "0f8fad5b-d9cb-469f-a165-70867728950e "
+        ));
     }
 
     #[test]

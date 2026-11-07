@@ -145,6 +145,6 @@ async fn real_claude_cancel_kills_tree() {
     assert_eq!(during, before + 1, "the run's claude.exe was visible");
     assert_eq!(
         after, before,
-        "taskkill /T removed claude.exe behind cmd /C"
+        "taskkill /T removed claude.exe behind the claude.cmd shim"
     );
 }

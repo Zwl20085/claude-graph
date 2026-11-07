@@ -61,3 +61,79 @@ export function composerState(status: NodeStatus | null): ComposerState {
       return { enabled: false, hint: 'Run the node first.' };
   }
 }
+
+const messageKey = (m: NodeMessage): string => `${m.role}\u0000${m.ts}\u0000${m.text}`;
+
+/**
+ * Snapshot (list_messages) plus live entries (user_message events), without
+ * duplicates on (role, ts, text). A live entry is never dropped when it is
+ * newer than the snapshot; an older live entry is dropped only when the
+ * snapshot already holds the same role and text (same message, other ts).
+ */
+export function mergeMessages(snapshot: readonly NodeMessage[], live: readonly NodeMessage[]): NodeMessage[] {
+  const seen = new Set(snapshot.map(messageKey));
+  const newest = snapshot.reduce((max, m) => (m.ts > max ? m.ts : max), '');
+  const extra: NodeMessage[] = [];
+  for (const m of live) {
+    const key = messageKey(m);
+    if (seen.has(key)) continue;
+    const covered = m.ts <= newest && snapshot.some((s) => s.role === m.role && s.text === m.text);
+    if (covered) continue;
+    seen.add(key);
+    extra.push(m);
+  }
+  return [...snapshot, ...extra]
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => a.m.ts.localeCompare(b.m.ts) || a.i - b.i)
+    .map(({ m }) => m);
+}
+
+export interface MessageHistory {
+  /** Re-read the snapshot; live entries are kept and merged in. */
+  refresh: () => Promise<void>;
+  addLive: (messages: readonly NodeMessage[]) => void;
+  current: () => NodeMessage[];
+  dispose: () => void;
+}
+
+/**
+ * History of one node session: the latest snapshot merged with live entries.
+ * A snapshot that resolves after newer live entries arrived never drops them
+ * (M5); an older refresh that resolves after a newer one is ignored.
+ */
+export function createMessageHistory(
+  list: () => Promise<NodeMessage[]>,
+  onChange: (messages: NodeMessage[]) => void,
+  onError: (err: unknown) => void = () => undefined,
+): MessageHistory {
+  let snapshot: NodeMessage[] = [];
+  let live: NodeMessage[] = [];
+  let request = 0;
+  let disposed = false;
+  const emit = (): void => {
+    if (!disposed) onChange(mergeMessages(snapshot, live));
+  };
+  return {
+    refresh: async () => {
+      request += 1;
+      const mine = request;
+      try {
+        const next = await list();
+        if (disposed || mine !== request) return;
+        snapshot = next;
+        emit();
+      } catch (err) {
+        if (!disposed) onError(err);
+      }
+    },
+    addLive: (messages) => {
+      if (messages.length === 0) return;
+      live = [...live, ...messages];
+      emit();
+    },
+    current: () => mergeMessages(snapshot, live),
+    dispose: () => {
+      disposed = true;
+    },
+  };
+}

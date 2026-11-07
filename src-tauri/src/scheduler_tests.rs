@@ -365,5 +365,34 @@ fn cancel_drops_holds_and_resume_starts_nothing() {
     s.release("a");
     s.on_finished("a", NodeStatus::Failed, Some("BLOCKED".into()));
     assert!(s.is_done());
-    assert_eq!(s.status("b"), Some(NodeStatus::Skipped));
+    // b was still pending in run.json: resume marks it interrupted (P3).
+    assert_eq!(s.status("b"), Some(NodeStatus::Cancelled));
+    assert_eq!(s.reason("b"), Some("interrupted"));
+}
+
+#[test]
+fn resume_maps_unfinished_slots_to_interrupted() {
+    let g = graph(
+        &[("a", &[]), ("b", &[]), ("c", &[]), ("d", &[])],
+        &[],
+        json!({}),
+    );
+    let r = run(
+        "R1",
+        &[
+            ("a", NodeStatus::Succeeded),
+            ("b", NodeStatus::Running),
+            ("c", NodeStatus::Queued),
+            ("d", NodeStatus::Pending),
+        ],
+    );
+    let mut s = Scheduler::resume(&g, &r).unwrap();
+    assert_eq!(s.status("a"), Some(NodeStatus::Succeeded));
+    for id in ["b", "c", "d"] {
+        assert_eq!(s.status(id), Some(NodeStatus::Cancelled), "{id}");
+        assert_eq!(s.reason(id), Some("interrupted"));
+    }
+    assert!(s.running().is_empty());
+    assert!(s.ready().is_empty());
+    assert!(s.is_done());
 }

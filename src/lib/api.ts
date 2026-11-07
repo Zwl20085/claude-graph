@@ -4,14 +4,17 @@
  * in-memory mock from `./ipc.mock`. Selection: `window.__TAURI_INTERNALS__`.
  */
 import type {
+  AppSettings,
   ClaudeCheck,
   Graph,
+  LaunchOptions,
   NodeEvent,
   NodeMessage,
   NodeResult,
   RunState,
   RunSummary,
   RunTarget,
+  TrustStatus,
 } from '../types/contract';
 import * as tauriIpc from './ipc';
 import { createMockIpc } from './ipc.mock';
@@ -19,7 +22,11 @@ import { createMockIpc } from './ipc.mock';
 export type Unlisten = () => void;
 
 export interface Api {
-  checkClaude: (claude_bin?: string | null) => Promise<ClaudeCheck>;
+  checkClaude: () => Promise<ClaudeCheck>;
+  getAppSettings: () => Promise<AppSettings>;
+  setAppSettings: (settings: AppSettings) => Promise<AppSettings>;
+  graphTrustStatus: (dir: string) => Promise<TrustStatus>;
+  trustGraph: (dir: string) => Promise<void>;
   createGraph: (dir: string, name: string) => Promise<Graph>;
   openGraph: (dir: string) => Promise<Graph>;
   saveGraph: (dir: string, graph: Graph) => Promise<void>;
@@ -34,7 +41,9 @@ export interface Api {
   renderBrief: (graph: Graph, node_id: string) => Promise<string>;
   listMessages: (dir: string, run_id: string, node_id: string) => Promise<NodeMessage[]>;
   sendMessage: (dir: string, run_id: string, node_id: string, text: string) => Promise<void>;
-  openPath: (path: string) => Promise<void>;
+  revealGraphDir: (dir: string) => Promise<void>;
+  revealNodeDir: (dir: string, node_id: string) => Promise<void>;
+  launchOptions: () => Promise<LaunchOptions>;
   onRunState: (handler: (state: RunState) => void) => Promise<Unlisten>;
   onNodeEvent: (handler: (event: NodeEvent) => void) => Promise<Unlisten>;
 }

@@ -12,7 +12,7 @@ use crate::contract::{
     AppError, AppResult, Graph, MessageRole, Node, NodeMessage, NodeStatus, NodeSummary, RunState,
 };
 use crate::events::Emitter;
-use crate::graph_util::upstream_map;
+use crate::graph_util::{is_valid_session_id, upstream_map};
 use crate::prompt::{
     display_dir, render_brief, render_prompt, resolve_working_dir, upstream_input, UpstreamInput,
     INSTRUCTION,
@@ -21,7 +21,7 @@ use crate::run_store::{
     append_message, node_run_dir, read_result_md, read_summary, write_summary, PROMPT_FILE,
     RESULT_FILE,
 };
-use crate::runner::{build_args, TurnOutcome, TurnSpec};
+use crate::runner::{build_args, final_status, Resume, TurnOutcome, TurnSpec};
 use crate::scheduler::Scheduler;
 use crate::store::{deliverables_dir, read_optional, write_atomic};
 
@@ -123,6 +123,38 @@ fn resume_session(
         .and_then(|s| s.session_id)
 }
 
+/// A session id from run.json or summary.json, checked before it reaches `--resume`.
+pub fn checked_session(id: &str) -> AppResult<&str> {
+    if is_valid_session_id(id) {
+        Ok(id)
+    } else {
+        Err(AppError::new(
+            "invalid_input",
+            format!("refusing to resume session {id:?}: not a CLI session id"),
+        ))
+    }
+}
+
+/// Status of a node after a follow-up turn, given its status before it
+/// (`base`). Follow-ups never downgrade a succeeded node unless the follow-up
+/// itself reports `## Status: BLOCKED`; a cancelled follow-up cancels the node.
+/// A node that had not succeeded takes the follow-up's own evaluation.
+pub fn followup_status(
+    base: (NodeStatus, Option<String>),
+    outcome: &TurnOutcome,
+) -> (NodeStatus, Option<String>) {
+    let blocked = outcome
+        .final_text
+        .as_deref()
+        .and_then(final_status)
+        .is_some_and(|(done, _)| !done);
+    match (outcome.status, base.0) {
+        (NodeStatus::Cancelled, _) => (NodeStatus::Cancelled, outcome.reason.clone()),
+        (_, NodeStatus::Succeeded) if !blocked => (NodeStatus::Succeeded, None),
+        _ => (outcome.status, outcome.reason.clone()),
+    }
+}
+
 /// Write prompt.md and build the first turn of `node_id`.
 pub fn initial_turn(
     ctx: &RunCtx,
@@ -143,6 +175,14 @@ pub fn initial_turn(
     write_atomic(&ctx.out_dir(node_id).join(PROMPT_FILE), prompt.as_bytes())?;
     std::fs::create_dir_all(deliverables_dir(&ctx.graph_dir, node_id))?;
     let resume = resume_session(ctx, state, sched, node);
+    // continue_session_of forks the upstream's session, leaving it untouched.
+    let resume = match resume.as_deref() {
+        Some(id) => Some(Resume {
+            session_id: checked_session(id)?,
+            fork: true,
+        }),
+        None => None,
+    };
     Ok(TurnSpec {
         run_id: ctx.run_id.clone(),
         node_id: node_id.to_string(),
@@ -151,7 +191,7 @@ pub fn initial_turn(
             node,
             &ctx.graph.settings,
             &ctx.graph_dir,
-            resume.as_deref(),
+            resume,
             INSTRUCTION,
         ),
         stdin_text: prompt,
@@ -169,6 +209,10 @@ pub fn followup_turn(
     text: &str,
 ) -> AppResult<TurnSpec> {
     let node = ctx.node(node_id)?;
+    let resume = Resume {
+        session_id: checked_session(session_id)?,
+        fork: false,
+    };
     Ok(TurnSpec {
         run_id: ctx.run_id.clone(),
         node_id: node_id.to_string(),
@@ -177,7 +221,7 @@ pub fn followup_turn(
             node,
             &ctx.graph.settings,
             &ctx.graph_dir,
-            Some(session_id),
+            Some(resume),
             FOLLOWUP_INSTRUCTION,
         ),
         stdin_text: text.to_string(),
@@ -231,12 +275,14 @@ fn count_followups(result_md: &str) -> usize {
         .count()
 }
 
-/// Append the follow-up's final text to result.md and accumulate summary.json.
+/// Append the follow-up's final text to result.md and accumulate summary.json
+/// (with `status`, the node's status after the follow-up, see [`followup_status`]).
 /// Returns the accumulated summary.
 pub fn record_followup(
     ctx: &RunCtx,
     node_id: &str,
     outcome: &TurnOutcome,
+    status: NodeStatus,
     now: DateTime<Utc>,
 ) -> AppResult<NodeSummary> {
     let dir = ctx.out_dir(node_id);
@@ -252,7 +298,10 @@ pub fn record_followup(
         save_message(ctx, node_id, MessageRole::Assistant, &text)?;
     }
     let before = read_summary(&ctx.graph_dir, &ctx.run_id, node_id)?;
-    let turn = summary_of(outcome);
+    let turn = NodeSummary {
+        status,
+        ..summary_of(outcome)
+    };
     let merged = match before {
         Some(b) => NodeSummary {
             session_id: turn.session_id.or(b.session_id),
@@ -283,5 +332,53 @@ mod tests {
         assert_eq!(add(None, Some(2u32)), Some(2));
         assert_eq!(add::<u32>(None, None), None);
         assert_eq!(status_word(NodeStatus::Succeeded), "succeeded");
+    }
+
+    fn outcome(status: NodeStatus, text: &str) -> TurnOutcome {
+        TurnOutcome {
+            status,
+            reason: (status != NodeStatus::Succeeded).then(|| "turn reason".to_string()),
+            session_id: None,
+            cost_usd: None,
+            num_turns: None,
+            duration_ms: 1,
+            is_error: false,
+            final_text: Some(text.to_string()),
+        }
+    }
+
+    #[test]
+    fn follow_ups_never_downgrade_a_succeeded_node_unless_blocked() {
+        let ok = (NodeStatus::Succeeded, None);
+        let no_status = outcome(NodeStatus::Failed, "just an answer");
+        assert_eq!(followup_status(ok.clone(), &no_status), ok);
+        let exit_error = outcome(NodeStatus::Failed, "## Status: DONE");
+        assert_eq!(followup_status(ok.clone(), &exit_error), ok);
+        let blocked = outcome(NodeStatus::Failed, "x\n## Status: BLOCKED\nno data");
+        assert_eq!(
+            followup_status(ok.clone(), &blocked),
+            (NodeStatus::Failed, Some("turn reason".into()))
+        );
+        let cancelled = outcome(NodeStatus::Cancelled, "");
+        assert_eq!(followup_status(ok, &cancelled).0, NodeStatus::Cancelled);
+        // A failed node is fixed by a successful follow-up, stays failed otherwise.
+        let failed = (NodeStatus::Failed, Some("old".into()));
+        let done = outcome(NodeStatus::Succeeded, "## Status: DONE");
+        assert_eq!(
+            followup_status(failed.clone(), &done),
+            (NodeStatus::Succeeded, None)
+        );
+        assert_eq!(followup_status(failed, &no_status).0, NodeStatus::Failed);
+    }
+
+    #[test]
+    fn session_ids_are_checked_before_resume() {
+        assert!(checked_session("0f8fad5b-d9cb-469f-a165-70867728950e").is_ok());
+        assert_eq!(
+            checked_session("--dangerously-skip-permissions")
+                .unwrap_err()
+                .code,
+            "invalid_input"
+        );
     }
 }

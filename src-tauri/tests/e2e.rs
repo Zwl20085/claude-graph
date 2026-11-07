@@ -5,8 +5,9 @@ mod common;
 use std::fs;
 use std::sync::Arc;
 
-use claude_graph_lib::contract::{MessageRole, NodeEventKind, NodeStatus, RunStatus, RunTarget};
-use claude_graph_lib::run_api::AppState;
+use claude_graph_lib::contract::{
+    MessageRole, NodeEventKind, NodeRunState, NodeStatus, RunState, RunStatus, RunTarget,
+};
 use claude_graph_lib::run_store::{self, LOG_HEADER};
 use common::*;
 
@@ -17,7 +18,7 @@ async fn example_graph_runs_end_to_end_and_takes_a_follow_up() {
     use_fake_claude("");
     let tmp = graph_dir(&example_graph());
     let dir = tmp.path();
-    let app = AppState::default();
+    let app = trusted_app(dir);
     let recorder = Arc::new(Recorder::default());
 
     let (run_id, join) = app
@@ -170,7 +171,7 @@ async fn blocked_node_fails_and_its_dependent_is_skipped() {
     design.extra_context = "FAKE_FAIL please".into();
     let tmp = graph_dir(&graph);
     let dir = tmp.path();
-    let app = AppState::default();
+    let app = trusted_app(dir);
     let recorder = Arc::new(Recorder::default());
 
     let (run_id, join) = app
@@ -223,4 +224,169 @@ async fn blocked_node_fails_and_its_dependent_is_skipped() {
     .unwrap();
     assert!(prompt.contains("(id: survey) — status: succeeded"));
     assert!(prompt.contains("All deliverables written."));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn untrusted_graph_is_refused_until_trusted() {
+    use_fake_claude("");
+    let tmp = graph_dir(&example_graph()); // design allows Bash(python:*)
+    let dir = tmp.path();
+    let app = fresh_app();
+    let recorder = Arc::new(Recorder::default());
+    let status = app
+        .trust_status(&claude_graph_lib::run_api::abs(dir))
+        .unwrap();
+    assert!(!status.trusted);
+    assert!(status
+        .items
+        .iter()
+        .any(|i| i.node_id.as_deref() == Some("design")));
+    let err = app
+        .start_run(dir, RunTarget::All, recorder.clone())
+        .unwrap_err();
+    assert_eq!(err.code, "untrusted_graph");
+    let err = app
+        .send_message(dir, "20261107T101500Z", "survey", "hi", recorder.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "untrusted_graph");
+    assert!(!dir.join("runs").exists(), "nothing ran");
+
+    app.trust_graph(&claude_graph_lib::run_api::abs(dir))
+        .unwrap();
+    let (_, join) = app.start_run(dir, RunTarget::All, recorder).unwrap();
+    assert_eq!(finish(join).await.status, RunStatus::Succeeded);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_start_run_admits_exactly_one() {
+    use_fake_claude("");
+    let tmp = graph_dir(&example_graph());
+    let dir = tmp.path().to_path_buf();
+    let app = trusted_app(&dir);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let starts: Vec<_> = (0..2)
+        .map(|_| {
+            let (app, dir, barrier) = (app.clone(), dir.clone(), barrier.clone());
+            tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                app.start_run(&dir, RunTarget::All, Arc::new(Recorder::default()))
+            })
+        })
+        .collect();
+    let mut joins = Vec::new();
+    let mut refused = 0;
+    for s in starts {
+        match s.await.unwrap() {
+            Ok((_, join)) => joins.push(join),
+            Err(e) => {
+                assert_eq!(e.code, "run_active");
+                refused += 1;
+            }
+        }
+    }
+    assert_eq!((joins.len(), refused), (1, 1));
+    for j in joins {
+        assert_eq!(finish(j).await.status, RunStatus::Succeeded);
+    }
+    assert_eq!(run_store::list_run_states(&dir).unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_running_runs_are_swept_but_live_ones_are_not() {
+    use_fake_claude("");
+    let tmp = graph_dir(&example_graph());
+    let dir = tmp.path();
+    let app = trusted_app(dir);
+    // A run left "running" by a crash.
+    let stale_id = "20200101T000000Z";
+    fs::create_dir_all(dir.join("runs").join(stale_id)).unwrap();
+    let running = |status| NodeRunState {
+        status,
+        ..NodeRunState::pending()
+    };
+    let stale = RunState {
+        run_id: stale_id.into(),
+        graph_dir: dir.display().to_string(),
+        started_at: "2020-01-01T00:00:00Z".parse().unwrap(),
+        finished_at: None,
+        status: RunStatus::Running,
+        nodes: [
+            ("survey".to_string(), running(NodeStatus::Succeeded)),
+            ("design".to_string(), running(NodeStatus::Running)),
+            ("report".to_string(), running(NodeStatus::Pending)),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    run_store::write_run_state(dir, &stale).unwrap();
+
+    let (live_id, join) = app
+        .start_run(dir, RunTarget::All, Arc::new(Recorder::default()))
+        .unwrap();
+    let swept = app.sweep_stale(dir).unwrap();
+    assert_eq!(swept, vec![stale_id.to_string()]);
+    let after = run_store::read_run_state(dir, stale_id).unwrap();
+    assert_eq!(after.status, RunStatus::Cancelled);
+    assert_eq!(after.nodes["survey"].status, NodeStatus::Succeeded);
+    for id in ["design", "report"] {
+        assert_eq!(after.nodes[id].status, NodeStatus::Cancelled);
+        assert_eq!(after.nodes[id].reason.as_deref(), Some("interrupted"));
+    }
+    let done = finish(join).await;
+    assert_eq!(
+        done.status,
+        RunStatus::Succeeded,
+        "the live run was not swept"
+    );
+    assert_eq!(
+        run_store::read_run_state(dir, &live_id).unwrap().status,
+        RunStatus::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn follow_up_without_status_keeps_a_succeeded_node_but_blocked_fails_it() {
+    use_fake_claude("");
+    let tmp = graph_dir(&example_graph());
+    let dir = tmp.path();
+    let app = trusted_app(dir);
+    let recorder = Arc::new(Recorder::default());
+    let (run_id, join) = app
+        .start_run(dir, RunTarget::All, recorder.clone())
+        .unwrap();
+    assert_eq!(finish(join).await.status, RunStatus::Succeeded);
+
+    let join = app
+        .send_message(
+            dir,
+            &run_id,
+            "survey",
+            "Just answer. FAKE_NO_STATUS",
+            recorder.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let after = finish(join).await;
+    assert_eq!(after.nodes["survey"].status, NodeStatus::Succeeded);
+    assert_eq!(after.nodes["report"].status, NodeStatus::Succeeded);
+    assert_eq!(after.status, RunStatus::Succeeded);
+    let summary = run_store::read_summary(dir, &run_id, "survey")
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.status, NodeStatus::Succeeded);
+
+    let join = app
+        .send_message(dir, &run_id, "survey", "FAKE_FAIL now", recorder.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let after = finish(join).await;
+    assert_eq!(after.nodes["survey"].status, NodeStatus::Failed);
+    assert!(after.nodes["survey"]
+        .reason
+        .as_deref()
+        .unwrap()
+        .contains("BLOCKED"));
 }

@@ -1,7 +1,8 @@
 /** Top bar: graph name, file actions, run controls, settings, claude status. */
-import { useState } from 'react';
+import { useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import {
+  ExternalLink,
   FilePlus,
   FolderOpen,
   PanelBottom,
@@ -13,7 +14,8 @@ import {
   Settings as SettingsIcon,
   Square,
 } from 'lucide-react';
-import { MOCK_MODE } from '../lib/api';
+import { api, MOCK_MODE } from '../lib/api';
+import { errorMessage } from '../store/runHelpers';
 import { isRunActive, runHasFailures } from '../lib/status';
 import { graphStore, useGraphStore, type ClaudeState } from '../store/graphStore';
 import { GRID } from './Canvas';
@@ -38,6 +40,28 @@ function ClaudeChip({ state }: { state: ClaudeState }) {
   );
 }
 
+/** Popover open state that closes on Escape and on a mouse-down outside `ref`. */
+function useDismissable(): [boolean, Dispatch<SetStateAction<boolean>>, RefObject<HTMLDivElement>] {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent): void => {
+      if (ref.current && !ref.current.contains(e.target as globalThis.Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  return [open, setOpen, ref];
+}
+
 interface TopBarProps {
   logVisible: boolean;
   onToggleLog: () => void;
@@ -50,7 +74,8 @@ export function TopBar({ logVisible, onToggleLog }: TopBarProps) {
   const selected = useGraphStore((s) => s.selectedNodeId);
   const claude = useGraphStore((s) => s.claude);
   const starting = useGraphStore((s) => s.startingRun);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const dir = useGraphStore((s) => s.dir);
+  const [settingsOpen, setSettingsOpen, settingsRef] = useDismissable();
   const { screenToFlowPosition } = useReactFlow();
   const store = graphStore().getState;
   const active = isRunActive(runState) || starting;
@@ -58,6 +83,11 @@ export function TopBar({ logVisible, onToggleLog }: TopBarProps) {
   const addNode = (): void => {
     const p = screenToFlowPosition({ x: window.innerWidth * 0.4, y: window.innerHeight * 0.4 });
     store().addNodeAt({ x: Math.round(p.x / GRID) * GRID, y: Math.round(p.y / GRID) * GRID });
+  };
+
+  const revealGraph = (): void => {
+    if (!dir) return;
+    api.revealGraphDir(dir).catch((err) => store().pushToast('error', `Could not open the folder: ${errorMessage(err)}`));
   };
 
   return (
@@ -73,6 +103,7 @@ export function TopBar({ logVisible, onToggleLog }: TopBarProps) {
       <div className="mx-2 h-5 w-px bg-[#3c3c3c]" />
       <button className={btnCls} onClick={() => void newGraphFlow()} title="New graph"><FilePlus size={14} />New</button>
       <button className={btnCls} onClick={() => void openFolderFlow()} title="Open graph folder"><FolderOpen size={14} />Open</button>
+      <button className={btnCls} onClick={revealGraph} title="Show the graph folder in the file manager"><ExternalLink size={14} />Open folder</button>
       <button className={btnCls} onClick={() => void store().save()} title="Save (Ctrl+S)"><Save size={14} />Save</button>
       <button className={btnCls} onClick={addNode} title="Add node (or double-click the canvas)"><Plus size={14} />Add node</button>
       <div className="mx-2 h-5 w-px bg-[#3c3c3c]" />
@@ -93,11 +124,17 @@ export function TopBar({ logVisible, onToggleLog }: TopBarProps) {
       <div className="ml-auto flex items-center gap-2">
         {MOCK_MODE && <span className="rounded bg-[#f59e0b]/15 px-1.5 text-[11px] text-[#f59e0b]" title="No Tauri backend: in-memory mock">mock</span>}
         <ClaudeChip state={claude} />
-        <button className={`${btnCls} ${logVisible ? 'bg-[#37373d]' : ''}`} onClick={onToggleLog} title="Show/hide the log panel">
+        <button className={`${btnCls} ${logVisible ? 'bg-[#37373d]' : ''}`} onClick={onToggleLog} title="Show/hide the log panel" aria-label="show or hide the log panel" aria-pressed={logVisible}>
           <PanelBottom size={14} />
         </button>
-        <div className="relative">
-          <button className={`${btnCls} ${settingsOpen ? 'bg-[#37373d]' : ''}`} onClick={() => setSettingsOpen((o) => !o)} title="Graph settings">
+        <div className="relative" ref={settingsRef}>
+          <button
+            className={`${btnCls} ${settingsOpen ? 'bg-[#37373d]' : ''}`}
+            onClick={() => setSettingsOpen((o) => !o)}
+            title="Settings"
+            aria-label="settings"
+            aria-expanded={settingsOpen}
+          >
             <SettingsIcon size={14} />
           </button>
           {settingsOpen && <SettingsPopover />}

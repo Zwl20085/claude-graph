@@ -8,7 +8,7 @@ import { acceptsRunState, addEvent, appendCapped, newestFirst, samePath } from '
 const DIR = MOCK_EXAMPLE_DIR;
 
 function setup(overrides: Partial<Api> = {}) {
-  const base = createMockIpc({ stepMs: 50 });
+  const base = createMockIpc({ stepMs: 50, trustAll: true });
   const saveSpy = vi.fn(base.saveGraph);
   const api: Api = { ...base, saveGraph: saveSpy, ...overrides };
   const store = createGraphStore(api);
@@ -91,7 +91,7 @@ describe('graph store: open and autosave', () => {
     expect(s().claude.kind).toBe('ok');
     expect(await s().createGraph('/mock/n', 'n')).toBe(true);
     expect(s().graph?.name).toBe('n');
-    s().updateSettings({ max_parallel: 4, claude_bin: '/x/claude' });
+    s().updateSettings({ max_parallel: 4 });
     expect(s().graph?.settings.max_parallel).toBe(4);
     expect(await s().openGraph('/missing')).toBe(false);
     expect(s().toasts.some((t) => t.text.includes('/missing'))).toBe(true);
@@ -178,9 +178,9 @@ describe('run helpers', () => {
     expect(samePath('/a/B', '/a/b')).toBe(false);
     expect(samePath(null, '/a')).toBe(false);
     const rs = { run_id: 'r', graph_dir: '/g' } as RunState;
-    expect(acceptsRunState(rs, '/g/', null, false)).toBe(true);
-    expect(acceptsRunState(rs, '/h', null, true)).toBe(true);
-    expect(acceptsRunState(rs, '/h', null, false)).toBe(false);
+    expect(acceptsRunState(rs, '/g/', null)).toBe(true);
+    expect(acceptsRunState(rs, '/h', rs)).toBe(true);
+    expect(acceptsRunState(rs, '/h', null)).toBe(false);
     const mk = (run_id: string, started_at: string) => ({ run_id, started_at }) as Parameters<typeof newestFirst>[0][number];
     expect(newestFirst([mk('a', '1'), mk('b', '2')]).map((r) => r.run_id)).toEqual(['b', 'a']);
   });

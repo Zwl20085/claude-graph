@@ -96,3 +96,26 @@ export function flowToGraph(
       .map((e) => ({ id: e.id, from: e.source, to: e.target })),
   };
 }
+
+/**
+ * Store selection -> RF selection. When `id` is already among the selected RF
+ * nodes (a user multi-select) nothing changes; otherwise exactly `id` (or
+ * nothing, for null) is selected. Returns `nodes` itself when unchanged.
+ */
+export function selectOnly<T extends Pick<FlowNode, 'id' | 'selected'>>(nodes: T[], id: string | null): T[] {
+  const selected = nodes.filter((n) => n.selected).map((n) => n.id);
+  if (id !== null && selected.includes(id)) return nodes;
+  if (id === null && selected.length === 0) return nodes;
+  return nodes.map((n) => (Boolean(n.selected) === (n.id === id) ? n : { ...n, selected: n.id === id }));
+}
+
+/** Final positions from RF node changes: `position` changes that are not mid-drag (drag end, arrow keys). */
+export function committedPositions(changes: readonly { type: string; id?: string; position?: Position; dragging?: boolean }[]): Record<string, Position> {
+  const out: Record<string, Position> = {};
+  for (const c of changes) {
+    if (c.type === 'position' && c.dragging === false && c.position && c.id !== undefined) {
+      out[c.id] = { x: c.position.x, y: c.position.y };
+    }
+  }
+  return out;
+}

@@ -1,19 +1,29 @@
 //! Locating the `claude` CLI and checking its version.
 //!
 //! Resolution order (docs/CLAUDE_CLI_NOTES.md, "Windows"):
-//! 1. `settings.claude_bin` if set (authoritative: if it does not exist, not found);
+//! 1. the app settings' `claude_bin` (`<data_dir>/claude-graph/settings.json`;
+//!    authoritative: if it is invalid or missing, not found). `settings.claude_bin`
+//!    in graph.json is never read, touched or executed;
 //! 2. env `CLAUDE_GRAPH_CLAUDE_BIN`, a command line split on whitespace with
 //!    double quotes grouping a token (for example `node scripts/fake-claude.mjs`);
 //! 3. `%USERPROFILE%\.local\bin\claude.exe` (Windows) / `~/.local/bin/claude` (Unix);
 //! 4. a PATH search (PATHEXT order on Windows, so `claude.exe` wins over `claude.cmd`).
 //!
-//! A `.cmd` / `.bat` hit is spawned as `cmd /C <path> args…`.
+//! Spawn strategy (never `cmd /C`): an `.exe` is spawned directly. An npm
+//! `.cmd`/`.bat` shim is resolved to `node.exe <shim dir>\node_modules\@anthropic-ai\claude-code\cli.js`
+//! when that file exists (node.exe next to the shim, else on PATH); else to
+//! `<shim dir>\node_modules\@anthropic-ai\claude-code\bin\claude.exe` (current
+//! npm releases), spawned directly; otherwise the batch file itself is the
+//! program, and Rust's std applies its batch-file
+//! argument escaping (and refuses arguments it cannot pass safely, which the
+//! runner reports as `spawn_failed`).
 //! The runner reuses [`ClaudeCommand::command`] to spawn the real process.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::app_settings::validate_claude_bin;
 use crate::contract::ClaudeCheck;
 
 /// Environment override used by tests and demos.
@@ -34,20 +44,29 @@ pub struct ClaudeCommand {
 }
 
 impl ClaudeCommand {
-    fn direct(path: PathBuf) -> Self {
-        let display = path.display().to_string();
-        if is_batch_file(&path) {
-            Self {
-                program: PathBuf::from("cmd"),
-                prefix_args: vec![OsString::from("/C"), path.into_os_string()],
-                display,
-            }
-        } else {
-            Self {
-                program: path,
-                prefix_args: Vec::new(),
-                display,
-            }
+    fn plain(path: PathBuf) -> Self {
+        Self {
+            display: path.display().to_string(),
+            program: path,
+            prefix_args: Vec::new(),
+        }
+    }
+
+    /// The command for an executable found on disk (see the module docs).
+    pub fn for_path(path: PathBuf, env: &ResolveEnv) -> Self {
+        if !is_batch_file(&path) {
+            return Self::plain(path);
+        }
+        if let Some((node, cli)) = npm_shim_target(&path, env) {
+            return Self {
+                display: format!("{} {}", node.display(), cli.display()),
+                program: node,
+                prefix_args: vec![cli.into_os_string()],
+            };
+        }
+        match npm_shim_exe(&path) {
+            Some(exe) => Self::plain(exe),
+            None => Self::plain(path),
         }
     }
 
@@ -62,16 +81,51 @@ impl ClaudeCommand {
     }
 }
 
-fn is_batch_file(path: &Path) -> bool {
+pub fn is_batch_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
         .unwrap_or(false)
 }
 
+/// npm's `claude.cmd` runs `node <shim dir>\node_modules\@anthropic-ai\claude-code\cli.js`.
+/// Returns `(node, cli.js)` when the script exists and a node.exe is found next
+/// to the shim or on PATH.
+fn npm_shim_target(shim: &Path, env: &ResolveEnv) -> Option<(PathBuf, PathBuf)> {
+    let dir = shim.parent()?;
+    let cli = npm_package_dir(dir).join("cli.js");
+    if !cli.is_file() {
+        return None;
+    }
+    let beside = dir.join(exe_name("node"));
+    let node = if beside.is_file() {
+        beside
+    } else {
+        find_on_path("node", env.path_var.as_ref(), env.pathext.as_deref())?
+    };
+    Some((node, cli))
+}
+
+/// Current npm releases ship `<shim dir>\node_modules\@anthropic-ai\claude-code\bin\claude.exe`
+/// and the shim just forwards to it; spawning it directly avoids cmd.exe.
+fn npm_shim_exe(shim: &Path) -> Option<PathBuf> {
+    let exe = npm_package_dir(shim.parent()?)
+        .join("bin")
+        .join("claude.exe");
+    exe.is_file().then_some(exe)
+}
+
+fn npm_package_dir(shim_dir: &Path) -> PathBuf {
+    shim_dir
+        .join("node_modules")
+        .join("@anthropic-ai")
+        .join("claude-code")
+}
+
 /// Inputs to resolution, separated from the process environment for testing.
 #[derive(Debug, Clone, Default)]
 pub struct ResolveEnv {
+    /// `claude_bin` from the app settings (never from graph.json).
     pub configured: Option<String>,
     pub env_override: Option<String>,
     pub home: Option<PathBuf>,
@@ -100,12 +154,13 @@ pub enum Resolution {
 
 pub fn resolve(env: &ResolveEnv) -> Resolution {
     if let Some(configured) = non_empty(env.configured.as_deref()) {
-        let path = PathBuf::from(configured);
-        return if path.is_file() {
-            Resolution::Found(ClaudeCommand::direct(path))
-        } else {
-            Resolution::Missing {
-                tried: Some(configured.to_string()),
+        return match validate_claude_bin(configured) {
+            Ok(path) => Resolution::Found(ClaudeCommand::for_path(path, env)),
+            Err(e) => {
+                log::warn!("app setting claude_bin rejected: {e}");
+                Resolution::Missing {
+                    tried: Some(configured.to_string()),
+                }
             }
         };
     }
@@ -115,11 +170,11 @@ pub fn resolve(env: &ResolveEnv) -> Resolution {
     if let Some(home) = &env.home {
         let local = home.join(".local").join("bin").join(exe_name("claude"));
         if local.is_file() {
-            return Resolution::Found(ClaudeCommand::direct(local));
+            return Resolution::Found(ClaudeCommand::for_path(local, env));
         }
     }
     match find_on_path("claude", env.path_var.as_ref(), env.pathext.as_deref()) {
-        Some(p) => Resolution::Found(ClaudeCommand::direct(p)),
+        Some(p) => Resolution::Found(ClaudeCommand::for_path(p, env)),
         None => Resolution::Missing { tried: None },
     }
 }
@@ -170,7 +225,7 @@ fn resolve_command_line(line: &str, env: &ResolveEnv) -> Resolution {
     };
     match program {
         Some(p) => {
-            let base = ClaudeCommand::direct(p);
+            let base = ClaudeCommand::for_path(p, env);
             let display = std::iter::once(base.display.clone())
                 .chain(rest.iter().map(|a| a.to_string_lossy().into_owned()))
                 .collect::<Vec<_>>()
@@ -248,7 +303,8 @@ pub async fn read_version(cmd: &ClaudeCommand) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Full check used by the `check_claude` command.
+/// Full check used by the `check_claude` command; `configured` is the app
+/// settings' `claude_bin`.
 pub async fn check(configured: Option<String>) -> ClaudeCheck {
     match resolve(&ResolveEnv::from_process(configured)) {
         Resolution::Found(cmd) => {
@@ -286,7 +342,11 @@ mod tests {
             env_override: Some("node fake.mjs".into()),
             ..Default::default()
         };
-        assert_eq!(resolve(&env), Resolution::Found(ClaudeCommand::direct(bin)));
+        let canonical = crate::paths::canonical(&bin).unwrap();
+        assert_eq!(
+            resolve(&env),
+            Resolution::Found(ClaudeCommand::plain(canonical))
+        );
 
         let missing = ResolveEnv {
             configured: Some("/no/such/claude".into()),
@@ -298,6 +358,19 @@ mod tests {
                 tried: Some("/no/such/claude".into())
             }
         );
+        // A configured value that is not the CLI (or a UNC path) is refused, not run.
+        let other = dir.path().join("calc.exe");
+        touch(&other);
+        for bad in [
+            other.display().to_string(),
+            r"\\host\share\claude.exe".into(),
+        ] {
+            let env = ResolveEnv {
+                configured: Some(bad.clone()),
+                ..Default::default()
+            };
+            assert_eq!(resolve(&env), Resolution::Missing { tried: Some(bad) });
+        }
     }
 
     #[test]
@@ -352,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn path_search_prefers_exe_and_wraps_cmd_shims() {
+    fn path_search_prefers_exe_and_spawns_cmd_shims_directly() {
         let dir = tempfile::tempdir().unwrap();
         let shim = dir.path().join("claude.cmd");
         touch(&shim);
@@ -365,9 +438,8 @@ mod tests {
         };
         match resolve(&env) {
             Resolution::Found(cmd) => {
-                assert_eq!(cmd.program, PathBuf::from("cmd"));
-                assert_eq!(cmd.prefix_args[0], OsString::from("/C"));
-                assert_eq!(PathBuf::from(&cmd.prefix_args[1]), shim);
+                assert_eq!(cmd.program, shim, "the batch file itself, never cmd /C");
+                assert!(cmd.prefix_args.is_empty());
             }
             other => panic!("expected found, got {other:?}"),
         }
@@ -378,6 +450,73 @@ mod tests {
             find_on_path("claude", path_var.as_ref(), Some(".EXE;.CMD")),
             Some(exe)
         );
+    }
+
+    #[test]
+    fn npm_shim_resolves_to_node_and_cli_js() {
+        let dir = tempfile::tempdir().unwrap();
+        let npm = dir.path().join("npm dir");
+        let pkg = npm
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code");
+        fs::create_dir_all(&pkg).unwrap();
+        let shim = npm.join("claude.cmd");
+        touch(&shim);
+        let cli = pkg.join("cli.js");
+        touch(&cli);
+        // node on PATH (another folder).
+        let bin = dir.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let node_on_path = bin.join(exe_name("node"));
+        touch(&node_on_path);
+        let env = ResolveEnv {
+            path_var: Some(bin.as_os_str().to_owned()),
+            pathext: Some(".EXE".into()),
+            ..Default::default()
+        };
+        let cmd = ClaudeCommand::for_path(shim.clone(), &env);
+        assert_eq!(cmd.program, node_on_path);
+        assert_eq!(cmd.prefix_args, vec![cli.clone().into_os_string()]);
+        // node next to the shim wins.
+        let beside = npm.join(exe_name("node"));
+        touch(&beside);
+        assert_eq!(ClaudeCommand::for_path(shim.clone(), &env).program, beside);
+        // Without cli.js the shim itself is the program.
+        fs::remove_file(&cli).unwrap();
+        assert_eq!(ClaudeCommand::for_path(shim.clone(), &env).program, shim);
+    }
+
+    #[test]
+    fn npm_shim_resolves_to_bundled_claude_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let npm = dir.path().join("npm dir");
+        let pkg_bin = npm
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code")
+            .join("bin");
+        fs::create_dir_all(&pkg_bin).unwrap();
+        let shim = npm.join("claude.cmd");
+        touch(&shim);
+        let exe = pkg_bin.join("claude.exe");
+        touch(&exe);
+        // node is available, but without cli.js the bundled exe is used.
+        touch(&npm.join(exe_name("node")));
+        let env = ResolveEnv::default();
+        let cmd = ClaudeCommand::for_path(shim.clone(), &env);
+        assert_eq!(cmd.program, exe, "spawned directly, no cmd.exe");
+        assert!(cmd.prefix_args.is_empty());
+        assert_eq!(cmd.display, exe.display().to_string());
+        // cli.js, when present, still wins.
+        let cli = pkg_bin.parent().unwrap().join("cli.js");
+        touch(&cli);
+        let cmd = ClaudeCommand::for_path(shim.clone(), &env);
+        assert_eq!(cmd.prefix_args, vec![cli.clone().into_os_string()]);
+        // Neither: the shim itself.
+        fs::remove_file(&cli).unwrap();
+        fs::remove_file(&exe).unwrap();
+        assert_eq!(ClaudeCommand::for_path(shim.clone(), &env).program, shim);
     }
 
     #[test]

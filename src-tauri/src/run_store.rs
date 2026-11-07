@@ -3,13 +3,14 @@
 //! stderr.log, and the append-only GRAPH_LOG.md.
 
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
 use crate::contract::{
-    AppError, AppResult, NodeMessage, NodeResult, NodeStatus, NodeSummary, RunState, RunSummary,
-    StatusCounts,
+    AppError, AppResult, NodeMessage, NodeResult, NodeStatus, NodeSummary, RunState, RunStatus,
+    RunSummary, StatusCounts,
 };
 use crate::graph_util::is_valid_node_id;
 use crate::store::{append, read_json, read_optional, write_json};
@@ -24,6 +25,12 @@ pub const STDERR_FILE: &str = "stderr.log";
 pub const LOG_FILE: &str = "GRAPH_LOG.md";
 pub const LOG_HEADER: &str = "run_id\tnode_id\tstatus\tcost_usd\tduration_ms\n";
 const EVENTS_TAIL: usize = 200;
+/// At most this much of events.jsonl is read (from the end) for the tail.
+const EVENTS_TAIL_BYTES: u64 = 1024 * 1024;
+/// result.md is read up to this size (briefs cut further to 4000 chars).
+pub const RESULT_READ_CAP: u64 = 1024 * 1024;
+/// Node reason for runs found `running` with no live loop (app exit or crash).
+pub const INTERRUPTED: &str = "interrupted";
 
 /// Reject ids that are not plain folder names (they come from the frontend).
 pub fn check_id(kind: &str, id: &str) -> AppResult<()> {
@@ -46,7 +53,8 @@ pub fn node_run_dir(dir: &Path, run_id: &str, node_id: &str) -> PathBuf {
     run_dir(dir, run_id).join(node_id)
 }
 
-/// A fresh run id (UTC timestamp, `-2`, `-3`… if that second is taken); creates the folder.
+/// A fresh run id (UTC timestamp, `-002`, `-003`… if that second is taken, zero
+/// padded so ids sort as text); creates the folder.
 pub fn new_run_id(dir: &Path, now: DateTime<Utc>) -> AppResult<String> {
     let base = now.format("%Y%m%dT%H%M%SZ").to_string();
     fs::create_dir_all(runs_dir(dir))?;
@@ -54,7 +62,7 @@ pub fn new_run_id(dir: &Path, now: DateTime<Utc>) -> AppResult<String> {
         let id = if n == 1 {
             base.clone()
         } else {
-            format!("{base}-{n}")
+            format!("{base}-{n:03}")
         };
         match fs::create_dir(run_dir(dir, &id)) {
             Ok(()) => return Ok(id),
@@ -69,12 +77,42 @@ pub fn write_run_state(dir: &Path, state: &RunState) -> AppResult<()> {
     write_json(&run_dir(dir, &state.run_id).join(RUN_FILE), state)
 }
 
-pub fn read_run_state(dir: &Path, run_id: &str) -> AppResult<RunState> {
-    check_id("run id", run_id)?;
-    read_json(&run_dir(dir, run_id).join(RUN_FILE))
+/// run.json of folder `folder`, checked: its `run_id` must equal the folder
+/// name, and node keys that are not valid ids are dropped (the file is data
+/// from disk, not trusted).
+fn read_checked(path: &Path, folder: &str) -> AppResult<RunState> {
+    let state: RunState = read_json(path)?;
+    if state.run_id != folder {
+        return Err(AppError::new(
+            "invalid_input",
+            format!(
+                "{} names run {:?}, not {folder:?}",
+                path.display(),
+                state.run_id
+            ),
+        ));
+    }
+    let nodes = state
+        .nodes
+        .into_iter()
+        .filter(|(id, _)| {
+            let ok = is_valid_node_id(id);
+            if !ok {
+                log::warn!("{}: dropping invalid node id {id:?}", path.display());
+            }
+            ok
+        })
+        .collect();
+    Ok(RunState { nodes, ..state })
 }
 
-/// Every readable run.json, newest first. Unreadable runs are logged and skipped.
+pub fn read_run_state(dir: &Path, run_id: &str) -> AppResult<RunState> {
+    check_id("run id", run_id)?;
+    read_checked(&run_dir(dir, run_id).join(RUN_FILE), run_id)
+}
+
+/// Every readable run.json, newest first. Unreadable runs, and runs whose
+/// `run_id` differs from their folder name, are logged and skipped.
 pub fn list_run_states(dir: &Path) -> AppResult<Vec<RunState>> {
     let entries = match fs::read_dir(runs_dir(dir)) {
         Ok(e) => e,
@@ -84,16 +122,68 @@ pub fn list_run_states(dir: &Path) -> AppResult<Vec<RunState>> {
     let mut runs: Vec<RunState> = entries
         .filter_map(Result::ok)
         .filter(|e| e.path().join(RUN_FILE).is_file())
-        .filter_map(|e| match read_json(&e.path().join(RUN_FILE)) {
-            Ok(state) => Some(state),
-            Err(err) => {
-                log::warn!("skipping unreadable run {}: {err}", e.path().display());
-                None
+        .filter_map(|e| {
+            let folder = e.file_name().to_string_lossy().into_owned();
+            if !is_valid_node_id(&folder) {
+                return None;
+            }
+            match read_checked(&e.path().join(RUN_FILE), &folder) {
+                Ok(state) => Some(state),
+                Err(err) => {
+                    log::warn!("skipping run {}: {err}", e.path().display());
+                    None
+                }
             }
         })
         .collect();
     runs.sort_by(|a: &RunState, b| b.run_id.cmp(&a.run_id));
     Ok(runs)
+}
+
+/// A run found `running` on disk whose loop is gone (the app exited or crashed):
+/// the run becomes `cancelled` and every node not yet finished becomes
+/// `cancelled` with reason [`INTERRUPTED`].
+pub fn interrupted(state: RunState, now: DateTime<Utc>) -> RunState {
+    let nodes = state
+        .nodes
+        .into_iter()
+        .map(|(id, n)| {
+            let open = matches!(
+                n.status,
+                NodeStatus::Pending | NodeStatus::Queued | NodeStatus::Running
+            );
+            let n = if open {
+                crate::contract::NodeRunState {
+                    status: NodeStatus::Cancelled,
+                    reason: Some(INTERRUPTED.to_string()),
+                    finished_at: n.finished_at.or(Some(now)),
+                    ..n
+                }
+            } else {
+                n
+            };
+            (id, n)
+        })
+        .collect();
+    RunState {
+        status: RunStatus::Cancelled,
+        finished_at: state.finished_at.or(Some(now)),
+        nodes,
+        ..state
+    }
+}
+
+/// Re-read `run_id` and, if it is still `running`, rewrite it as interrupted.
+/// The caller guarantees no live loop owns the run (it holds the run registry).
+/// Returns true when the file was rewritten.
+pub fn sweep_run(dir: &Path, run_id: &str) -> AppResult<bool> {
+    let state = read_run_state(dir, run_id)?;
+    if state.status != RunStatus::Running {
+        return Ok(false);
+    }
+    log::warn!("run {run_id} was left running (app exit or crash); marking it interrupted");
+    write_run_state(dir, &interrupted(state, Utc::now()))?;
+    Ok(true)
 }
 
 pub fn summarize_run(state: &RunState) -> RunSummary {
@@ -154,8 +244,61 @@ pub fn read_summary(dir: &Path, run_id: &str, node_id: &str) -> AppResult<Option
     }
 }
 
+fn open_optional(path: &Path) -> AppResult<Option<fs::File>> {
+    match fs::File::open(path) {
+        Ok(f) => Ok(Some(f)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(AppError::new("io", format!("{}: {e}", path.display()))),
+    }
+}
+
+/// At most `cap` bytes of a text file (lossy UTF-8), with a `[… truncated]`
+/// line when cut; `None` if the file does not exist.
+pub fn read_capped(path: &Path, cap: u64) -> AppResult<Option<String>> {
+    let Some(file) = open_optional(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| AppError::new("io", format!("{}: {e}", path.display())))?;
+    let cut = bytes.len() as u64 > cap;
+    bytes.truncate(usize::try_from(cap).unwrap_or(usize::MAX));
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(Some(if cut {
+        format!("{text}\n[… truncated]")
+    } else {
+        text
+    }))
+}
+
+/// The last `max_lines` lines of a file, reading at most `max_bytes` from its
+/// end (a partial first line in that window is dropped).
+pub fn read_tail_lines(path: &Path, max_lines: usize, max_bytes: u64) -> AppResult<Vec<String>> {
+    let Some(mut file) = open_optional(path)? else {
+        return Ok(Vec::new());
+    };
+    let io = |e: std::io::Error| AppError::new("io", format!("{}: {e}", path.display()));
+    let len = file.metadata().map_err(io)?.len();
+    let start = len.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start)).map_err(io)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes).read_to_end(&mut bytes).map_err(io)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    let from = lines.len().saturating_sub(max_lines);
+    Ok(lines[from..].iter().map(|l| l.to_string()).collect())
+}
+
+/// result.md capped at [`RESULT_READ_CAP`] bytes.
 pub fn read_result_md(dir: &Path, run_id: &str, node_id: &str) -> AppResult<Option<String>> {
-    read_optional(&node_run_dir(dir, run_id, node_id).join(RESULT_FILE))
+    read_capped(
+        &node_run_dir(dir, run_id, node_id).join(RESULT_FILE),
+        RESULT_READ_CAP,
+    )
 }
 
 pub fn read_node_result(dir: &Path, run_id: &str, node_id: &str) -> AppResult<NodeResult> {
@@ -164,14 +307,11 @@ pub fn read_node_result(dir: &Path, run_id: &str, node_id: &str) -> AppResult<No
     if !run_dir(dir, run_id).is_dir() {
         return Err(AppError::new("not_found", format!("no run {run_id}")));
     }
-    let events = read_optional(&node_run_dir(dir, run_id, node_id).join(EVENTS_FILE))?;
-    let lines: Vec<String> = events
-        .as_deref()
-        .unwrap_or("")
-        .lines()
-        .map(str::to_string)
-        .collect();
-    let events_tail = lines[lines.len().saturating_sub(EVENTS_TAIL)..].to_vec();
+    let events_tail = read_tail_lines(
+        &node_run_dir(dir, run_id, node_id).join(EVENTS_FILE),
+        EVENTS_TAIL,
+        EVENTS_TAIL_BYTES,
+    )?;
     Ok(NodeResult {
         result_md: read_result_md(dir, run_id, node_id)?,
         summary: read_summary(dir, run_id, node_id)?,
@@ -259,7 +399,7 @@ mod tests {
         let r1 = new_run_id(dir, now).unwrap();
         let r2 = new_run_id(dir, now).unwrap();
         assert_eq!(r1, "20261107T101500Z");
-        assert_eq!(r2, "20261107T101500Z-2");
+        assert_eq!(r2, "20261107T101500Z-002");
         assert!(dir.join("runs").join(&r1).is_dir());
 
         write_run_state(dir, &state(&r1)).unwrap();
@@ -305,6 +445,79 @@ mod tests {
             read_node_result(dir, "nope", "a").unwrap_err().code,
             "not_found"
         );
+    }
+
+    #[test]
+    fn run_json_with_foreign_run_id_or_bad_node_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        fs::create_dir_all(run_dir(dir, "R1")).unwrap();
+        // run.json in folder R1 claiming to be run R2: skipped and refused.
+        write_json(&run_dir(dir, "R1").join(RUN_FILE), &state("R2")).unwrap();
+        assert!(list_run_states(dir).unwrap().is_empty());
+        assert_eq!(read_run_state(dir, "R1").unwrap_err().code, "invalid_input");
+        // Bad node keys are dropped.
+        let mut s = state("R1");
+        s.nodes
+            .insert("../evil".into(), crate::contract::NodeRunState::pending());
+        write_json(&run_dir(dir, "R1").join(RUN_FILE), &s).unwrap();
+        let read = read_run_state(dir, "R1").unwrap();
+        assert_eq!(read, state("R1"));
+        assert_eq!(list_run_states(dir).unwrap(), vec![state("R1")]);
+    }
+
+    #[test]
+    fn stale_running_run_is_swept_to_interrupted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        fs::create_dir_all(run_dir(dir, "R1")).unwrap();
+        let mut s = state("R1");
+        s.status = RunStatus::Running;
+        s.nodes.insert(
+            "d".into(),
+            crate::contract::NodeRunState {
+                status: NodeStatus::Running,
+                ..crate::contract::NodeRunState::pending()
+            },
+        );
+        s.nodes
+            .insert("e".into(), crate::contract::NodeRunState::pending());
+        write_run_state(dir, &s).unwrap();
+        assert!(sweep_run(dir, "R1").unwrap());
+        let after = read_run_state(dir, "R1").unwrap();
+        assert_eq!(after.status, RunStatus::Cancelled);
+        assert!(after.finished_at.is_some());
+        for id in ["d", "e"] {
+            assert_eq!(after.nodes[id].status, NodeStatus::Cancelled);
+            assert_eq!(after.nodes[id].reason.as_deref(), Some(INTERRUPTED));
+        }
+        assert_eq!(after.nodes["a"].status, NodeStatus::Succeeded);
+        assert_eq!(after.nodes["b"].status, NodeStatus::Failed);
+        // A finished run is left alone.
+        assert!(!sweep_run(dir, "R1").unwrap());
+    }
+
+    #[test]
+    fn capped_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("big.md");
+        fs::write(&f, "x".repeat(100)).unwrap();
+        assert_eq!(read_capped(&f, 200).unwrap().unwrap(), "x".repeat(100));
+        let cut = read_capped(&f, 10).unwrap().unwrap();
+        assert_eq!(cut, format!("{}\n[… truncated]", "x".repeat(10)));
+        assert_eq!(read_capped(&tmp.path().join("none"), 10).unwrap(), None);
+
+        let lines: String = (0..1000).map(|i| format!("line {i:04}\n")).collect();
+        fs::write(&f, &lines).unwrap();
+        let tail = read_tail_lines(&f, 5, 1_000_000).unwrap();
+        assert_eq!(tail.first().unwrap(), "line 0995");
+        assert_eq!(tail.last().unwrap(), "line 0999");
+        // A small window drops its partial first line.
+        let tail = read_tail_lines(&f, 100, 25).unwrap();
+        assert_eq!(tail, vec!["line 0998", "line 0999"]);
+        assert!(read_tail_lines(&tmp.path().join("none"), 5, 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

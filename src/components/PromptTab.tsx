@@ -15,6 +15,7 @@ export function PromptTab({ node }: { node: Node }) {
         rows={rows}
         value={node.prompt}
         placeholder="What would you type to Claude Code for this step?"
+        aria-label="Prompt"
         onChange={(e) => update(node.id, { prompt: e.target.value })}
       />
       <div className="grid grid-cols-2 gap-2">

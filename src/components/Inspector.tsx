@@ -13,29 +13,42 @@ import { btnCls, inputCls } from './ui';
 const TABS = ['Prompt', 'Brief (recommended)', 'Messages', 'Results'] as const;
 type Tab = (typeof TABS)[number];
 
+/** Id editor: the typed text and its error stay visible until fixed (Escape reverts). */
 function IdField({ node }: { node: Node }) {
   const fresh = useGraphStore((s) => s.freshNodeIds.includes(node.id));
   const rename = useGraphStore((s) => s.renameNodeId);
   const [draft, setDraft] = useState(node.id);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => setDraft(node.id), [node.id]);
+  useEffect(() => {
+    setDraft(node.id);
+    setError(null);
+  }, [node.id]);
   const commit = (): void => {
-    const err = rename(node.id, draft.trim());
-    setError(err);
-    if (err) setDraft(node.id);
+    const next = draft.trim();
+    if (next === node.id) return setError(null);
+    setError(rename(node.id, next));
   };
   return (
     <div>
       <input
-        className={`${inputCls} font-mono text-[12px]`}
+        className={`${inputCls} font-mono text-[12px] ${error ? 'border-[#ef4444]' : ''}`}
         value={draft}
         readOnly={!fresh}
+        aria-label="Node id"
+        aria-invalid={error !== null}
         title={fresh ? 'Editable until the node first runs' : 'Node ids are fixed once created and run'}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => fresh && commit()}
-        onKeyDown={(e) => e.key === 'Enter' && fresh && commit()}
+        onKeyDown={(e) => {
+          if (!fresh) return;
+          if (e.key === 'Enter') commit();
+          if (e.key === 'Escape') {
+            setDraft(node.id);
+            setError(null);
+          }
+        }}
       />
-      {error && <p className="mt-0.5 text-[11px] text-[#ef4444]">{error}</p>}
+      {error && <p role="alert" className="mt-0.5 text-[11px] text-[#ef4444]">{error}</p>}
     </div>
   );
 }
@@ -57,14 +70,19 @@ export function Inspector() {
           className={`${inputCls} text-[14px] font-semibold`}
           value={node.title}
           placeholder="Title"
+          aria-label="Node title"
           onChange={(e) => update(node.id, { title: e.target.value })}
         />
         <IdField key={node.id} node={node} />
       </div>
-      <div className="flex border-b border-[#3c3c3c] text-[12px]">
+      <div className="flex border-b border-[#3c3c3c] text-[12px]" role="tablist" aria-label="Node editor">
         {TABS.map((t) => (
           <button
             key={t}
+            role="tab"
+            id={`tab-${t.split(" ")[0]}`}
+            aria-selected={tab === t}
+            aria-controls="inspector-tabpanel"
             className={`px-2.5 py-1.5 ${tab === t ? 'border-b-2 border-[#3b82f6] text-white' : 'text-[#9a9a9a] hover:text-[#d4d4d4]'}`}
             onClick={() => setTab(t)}
           >
@@ -72,7 +90,7 @@ export function Inspector() {
           </button>
         ))}
       </div>
-      <div className="min-h-0 flex-1 overflow-auto p-2">
+      <div className="min-h-0 flex-1 overflow-auto p-2" role="tabpanel" id="inspector-tabpanel" aria-labelledby={`tab-${tab.split(" ")[0]}`}>
         {tab === 'Prompt' && <PromptTab node={node} />}
         {tab === 'Brief (recommended)' && <BriefForm key={node.id} node={node} />}
         {tab === 'Messages' && <MessagesTab key={node.id} nodeId={node.id} />}

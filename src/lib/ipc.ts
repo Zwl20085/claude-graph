@@ -12,29 +12,53 @@ import {
   EVENT_RUN_STATE,
   isAppError,
   type AppError,
+  type AppSettings,
   type ClaudeCheck,
   type Graph,
+  type LaunchOptions,
   type NodeEvent,
   type NodeMessage,
   type NodeResult,
   type RunState,
   type RunSummary,
   type RunTarget,
+  type TrustStatus,
 } from '../types/contract';
+
+/** Readable text of a non-AppError rejection (Error message, JSON, or String fallback). */
+export function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  try {
+    const json = JSON.stringify(err);
+    if (json !== undefined) return json;
+  } catch {
+    // circular or otherwise unserialisable: fall through
+  }
+  return String(err);
+}
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return await invoke<T>(command, args);
   } catch (err) {
     if (isAppError(err)) throw err;
-    const wrapped: AppError = { code: 'ipc', message: String(err) };
+    const wrapped: AppError = { code: 'ipc', message: describeError(err) };
     throw wrapped;
   }
 }
 
-/** `claude_bin` overrides PATH lookup (pass settings.claude_bin); may be omitted. */
-export const checkClaude = (claude_bin?: string | null): Promise<ClaudeCheck> =>
-  call('check_claude', { claude_bin: claude_bin ?? null });
+/** Resolution order on the backend: app settings -> env CLAUDE_GRAPH_CLAUDE_BIN -> PATH. */
+export const checkClaude = (): Promise<ClaudeCheck> => call('check_claude');
+
+export const getAppSettings = (): Promise<AppSettings> => call('get_app_settings');
+
+/** Validated by the backend (absolute local path to an existing claude file); rejects with invalid_input. */
+export const setAppSettings = (settings: AppSettings): Promise<AppSettings> => call('set_app_settings', { settings });
+
+export const graphTrustStatus = (dir: string): Promise<TrustStatus> => call('graph_trust_status', { dir });
+
+export const trustGraph = (dir: string): Promise<void> => call('trust_graph', { dir });
 
 export const createGraph = (dir: string, name: string): Promise<Graph> =>
   call('create_graph', { dir, name });
@@ -79,7 +103,14 @@ export const listMessages = (dir: string, run_id: string, node_id: string): Prom
 export const sendMessage = (dir: string, run_id: string, node_id: string, text: string): Promise<void> =>
   call('send_message', { dir, run_id, node_id, text });
 
-export const openPath = (path: string): Promise<void> => call('open_path', { path });
+/** Reveal graph.json of the graph folder in the OS file manager. */
+export const revealGraphDir = (dir: string): Promise<void> => call('reveal_graph_dir', { dir });
+
+/** Reveal `nodes/<node_id>/deliverables` in the OS file manager. */
+export const revealNodeDir = (dir: string, node_id: string): Promise<void> => call('reveal_node_dir', { dir, node_id });
+
+/** Startup request from the command line / env (see ARCHITECTURE.md "Launching"). */
+export const launchOptions = (): Promise<LaunchOptions> => call('launch_options');
 
 /** Subscribe to `run:state`. Resolves to an unsubscribe function. */
 export const onRunState = (handler: (state: RunState) => void): Promise<UnlistenFn> =>
