@@ -4,10 +4,15 @@ pub mod claude_bin;
 pub mod commands;
 pub mod contract;
 pub mod events;
+pub mod graph_util;
 pub mod prompt;
+pub mod run_api;
+pub mod run_loop;
+pub mod run_store;
 pub mod runner;
 pub mod scheduler;
 pub mod store;
+pub mod turns;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -19,6 +24,7 @@ pub fn run() {
         )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(run_api::AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::check_claude,
             commands::create_graph,
@@ -34,6 +40,8 @@ pub fn run() {
             commands::read_node_result,
             commands::render_brief,
             commands::open_path,
+            commands::send_message,
+            commands::list_messages,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

@@ -135,6 +135,7 @@ function parseNode(v: unknown, i: number): Node {
     id,
     title: str(o, 'title', where, ''),
     position: parsePosition(o.position, `${where}.position`),
+    prompt: str(o, 'prompt', where, ''),
     goal: str(o, 'goal', where, ''),
     acceptance: str(o, 'acceptance', where, ''),
     scope_in: str(o, 'scope_in', where, ''),

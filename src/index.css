@@ -11,6 +11,62 @@ body,
 
 body {
   background: #1e1e1e;
-  color: #e5e5e5;
+  color: #d4d4d4;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+
+/* Running node: pulsing blue ring. */
+@keyframes cg-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(59, 130, 246, 0);
+  }
+}
+.cg-pulse {
+  animation: cg-pulse 1.4s ease-in-out infinite;
+}
+
+/* Running wire: marching dashes. */
+@keyframes cg-dash {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+.cg-wire-run {
+  animation: cg-dash 0.8s linear infinite;
+}
+
+/* React Flow dark tweaks. */
+.react-flow__node-brief {
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+.react-flow__controls button {
+  background: #252526;
+  border-color: #3c3c3c;
+  color: #d4d4d4;
+  fill: #d4d4d4;
+}
+.react-flow__controls button:hover {
+  background: #37373d;
+}
+.react-flow__minimap {
+  border: 1px solid #3c3c3c;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #3c3c3c;
+  border-radius: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }

@@ -95,7 +95,7 @@ Deliverable paths are relative to `nodes/<id>/deliverables/`.
 `render_brief(graph, node, run)` produces `brief.md` (saved) and the run prompt
 (`prompt.md` = brief + run-time header). Exact shape:
 
-```
+````
 # Node: <title>   (graph: <name>, node id: <id>)
 
 You are one node in a graph of engineering tasks run by Claude Graph.
@@ -114,7 +114,9 @@ Working directory: <abs path or custom>
 Deliverables:
 - <abs path>/nodes/<upstream-id>/deliverables/<path> — <description>
 Result summary (first 4000 chars of its result.md):
+```text
 <...>
+```
 (repeat per direct upstream node; if none: "None. This is a root node.")
 
 ## Scope
@@ -141,7 +143,7 @@ Write every deliverable listed above. Then end your final message with exactly:
 - <path> — one line on what it contains
 ## Status: DONE
 (or `## Status: BLOCKED` followed by one paragraph on why.)
-```
+````
 
 The backend parses the final assistant text for `## Status: DONE|BLOCKED`, and
 checks that each required deliverable file exists. Missing files or BLOCKED mark
@@ -150,7 +152,7 @@ the node `failed` (with reason) even if the CLI exit code is 0.
 ## 4. Scheduler (Rust, pure, fully unit-tested)
 
 - Validate: unique ids, edges reference existing nodes, no cycles (Kahn). Reject on load with a clear error.
-- A run has a target set: all nodes, or "from node X" (X and its transitive dependents), or "only failed of run R" (failed nodes and their dependents). Nodes outside the target set that are upstream of a target keep their latest successful result as input (copied reference, not rerun).
+- A run has a target set: all nodes, or "from node X" (X and its transitive dependents), or "only failed of run R" (every node of R that did not succeed, i.e. failed, skipped and cancelled nodes, and their dependents; the UI's "Rerun failed" button means this). Nodes outside the target set that are upstream of a target keep their latest successful result as input (copied reference, not rerun).
 - Ready = all direct upstream nodes in the target set `succeeded` (or outside target set with a prior `succeeded` result).
 - Resource gate: a ready node starts only if `running.len() < max_parallel` AND for every tag in `node.resources` the capacity minus tags in use is > 0. The tag `exclusive` means capacity 1 and additionally nothing else may be running and nothing starts while it runs. Unknown tags default to capacity 1 (so two nodes tagged `femm` never overlap).
 - Tie-break among ready nodes: longest downstream path first, then id ascending. Deterministic.
@@ -250,6 +252,48 @@ The brief left these open; the scaffold fixed them in both contract files.
   PATH search tries PATHEXT extensions only, so npm's extension-less `claude`
   shell script is skipped and `claude.cmd` is run as `cmd /C`.
 
+### Backend implementation notes (added by the backend, 2026-11-07)
+
+Deviations from, or decisions left open by, §2-§6:
+
+- **Contract additions (agreed with the lead):** `Node.prompt` (simple prompt mode),
+  `PermissionMode::DontAsk` (`"dontAsk"`), `NodeEventKind::UserMessage` (`"user_message"`),
+  `NodeMessage { role: "user"|"assistant", text, ts }`, and two commands:
+  `send_message { dir, run_id, node_id, text } -> ()` and
+  `list_messages { dir, run_id, node_id } -> NodeMessage[]`.
+  New AppError codes: `spawn_failed` (in a node's `reason`), `invalid_input` (empty message).
+  `send_message` errors: a node that never ran (not in the run, or no session id yet) is
+  `not_found`; empty or whitespace-only text is `invalid_input`. The mock uses the same codes.
+- **Brief.** `render_brief` takes the graph folder (display form, `/` separators) as a
+  first argument. The preview command has no folder, so it renders `<graph folder>`.
+  A saved `brief.md` lists upstream nodes with `status: not run yet`. `prompt.md` is
+  `<!-- Claude Graph run <id>, started <ts> -->` + blank line + brief. Empty template
+  fields render as `None.`. Without required deliverables the "How to finish" section
+  only asks for the status line. Simple nodes (all structured fields empty) get header,
+  upstream inputs, `## Task` (the prompt), `## Extra context` if non-empty, finish.
+- **Command line.** `-p <instruction>` comes first; `--allowedTools` is variadic, so it is
+  the last flag, one argument per tool. `inherit` everywhere means the flag is omitted.
+- **Targets.** `from X` where an upstream outside the target never succeeded: the
+  affected target nodes are `skipped` up front (reason names the upstream).
+  `failed_of R` with no failed/skipped/cancelled nodes, unknown run, unknown node:
+  `not_found`. `continue_session_of` falls back to the upstream's session in the run
+  that supplied its result when the upstream is outside the target.
+- **Scheduler.** A tag capacity of 0 is treated as 1 (0 would hang the run);
+  `max_parallel` 0 is treated as 1. When an `exclusive` node is ready but must wait,
+  nothing of lower priority starts in that round (no starvation).
+- **Follow-ups.** A node with queued or in-flight follow-up turns stays `running`, so
+  its pending dependents wait. A reopened failed node does not un-skip dependents that
+  were already skipped. A follow-up to a finished run starts a short-lived "resumed"
+  loop for that run id (nothing new is scheduled); while it lives, `start_run` on the
+  same graph returns `run_active`.
+- **Logs.** GRAPH_LOG.md starts with the header `run_id, node_id, status, cost_usd, duration_ms (tab-separated)`;
+  one line per turn (`followup` for follow-up turns) and one per node that never ran.
+  Cost is `-` when unknown; duration is the CLI's `duration_ms`, else wall clock.
+- **Files.** Each node run folder also holds `stderr.log` and `messages.jsonl`.
+  `node:event` kind `system` also carries `spawn: <command line>` at each turn start.
+- **Fake CLI.** `--fake-delay-ms N` overrides `FAKE_CLAUDE_DELAY_MS`; `--resume <id>`
+  reuses that session id.
+
 ## 7. Frontend (blueprint look)
 
 - Canvas: dark grey (`#1e1e1e`) with a fine dot grid; MiniMap and Controls bottom-left.
@@ -277,3 +321,36 @@ prints `2.1.0 (fake-claude)`; env `FAKE_CLAUDE_DELAY_MS` slows the stream for ca
 
 Subgraphs, loops/conditionals, per-node MCP config, editing brief.md by hand and
 syncing back, remote execution, auto-layout. Each is a documented future item.
+
+## Frontend notes (frontend engineer, 2026-11-07)
+
+- **IPC selection.** `src/lib/api.ts` exports `api`: the real `src/lib/ipc.ts` when `window.__TAURI_INTERNALS__` exists, else the in-memory mock `src/lib/ipc.mock.ts` (+ `mockRunner.ts`), seeded with `examples/hello-pipeline` at `/mock/hello-pipeline`. The top bar shows a "mock" chip in that mode.
+- **Contract additions on the TS side:** `PermissionMode` gains `dontAsk`; `Node.prompt: string` (default `""`); `NodeMessage`; event kind `user_message`; wrappers `listMessages` / `sendMessage` for `list_messages` / `send_message`.
+- **Prompt-first nodes.** A node with an empty `prompt` and empty `goal` is "empty": drawn with an amber badge, and the store refuses any run whose target set contains one. `src/lib/brief.ts` mirrors the prompt-first brief (header, `## Task`, then only non-empty structured sections, finish section with the deliverables list only when there are deliverables).
+- **Node ids** are slugs generated from the title. A node created in this session stays renameable until the next run starts (edges and `continue_session_of` follow); after that the id is read-only. A rename can leave an orphan `nodes/<old-id>/brief.md` folder.
+- **Graph edits** are pure functions in `src/lib/graphOps.ts`; removing an edge or node also clears a `continue_session_of` that no longer names a direct upstream node.
+- **Saving.** Autosave 800 ms after the last change; saves are serialised; a run, a graph switch and window close save first, and a failed save blocks the switch or run.
+- **Native window title** is set through `getCurrentWindow().setTitle`, which needs the `core:window:allow-set-title` capability; without it only `document.title` changes.
+
+## Integration notes (integration pass, 2026-11-07)
+
+- **Upstream result summaries are fenced** in a `` ```text `` block in the brief
+  (prompt.rs `RESULT_FENCE_OPEN`/`_CLOSE`, brief.ts the same), so an upstream
+  `## Status: DONE` is not mistaken for this node's finish section. Status is detected
+  only on the node's own final assistant text. A result that itself contains a
+  ```` ``` ```` line closes the fence early (cosmetic only; status detection is unaffected).
+- **Graph folders are canonicalised to long form** before a run (run_api `abs`): on
+  Windows an 8.3 segment such as `ZHANGW~1` (typical under `%TEMP%`) makes Claude Code
+  refuse writes as a "suspicious Windows path". Found by the real-CLI smoke test.
+- **Messages tab** only talks to nodes of the run shown in the top bar (the latest run);
+  for a node outside it the composer is disabled with "Run the node first".
+- **Real-CLI tests** (`src-tauri/tests/real_claude.rs`, `#[ignore]`): `real_claude_smoke`
+  (one haiku node writes `hello.md`) and `real_claude_cancel_kills_tree` (cancel after
+  the CLI's system init; checks `taskkill /T` removes `claude.exe` behind `cmd /C claude.cmd`).
+  Run with `cargo test --test real_claude -- --ignored --nocapture`; uses the local login.
+- **Future items:** (1) a follow-up that fixes a failed node does not un-skip its
+  dependents; the user runs "Rerun failed". (2) `start_run` returns `run_active` while a
+  follow-up to a node of an older, finished run is in flight (the resumed loop holds the
+  graph). (3) The TS preview renderer (brief.ts, mock mode only) is prompt-first and omits
+  empty structured sections, while prompt.rs prints `None.` for them; inside Tauri the
+  backend renders the preview, so only mock-mode previews differ.

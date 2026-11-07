@@ -5,7 +5,7 @@ Extracted from [ARCHITECTURE.md](ARCHITECTURE.md) §3. This is the exact text an
 `render_brief(graph, node, run)` produces `brief.md` (saved) and the run prompt
 (`prompt.md` = brief + run-time header). Exact shape:
 
-```
+````
 # Node: <title>   (graph: <name>, node id: <id>)
 
 You are one node in a graph of engineering tasks run by Claude Graph.
@@ -24,7 +24,9 @@ Working directory: <abs path or custom>
 Deliverables:
 - <abs path>/nodes/<upstream-id>/deliverables/<path> — <description>
 Result summary (first 4000 chars of its result.md):
+```text
 <...>
+```
 (repeat per direct upstream node; if none: "None. This is a root node.")
 
 ## Scope
@@ -51,7 +53,7 @@ Write every deliverable listed above. Then end your final message with exactly:
 - <path> — one line on what it contains
 ## Status: DONE
 (or `## Status: BLOCKED` followed by one paragraph on why.)
-```
+````
 
 The backend parses the final assistant text for `## Status: DONE|BLOCKED`, and
 checks that each required deliverable file exists. Missing files or BLOCKED mark

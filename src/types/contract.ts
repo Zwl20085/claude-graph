@@ -26,6 +26,7 @@ export const PERMISSION_MODES = [
   'default',
   'plan',
   'bypassPermissions',
+  'dontAsk',
   'inherit',
 ] as const;
 /** `inherit` on a node means `settings.default_permission_mode`. */
@@ -58,6 +59,8 @@ export interface Node {
   id: string;
   title: string;
   position: Position;
+  /** Free-form task text typed like a Claude Code prompt (simple mode). "" when unset. */
+  prompt: string;
   goal: string;
   acceptance: string;
   scope_in: string;
@@ -173,6 +176,7 @@ export const NODE_EVENT_KINDS = [
   'result',
   'stderr',
   'parse_error',
+  'user_message',
 ] as const;
 export type NodeEventKind = (typeof NODE_EVENT_KINDS)[number];
 
@@ -181,6 +185,13 @@ export interface NodeEvent {
   run_id: string;
   node_id: string;
   kind: NodeEventKind;
+  text: string;
+  ts: string;
+}
+
+/** One chat message of a node session (`list_messages`). */
+export interface NodeMessage {
+  role: 'user' | 'assistant';
   text: string;
   ts: string;
 }
@@ -194,7 +205,9 @@ export interface ClaudeCheck {
 
 /**
  * Error returned by every command. Codes in use: not_implemented, io, json,
- * invalid_graph, not_found, claude_not_found, run_active, internal.
+ * invalid_graph, not_found, claude_not_found, run_active, internal, spawn_failed,
+ * invalid_input. send_message: a node that never ran -> not_found; empty text
+ * -> invalid_input.
  */
 export interface AppError {
   code: string;

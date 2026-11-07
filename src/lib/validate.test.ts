@@ -15,10 +15,10 @@ describe('contract types', () => {
 });
 
 describe('validateGraph', () => {
-  it('accepts the example graph unchanged', () => {
+  it('accepts the example graph unchanged (plus the defaulted prompt field)', () => {
     const g = validateGraph(example);
     expect(g).not.toBeInstanceOf(Error);
-    expect(g).toEqual(example);
+    expect(g).toEqual({ ...example, nodes: example.nodes.map((n) => ({ prompt: '', ...n })) });
   });
 
   it('fills defaults for a minimal node like serde(default)', () => {
@@ -36,7 +36,7 @@ describe('validateGraph', () => {
     ['cycle', (g: Graph) => ({ ...g, edges: [...g.edges, { id: 'e9', from: 'report', to: 'survey' }] }), /cycle/],
     ['bad model', (g: Graph) => ({ ...g, nodes: [{ ...g.nodes[0], model: 'gpt' }] }), /model must be one of/],
   ])('rejects %s', (_name, mutate, pattern) => {
-    const result = validateGraph(mutate(clone(example) as Graph));
+    const result = validateGraph(mutate(clone(example) as unknown as Graph));
     expect(result).toBeInstanceOf(Error);
     expect((result as Error).message).toMatch(pattern);
   });

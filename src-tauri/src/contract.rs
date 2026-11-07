@@ -89,6 +89,9 @@ pub enum PermissionMode {
     Plan,
     #[serde(rename = "bypassPermissions")]
     BypassPermissions,
+    /// CLI mode that denies every prompt (docs/CLAUDE_CLI_NOTES.md).
+    #[serde(rename = "dontAsk")]
+    DontAsk,
     /// Node: use `settings.default_permission_mode`.
     #[serde(rename = "inherit")]
     #[default]
@@ -117,6 +120,10 @@ pub struct Node {
     pub title: String,
     #[serde(default)]
     pub position: Position,
+    /// Free-form task text. A node whose structured fields are all empty is a
+    /// "simple" node and its brief is just this prompt (docs/ARCHITECTURE.md §3).
+    #[serde(default)]
+    pub prompt: String,
     #[serde(default)]
     pub goal: String,
     #[serde(default)]
@@ -291,6 +298,8 @@ pub enum NodeEventKind {
     Result,
     Stderr,
     ParseError,
+    /// A follow-up message from the user was queued or sent to the node.
+    UserMessage,
 }
 
 /// Payload of the `node:event` event.
@@ -299,6 +308,21 @@ pub struct NodeEvent {
     pub run_id: String,
     pub node_id: String,
     pub kind: NodeEventKind,
+    pub text: String,
+    pub ts: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageRole {
+    User,
+    Assistant,
+}
+
+/// One line of `runs/<run-id>/<node-id>/messages.jsonl`; returned by `list_messages`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeMessage {
+    pub role: MessageRole,
     pub text: String,
     pub ts: DateTime<Utc>,
 }
@@ -318,7 +342,7 @@ pub struct ClaudeCheck {
 /// Error returned by every command: `{ code, message }`.
 ///
 /// Codes in use: `not_implemented`, `io`, `json`, `invalid_graph`,
-/// `not_found`, `claude_not_found`, `run_active`, `internal`.
+/// `not_found`, `claude_not_found`, `spawn_failed`, `run_active`, `cancelled`, `internal`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct AppError {
@@ -386,7 +410,14 @@ mod tests {
         assert_eq!(design.model, Model::Opus);
         assert_eq!(design.permission_mode, PermissionMode::AcceptEdits);
 
-        let original: Value = serde_json::from_str(EXAMPLE).unwrap();
+        let mut original: Value = serde_json::from_str(EXAMPLE).unwrap();
+        // Fields added after the example was written load as defaults and are written back.
+        for node in original["nodes"].as_array_mut().unwrap() {
+            node.as_object_mut()
+                .unwrap()
+                .entry("prompt")
+                .or_insert(json!(""));
+        }
         let reserialised = serde_json::to_value(&graph).unwrap();
         assert_eq!(
             numbers_as_f64(original),
@@ -446,6 +477,9 @@ mod tests {
             json!("bypassPermissions")
         );
         assert_eq!(json!(Model::Haiku), json!("haiku"));
+        assert_eq!(json!(PermissionMode::DontAsk), json!("dontAsk"));
+        assert_eq!(json!(NodeEventKind::UserMessage), json!("user_message"));
+        assert_eq!(json!(MessageRole::Assistant), json!("assistant"));
     }
 
     #[test]

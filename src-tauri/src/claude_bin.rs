@@ -2,8 +2,8 @@
 //!
 //! Resolution order (docs/CLAUDE_CLI_NOTES.md, "Windows"):
 //! 1. `settings.claude_bin` if set (authoritative: if it does not exist, not found);
-//! 2. env `CLAUDE_GRAPH_CLAUDE_BIN`, a command line split on whitespace
-//!    (for example `node scripts/fake-claude.mjs`);
+//! 2. env `CLAUDE_GRAPH_CLAUDE_BIN`, a command line split on whitespace with
+//!    double quotes grouping a token (for example `node scripts/fake-claude.mjs`);
 //! 3. `%USERPROFILE%\.local\bin\claude.exe` (Windows) / `~/.local/bin/claude` (Unix);
 //! 4. a PATH search (PATHEXT order on Windows, so `claude.exe` wins over `claude.cmd`).
 //!
@@ -128,13 +128,38 @@ fn non_empty(s: Option<&str>) -> Option<&str> {
     s.map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// Split a command line on whitespace; double quotes group a token
+/// (`"C:\Program Files\nodejs\node.exe" script.mjs`). Backslashes are literal.
+pub fn split_command_line(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current: Option<String> = None;
+    let mut quoted = false;
+    for c in line.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                current.get_or_insert_with(String::new);
+            }
+            c if c.is_whitespace() && !quoted => {
+                if let Some(t) = current.take() {
+                    tokens.push(t);
+                }
+            }
+            c => current.get_or_insert_with(String::new).push(c),
+        }
+    }
+    tokens.extend(current);
+    tokens
+}
+
 /// `node scripts/fake-claude.mjs` → program `node` (looked up on PATH) + args.
 fn resolve_command_line(line: &str, env: &ResolveEnv) -> Resolution {
-    let mut parts = line.split_whitespace();
-    let Some(first) = parts.next() else {
+    let tokens = split_command_line(line);
+    let Some((first, rest)) = tokens.split_first() else {
         return Resolution::Missing { tried: None };
     };
-    let rest: Vec<OsString> = parts.map(OsString::from).collect();
+    let first = first.as_str();
+    let rest: Vec<OsString> = rest.iter().map(OsString::from).collect();
     let first_path = PathBuf::from(first);
     let program = if first_path.is_file() {
         Some(first_path)
@@ -293,6 +318,34 @@ mod tests {
                     cmd.prefix_args,
                     vec![OsString::from("scripts/fake-claude.mjs")]
                 );
+            }
+            other => panic!("expected found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_line_split_honours_quotes() {
+        assert_eq!(
+            split_command_line(r#""C:\Program Files\nodejs\node.exe" "a b.mjs" --x"#),
+            vec![r"C:\Program Files\nodejs\node.exe", "a b.mjs", "--x"]
+        );
+        assert_eq!(split_command_line("  node   s.mjs "), vec!["node", "s.mjs"]);
+        assert_eq!(split_command_line(r#""""#), vec![""]);
+        assert!(split_command_line("   ").is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let spaced = dir.path().join("with space");
+        fs::create_dir_all(&spaced).unwrap();
+        let node = spaced.join("node.exe");
+        touch(&node);
+        let env = ResolveEnv {
+            env_override: Some(format!("\"{}\" script.mjs", node.display())),
+            ..Default::default()
+        };
+        match resolve(&env) {
+            Resolution::Found(cmd) => {
+                assert_eq!(cmd.program, node);
+                assert_eq!(cmd.prefix_args, vec![OsString::from("script.mjs")]);
             }
             other => panic!("expected found, got {other:?}"),
         }

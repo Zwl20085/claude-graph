@@ -1,0 +1,102 @@
+/** Past runs of the graph and this node's result in each. */
+import { useEffect, useState } from 'react';
+import type { NodeResult, RunSummary } from '../types/contract';
+import { api } from '../lib/api';
+import { formatCost, STATUS_COLORS } from '../lib/status';
+import { useGraphStore } from '../store/graphStore';
+import { errorMessage, newestFirst } from '../store/runHelpers';
+
+type Detail = { kind: 'none' } | { kind: 'loading' } | { kind: 'ok'; result: NodeResult } | { kind: 'error'; message: string };
+
+function Counts({ run }: { run: RunSummary }) {
+  return (
+    <span className="flex gap-1.5">
+      {Object.entries(run.counts)
+        .filter(([, n]) => n > 0)
+        .map(([s, n]) => (
+          <span key={s} style={{ color: STATUS_COLORS[s as keyof typeof STATUS_COLORS] }} title={s}>
+            {n} {s}
+          </span>
+        ))}
+    </span>
+  );
+}
+
+export function ResultsTab({ nodeId }: { nodeId: string }) {
+  const dir = useGraphStore((s) => s.dir);
+  const runKey = useGraphStore((s) => `${s.runState?.run_id ?? ''}:${s.runState?.status ?? ''}`);
+  const [runs, setRuns] = useState<RunSummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [openRun, setOpenRun] = useState<string | null>(null);
+  const [detail, setDetail] = useState<Detail>({ kind: 'none' });
+
+  useEffect(() => {
+    if (!dir) return;
+    api
+      .listRuns(dir)
+      .then((r) => {
+        setRuns(newestFirst(r));
+        setError(null);
+      })
+      .catch((err) => setError(errorMessage(err)));
+  }, [dir, runKey]);
+
+  useEffect(() => {
+    if (!dir || !openRun) return setDetail({ kind: 'none' });
+    let live = true;
+    setDetail({ kind: 'loading' });
+    api
+      .readNodeResult(dir, openRun, nodeId)
+      .then((result) => live && setDetail({ kind: 'ok', result }))
+      .catch((err) => live && setDetail({ kind: 'error', message: errorMessage(err) }));
+    return () => {
+      live = false;
+    };
+  }, [dir, openRun, nodeId]);
+
+  if (error) return <p className="text-[12px] text-[#ef4444]">Could not list runs: {error}</p>;
+  if (runs === null) return <p className="text-[12px] text-[#777]">Loading runs…</p>;
+  if (runs.length === 0) return <p className="text-[12px] text-[#777]">No runs yet.</p>;
+
+  return (
+    <div className="space-y-2">
+      <ul className="space-y-1">
+        {runs.map((r) => (
+          <li key={r.run_id}>
+            <button
+              className={`w-full rounded border px-2 py-1 text-left text-[11px] hover:bg-[#2d2d30] ${openRun === r.run_id ? 'border-[#3b82f6]' : 'border-[#3c3c3c]'}`}
+              onClick={() => setOpenRun(openRun === r.run_id ? null : r.run_id)}
+            >
+              <div className="flex items-center gap-2">
+                <span className="font-mono">{r.run_id}</span>
+                <span className="ml-auto">{r.status}</span>
+                <span>{formatCost(r.total_cost_usd)}</span>
+              </div>
+              <Counts run={r} />
+            </button>
+          </li>
+        ))}
+      </ul>
+      {detail.kind === 'loading' && <p className="text-[12px] text-[#777]">Loading…</p>}
+      {detail.kind === 'error' && <p className="text-[12px] text-[#ef4444]">{detail.message}</p>}
+      {detail.kind === 'ok' && (
+        <div className="space-y-1 text-[12px]">
+          {detail.result.summary ? (
+            <div className="grid grid-cols-2 gap-x-2 text-[11px] text-[#9a9a9a]">
+              <span>status: {detail.result.summary.status}</span>
+              <span>cost: {formatCost(detail.result.summary.cost_usd)}</span>
+              <span>turns: {detail.result.summary.num_turns ?? '—'}</span>
+              <span>duration: {detail.result.summary.duration_ms === null ? '—' : `${(detail.result.summary.duration_ms / 1000).toFixed(1)} s`}</span>
+              <span className="col-span-2 truncate">session: {detail.result.summary.session_id ?? '—'}</span>
+            </div>
+          ) : (
+            <p className="text-[#777]">No summary.json for this node in that run.</p>
+          )}
+          <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap rounded bg-[#1e1e1e] p-2 font-mono text-[11px]">
+            {detail.result.result_md ?? '(no result.md)'}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}

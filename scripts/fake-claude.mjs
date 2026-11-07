@@ -11,18 +11,20 @@
 // "## Status: BLOCKED" (exit code still 0).
 //
 // `--version` prints a version line and exits. Optional env FAKE_CLAUDE_DELAY_MS
-// adds a pause between lines (useful to watch or cancel a run).
+// (or arg `--fake-delay-ms N`) adds a pause between lines (useful to watch or
+// cancel a run). `--resume <id>` reuses that session id.
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 
 const VERSION = '2.1.0 (fake-claude)';
-const DELAY_MS = Number(process.env.FAKE_CLAUDE_DELAY_MS ?? 0) || 0;
-
 const argValue = (name) => {
   const i = process.argv.indexOf(name);
   return i >= 0 ? process.argv[i + 1] : undefined;
 };
+
+// `--fake-delay-ms N` (tests) overrides env FAKE_CLAUDE_DELAY_MS.
+const DELAY_MS = Number(argValue('--fake-delay-ms') ?? process.env.FAKE_CLAUDE_DELAY_MS ?? 0) || 0;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -72,7 +74,8 @@ async function main() {
   }
   const started = Date.now();
   const prompt = await readStdin();
-  const sessionId = randomUUID();
+  // `--resume <id>` continues that session, as the real CLI does.
+  const sessionId = argValue('--resume') ?? randomUUID();
   const model = argValue('--model') ?? 'sonnet';
   const cwd = process.cwd();
   const fail = prompt.includes('FAKE_FAIL');

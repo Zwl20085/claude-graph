@@ -15,6 +15,7 @@ import {
   type ClaudeCheck,
   type Graph,
   type NodeEvent,
+  type NodeMessage,
   type NodeResult,
   type RunState,
   type RunSummary,
@@ -69,6 +70,14 @@ export const readNodeResult = (
 
 export const renderBrief = (graph: Graph, node_id: string): Promise<string> =>
   call('render_brief', { graph, node_id });
+
+/** Chat history of one node session in a run, oldest first. */
+export const listMessages = (dir: string, run_id: string, node_id: string): Promise<NodeMessage[]> =>
+  call('list_messages', { dir, run_id, node_id });
+
+/** Send a follow-up message to a node session (queued if running, resumes it if finished). */
+export const sendMessage = (dir: string, run_id: string, node_id: string, text: string): Promise<void> =>
+  call('send_message', { dir, run_id, node_id, text });
 
 export const openPath = (path: string): Promise<void> => call('open_path', { path });
 

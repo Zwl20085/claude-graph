@@ -1,0 +1,287 @@
+//! Preparing and recording node turns: the initial turn (brief from upstream
+//! results) and follow-up turns (`--resume`, message on stdin), plus the files
+//! each turn leaves in `runs/<run>/<node>/`.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+
+use crate::claude_bin::ClaudeCommand;
+use crate::contract::{
+    AppError, AppResult, Graph, MessageRole, Node, NodeMessage, NodeStatus, NodeSummary, RunState,
+};
+use crate::events::Emitter;
+use crate::graph_util::upstream_map;
+use crate::prompt::{
+    display_dir, render_brief, render_prompt, resolve_working_dir, upstream_input, UpstreamInput,
+    INSTRUCTION,
+};
+use crate::run_store::{
+    append_message, node_run_dir, read_result_md, read_summary, write_summary, PROMPT_FILE,
+    RESULT_FILE,
+};
+use crate::runner::{build_args, TurnOutcome, TurnSpec};
+use crate::scheduler::Scheduler;
+use crate::store::{deliverables_dir, read_optional, write_atomic};
+
+/// Positional instruction for a follow-up turn (message text goes on stdin).
+pub const FOLLOWUP_INSTRUCTION: &str =
+    "Continue the node task with the follow-up message on stdin. Keep the same finish protocol.";
+
+/// Per-run constants shared by the loop and its node tasks.
+pub struct RunCtx {
+    pub graph_dir: PathBuf,
+    pub graph: Graph,
+    pub run_id: String,
+    pub claude: ClaudeCommand,
+    pub emitter: Arc<dyn Emitter>,
+}
+
+impl RunCtx {
+    pub fn node(&self, id: &str) -> AppResult<&Node> {
+        self.graph
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .ok_or_else(|| AppError::new("not_found", format!("no node {id:?} in the graph")))
+    }
+
+    fn out_dir(&self, node_id: &str) -> PathBuf {
+        node_run_dir(&self.graph_dir, &self.run_id, node_id)
+    }
+
+    fn required(&self, node: &Node) -> Vec<PathBuf> {
+        let base = deliverables_dir(&self.graph_dir, &node.id);
+        node.deliverables
+            .iter()
+            .map(|d| d.path.trim())
+            .filter(|p| !p.is_empty())
+            .map(|p| base.join(p))
+            .collect()
+    }
+}
+
+fn status_word(status: NodeStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Inputs from every direct upstream node: this run's result if it ran here,
+/// else the latest successful earlier run the scheduler found.
+fn upstream_inputs(
+    ctx: &RunCtx,
+    state: &RunState,
+    sched: &Scheduler,
+    node: &Node,
+) -> AppResult<Vec<UpstreamInput>> {
+    let shown = display_dir(&ctx.graph_dir);
+    let ups = upstream_map(&ctx.graph)
+        .remove(&node.id)
+        .unwrap_or_default();
+    ctx.graph
+        .nodes
+        .iter()
+        .filter(|n| ups.contains(&n.id))
+        .map(|up| {
+            let (run_id, status) = match state.nodes.get(&up.id) {
+                Some(s) => (Some(ctx.run_id.as_str()), status_word(s.status)),
+                None => (
+                    sched.prior_run_of(&up.id),
+                    status_word(NodeStatus::Succeeded),
+                ),
+            };
+            let result = match run_id {
+                Some(r) => read_result_md(&ctx.graph_dir, r, &up.id)?,
+                None => None,
+            };
+            Ok(upstream_input(&shown, up, &status, result.as_deref()))
+        })
+        .collect()
+}
+
+/// Session to resume for `continue_session_of`: this run's, else the earlier run's.
+fn resume_session(
+    ctx: &RunCtx,
+    state: &RunState,
+    sched: &Scheduler,
+    node: &Node,
+) -> Option<String> {
+    let up = node.continue_session_of.as_deref()?.trim();
+    if up.is_empty() {
+        return None;
+    }
+    if let Some(s) = state.nodes.get(up) {
+        return s.session_id.clone();
+    }
+    let prior = sched.prior_run_of(up)?;
+    read_summary(&ctx.graph_dir, prior, up)
+        .ok()
+        .flatten()
+        .and_then(|s| s.session_id)
+}
+
+/// Write prompt.md and build the first turn of `node_id`.
+pub fn initial_turn(
+    ctx: &RunCtx,
+    state: &RunState,
+    sched: &Scheduler,
+    node_id: &str,
+    now: DateTime<Utc>,
+) -> AppResult<TurnSpec> {
+    let node = ctx.node(node_id)?;
+    let shown = display_dir(&ctx.graph_dir);
+    let brief = render_brief(
+        &shown,
+        &ctx.graph,
+        node,
+        &upstream_inputs(ctx, state, sched, node)?,
+    );
+    let prompt = render_prompt(&ctx.run_id, &now.to_rfc3339(), &brief);
+    write_atomic(&ctx.out_dir(node_id).join(PROMPT_FILE), prompt.as_bytes())?;
+    std::fs::create_dir_all(deliverables_dir(&ctx.graph_dir, node_id))?;
+    let resume = resume_session(ctx, state, sched, node);
+    Ok(TurnSpec {
+        run_id: ctx.run_id.clone(),
+        node_id: node_id.to_string(),
+        claude: ctx.claude.clone(),
+        args: build_args(
+            node,
+            &ctx.graph.settings,
+            &ctx.graph_dir,
+            resume.as_deref(),
+            INSTRUCTION,
+        ),
+        stdin_text: prompt,
+        cwd: resolve_working_dir(&ctx.graph_dir, node),
+        out_dir: ctx.out_dir(node_id),
+        required: ctx.required(node),
+    })
+}
+
+/// A follow-up turn resuming `session_id` with `text` on stdin.
+pub fn followup_turn(
+    ctx: &RunCtx,
+    node_id: &str,
+    session_id: &str,
+    text: &str,
+) -> AppResult<TurnSpec> {
+    let node = ctx.node(node_id)?;
+    Ok(TurnSpec {
+        run_id: ctx.run_id.clone(),
+        node_id: node_id.to_string(),
+        claude: ctx.claude.clone(),
+        args: build_args(
+            node,
+            &ctx.graph.settings,
+            &ctx.graph_dir,
+            Some(session_id),
+            FOLLOWUP_INSTRUCTION,
+        ),
+        stdin_text: text.to_string(),
+        cwd: resolve_working_dir(&ctx.graph_dir, node),
+        out_dir: ctx.out_dir(node_id),
+        required: ctx.required(node),
+    })
+}
+
+pub fn save_message(ctx: &RunCtx, node_id: &str, role: MessageRole, text: &str) -> AppResult<()> {
+    let message = NodeMessage {
+        role,
+        text: text.to_string(),
+        ts: Utc::now(),
+    };
+    append_message(&ctx.graph_dir, &ctx.run_id, node_id, &message)
+}
+
+fn summary_of(outcome: &TurnOutcome) -> NodeSummary {
+    NodeSummary {
+        session_id: outcome.session_id.clone(),
+        cost_usd: outcome.cost_usd,
+        duration_ms: Some(outcome.duration_ms),
+        num_turns: outcome.num_turns,
+        is_error: outcome.is_error,
+        status: outcome.status,
+    }
+}
+
+/// result.md, summary.json and the assistant message after the first turn.
+pub fn record_initial(ctx: &RunCtx, node_id: &str, outcome: &TurnOutcome) -> AppResult<()> {
+    let dir = ctx.out_dir(node_id);
+    if let Some(text) = &outcome.final_text {
+        write_atomic(&dir.join(RESULT_FILE), text.as_bytes())?;
+        save_message(ctx, node_id, MessageRole::Assistant, text)?;
+    }
+    write_summary(&ctx.graph_dir, &ctx.run_id, node_id, &summary_of(outcome))
+}
+
+fn add<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    }
+}
+
+fn count_followups(result_md: &str) -> usize {
+    result_md
+        .lines()
+        .filter(|l| l.starts_with("## Follow-up "))
+        .count()
+}
+
+/// Append the follow-up's final text to result.md and accumulate summary.json.
+/// Returns the accumulated summary.
+pub fn record_followup(
+    ctx: &RunCtx,
+    node_id: &str,
+    outcome: &TurnOutcome,
+    now: DateTime<Utc>,
+) -> AppResult<NodeSummary> {
+    let dir = ctx.out_dir(node_id);
+    let previous = read_optional(&dir.join(RESULT_FILE))?.unwrap_or_default();
+    let text = outcome.final_text.clone().unwrap_or_default();
+    let n = count_followups(&previous) + 1;
+    let section = format!("\n\n---\n## Follow-up {n} ({})\n\n{text}", now.to_rfc3339());
+    write_atomic(
+        &dir.join(RESULT_FILE),
+        format!("{previous}{section}").as_bytes(),
+    )?;
+    if !text.is_empty() {
+        save_message(ctx, node_id, MessageRole::Assistant, &text)?;
+    }
+    let before = read_summary(&ctx.graph_dir, &ctx.run_id, node_id)?;
+    let turn = summary_of(outcome);
+    let merged = match before {
+        Some(b) => NodeSummary {
+            session_id: turn.session_id.or(b.session_id),
+            cost_usd: add(b.cost_usd, turn.cost_usd),
+            duration_ms: add(b.duration_ms, turn.duration_ms),
+            num_turns: add(b.num_turns, turn.num_turns),
+            is_error: turn.is_error,
+            status: turn.status,
+        },
+        None => turn,
+    };
+    write_summary(&ctx.graph_dir, &ctx.run_id, node_id, &merged)?;
+    Ok(merged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn follow_up_counting_and_sums() {
+        assert_eq!(
+            count_followups("a\n## Follow-up 1 (t)\nb\n## Follow-up 2 (t)"),
+            2
+        );
+        assert_eq!(count_followups("plain"), 0);
+        assert_eq!(add(Some(1.5), Some(2.0)), Some(3.5));
+        assert_eq!(add(None, Some(2u32)), Some(2));
+        assert_eq!(add::<u32>(None, None), None);
+        assert_eq!(status_word(NodeStatus::Succeeded), "succeeded");
+    }
+}
