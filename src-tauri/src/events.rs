@@ -11,8 +11,9 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::contract::{
-    AppError, AppResult, AssistantState, NodeEvent, NodeEventKind, PtyData, RunState,
-    EVENT_ASSISTANT_UPDATE, EVENT_NODE_EVENT, EVENT_PTY_DATA, EVENT_RUN_STATE,
+    AppError, AppResult, AssistantState, NodeEvent, NodeEventKind, PermissionAnswered,
+    PermissionPrompt, PtyData, RunState, EVENT_ASSISTANT_UPDATE, EVENT_NODE_EVENT,
+    EVENT_PERMISSION_ANSWERED, EVENT_PERMISSION_PROMPT, EVENT_PTY_DATA, EVENT_RUN_STATE,
 };
 
 const TOOL_INPUT_MAX: usize = 200;
@@ -38,6 +39,10 @@ pub trait Emitter: Send + Sync {
     fn open_window(&self, _spec: &WindowSpec) -> AppResult<()> {
         Ok(())
     }
+    /// "Ask me in the app": a prompt waits for the user. No-op by default.
+    fn permission_prompt(&self, _prompt: &PermissionPrompt) {}
+    /// "Ask me in the app": a prompt was resolved. No-op by default.
+    fn permission_answered(&self, _answered: &PermissionAnswered) {}
 }
 
 /// A terminal-mode session window (created by the backend).
@@ -76,6 +81,20 @@ impl Emitter for TauriEmitter {
         use tauri::Emitter as _;
         if let Err(e) = self.0.emit(EVENT_ASSISTANT_UPDATE, state) {
             log::warn!("emit {EVENT_ASSISTANT_UPDATE} failed: {e}");
+        }
+    }
+
+    fn permission_prompt(&self, prompt: &PermissionPrompt) {
+        use tauri::Emitter as _;
+        if let Err(e) = self.0.emit(EVENT_PERMISSION_PROMPT, prompt) {
+            log::warn!("emit {EVENT_PERMISSION_PROMPT} failed: {e}");
+        }
+    }
+
+    fn permission_answered(&self, answered: &PermissionAnswered) {
+        use tauri::Emitter as _;
+        if let Err(e) = self.0.emit(EVENT_PERMISSION_ANSWERED, answered) {
+            log::warn!("emit {EVENT_PERMISSION_ANSWERED} failed: {e}");
         }
     }
 
@@ -142,6 +161,8 @@ pub struct StreamAccumulator {
     tool_calls: HashMap<String, ToolCall>,
     /// Tools named by live `permission_denied` events, deduplicated.
     denied: Vec<String>,
+    /// MCP fields of the init event (crate::approve::args::init_mcp_fields).
+    init_mcp: Option<Value>,
 }
 
 impl StreamAccumulator {
@@ -173,6 +194,7 @@ impl StreamAccumulator {
                 Some("permission_denied") => vec![self.permission_denied(&value)],
                 Some("init") => {
                     self.model = str_field(&value, "model").or(self.model.take());
+                    self.init_mcp = Some(crate::approve::args::init_mcp_fields(&value));
                     system_event(&value).into_iter().collect()
                 }
                 _ => system_event(&value).into_iter().collect(),
@@ -187,6 +209,11 @@ impl StreamAccumulator {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// MCP fields of the `system`/`init` event, once seen.
+    pub fn init_mcp(&self) -> Option<&Value> {
+        self.init_mcp.as_ref()
     }
 
     pub fn session_id(&self) -> Option<&str> {

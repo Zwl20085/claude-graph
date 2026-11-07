@@ -10,6 +10,8 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   EVENT_ASSISTANT_UPDATE,
   EVENT_NODE_EVENT,
+  EVENT_PERMISSION_ANSWERED,
+  EVENT_PERMISSION_PROMPT,
   EVENT_PTY_DATA,
   EVENT_RUN_STATE,
   isAppError,
@@ -24,6 +26,9 @@ import {
   type NodeEvent,
   type NodeMessage,
   type NodeResult,
+  type PermissionAnswer,
+  type PermissionAnswered,
+  type PermissionPrompt,
   type PtyData,
   type PtyReplay,
   type RunState,
@@ -186,3 +191,21 @@ export const openSessionWindow = (run_id: string, sid: string): Promise<void> =>
 /** Subscribe to `pty:data`; callers filter on run_id / sid. */
 export const onPtyData = (handler: (data: PtyData) => void): Promise<UnlistenFn> =>
   listen<PtyData>(EVENT_PTY_DATA, (e) => handler(e.payload));
+
+// ---------------------------------------------------------------------------
+// "Ask me in the app" permission prompts (ASKAPP_CONTRACT)
+// ---------------------------------------------------------------------------
+
+/** Pending permission prompts of the app, oldest first. */
+export const listPermissionPrompts = (): Promise<PermissionPrompt[]> => call('list_permission_prompts');
+
+/** Answer one prompt; rejects with not_found when it was already answered. */
+export const answerPermission = (answer: PermissionAnswer): Promise<void> => call('answer_permission', { answer });
+
+/** Subscribe to `permission_prompt`. */
+export const onPermissionPrompt = (handler: (prompt: PermissionPrompt) => void): Promise<UnlistenFn> =>
+  listen<PermissionPrompt>(EVENT_PERMISSION_PROMPT, (e) => handler(e.payload));
+
+/** Subscribe to `permission_answered`. */
+export const onPermissionAnswered = (handler: (answered: PermissionAnswered) => void): Promise<UnlistenFn> =>
+  listen<PermissionAnswered>(EVENT_PERMISSION_ANSWERED, (e) => handler(e.payload));

@@ -24,6 +24,7 @@ describe('permission mode claude_settings', () => {
     expect(emptyGraph('g').settings.default_permission_mode).toBe('claude_settings');
     expect(PERMISSION_MODES.filter((m) => m !== 'inherit').map(permissionLabel)).toEqual([
       'Claude Code settings (recommended)',
+      'Ask me in the app',
       'acceptEdits',
       'default',
       'plan',

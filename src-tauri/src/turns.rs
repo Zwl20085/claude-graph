@@ -8,10 +8,12 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
+use crate::approve::args::{prompt_tool_args, with_flags};
+use crate::approve::Registration;
 use crate::claude_bin::{ClaudeCommand, ResolveEnv};
 use crate::contract::{
     AppError, AppResult, Graph, HarnessProfile, MessageRole, Node, NodeMessage, NodeStatus,
-    NodeSummary, RunState,
+    NodeSummary, PermissionMode, RunState,
 };
 use crate::events::{dedup, Emitter};
 use crate::graph_util::{is_valid_session_id, upstream_map};
@@ -27,7 +29,9 @@ use crate::run_store::{
     append_message, node_run_dir, read_result_md, read_summary, write_summary, PROMPT_FILE,
     RESULT_FILE,
 };
-use crate::runner::{build_args, final_status, Resume, TurnOutcome, TurnSpec};
+use crate::runner::{
+    build_args, effective_permission, final_status, Resume, TurnOutcome, TurnSpec,
+};
 use crate::scheduler::Scheduler;
 use crate::store::{deliverables_dir, read_optional, write_atomic};
 
@@ -47,6 +51,9 @@ pub struct RunCtx {
     pub harnesses: Vec<HarnessProfile>,
     /// The app binary, Codex's notify program (`<exe> --notify <hooks.log>`).
     pub notify_exe: PathBuf,
+    /// "Ask me in the app": the run's approval registration, when some node
+    /// of the graph uses `ask_app` (dropped with the run).
+    pub approval: Option<Registration>,
 }
 
 impl RunCtx {
@@ -83,6 +90,18 @@ impl RunCtx {
             Some(c) => resolve_program(c, &ResolveEnv::from_process(None)),
             None => Ok(self.claude.clone()),
         }
+    }
+
+    /// `args` plus the prompt-tool flags when the node's effective mode is
+    /// `ask_app`.
+    fn with_approval(&self, node: &Node, args: Vec<String>) -> AppResult<Vec<String>> {
+        if effective_permission(node, &self.graph.settings) != PermissionMode::AskApp {
+            return Ok(args);
+        }
+        let reg = self.approval.as_ref().ok_or_else(|| {
+            AppError::new("internal", "ask_app node without an approval registration")
+        })?;
+        Ok(with_flags(args, prompt_tool_args(reg, &node.id)))
     }
 
     fn out_dir(&self, node_id: &str) -> PathBuf {
@@ -228,17 +247,20 @@ pub fn initial_turn(
         run_id: ctx.run_id.clone(),
         node_id: node_id.to_string(),
         claude: ctx.headless_claude(node)?,
-        args: with_profile_model(
-            build_args(
-                node,
-                &ctx.graph.settings,
-                &ctx.graph_dir,
-                resume,
-                INSTRUCTION,
-            ),
+        args: ctx.with_approval(
             node,
-            model,
-        ),
+            with_profile_model(
+                build_args(
+                    node,
+                    &ctx.graph.settings,
+                    &ctx.graph_dir,
+                    resume,
+                    INSTRUCTION,
+                ),
+                node,
+                model,
+            ),
+        )?,
         env,
         stdin_text: prompt,
         cwd: resolve_working_dir(&ctx.graph_dir, node),
@@ -267,17 +289,20 @@ pub fn followup_turn(
         run_id: ctx.run_id.clone(),
         node_id: node_id.to_string(),
         claude: ctx.headless_claude(node)?,
-        args: with_profile_model(
-            build_args(
-                node,
-                &ctx.graph.settings,
-                &ctx.graph_dir,
-                Some(resume),
-                FOLLOWUP_INSTRUCTION,
-            ),
+        args: ctx.with_approval(
             node,
-            model,
-        ),
+            with_profile_model(
+                build_args(
+                    node,
+                    &ctx.graph.settings,
+                    &ctx.graph_dir,
+                    Some(resume),
+                    FOLLOWUP_INSTRUCTION,
+                ),
+                node,
+                model,
+            ),
+        )?,
         env,
         stdin_text: text.to_string(),
         cwd: resolve_working_dir(&ctx.graph_dir, node),

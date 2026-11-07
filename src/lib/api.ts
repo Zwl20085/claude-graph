@@ -14,6 +14,9 @@ import type {
   NodeEvent,
   NodeMessage,
   NodeResult,
+  PermissionAnswer,
+  PermissionAnswered,
+  PermissionPrompt,
   PtyData,
   PtyReplay,
   RunState,
@@ -69,6 +72,11 @@ export interface Api {
   ptyReplay: (run_id: string, sid: string) => Promise<PtyReplay>;
   openSessionWindow: (run_id: string, sid: string) => Promise<void>;
   onPtyData: (handler: (data: PtyData) => void) => Promise<Unlisten>;
+  // "Ask me in the app" (ASKAPP_CONTRACT).
+  listPermissionPrompts: () => Promise<PermissionPrompt[]>;
+  answerPermission: (answer: PermissionAnswer) => Promise<void>;
+  onPermissionPrompt: (handler: (prompt: PermissionPrompt) => void) => Promise<Unlisten>;
+  onPermissionAnswered: (handler: (answered: PermissionAnswered) => void) => Promise<Unlisten>;
 }
 
 /** True when running inside a Tauri WebView. */

@@ -23,11 +23,28 @@ const KIND_COLORS: Record<NodeEventKind | 'raw', string> = {
   parse_error: '#ef4444',
   user_message: '#60a5fa',
   permission_denied: '#f59e0b',
+  permission_prompt: '#f59e0b',
+  permission_answered: '#f59e0b',
   raw: '#6b7280',
+};
+/** Kinds whose text is shown in amber too (permission traffic). */
+const AMBER_TEXT: ReadonlySet<NodeEventKind> = new Set(['permission_denied', 'permission_prompt', 'permission_answered']);
+const KIND_LABELS: Partial<Record<NodeEventKind, string>> = {
+  permission_denied: 'DENIED',
+  permission_prompt: 'ASK',
+  permission_answered: 'ANSWER',
 };
 /** Column label of a line kind (default: the kind itself). */
 export function kindLabel(kind: NodeEventKind): string {
-  return kind === 'permission_denied' ? 'DENIED' : kind;
+  return KIND_LABELS[kind] ?? kind;
+}
+/** Text colour of a line; null = the default text colour. */
+export function lineTextColor(kind: NodeEventKind): string | null {
+  return AMBER_TEXT.has(kind) ? KIND_COLORS[kind] : null;
+}
+function textStyle(kind: NodeEventKind): { color: string } | undefined {
+  const color = lineTextColor(kind);
+  return color === null ? undefined : { color };
 }
 const STICK_PX = 24;
 const EMPTY: readonly LogLine[] = [];
@@ -118,7 +135,7 @@ export function LogPanel({ scheduler = false }: LogPanelProps) {
             </span>
             <span
               className="whitespace-pre-wrap break-all"
-              style={l.kind === 'permission_denied' ? { color: KIND_COLORS.permission_denied } : undefined}
+              style={textStyle(l.kind)}
             >
               {l.text}
             </span>

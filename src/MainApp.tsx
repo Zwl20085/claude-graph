@@ -16,6 +16,10 @@ const listenFailed = (name: string) => (err: unknown) =>
   store.getState().pushToast('error', `Could not subscribe to ${name}; live run updates will be missing: ${errorMessage(err)}`);
 api.onRunState((s) => store.getState().applyRunState(s)).catch(listenFailed('run:state'));
 api.onNodeEvent((e) => store.getState().appendEvent(e)).catch(listenFailed('node:event'));
+api.onPermissionPrompt((p) => store.getState().addPermissionPrompt(p)).catch(listenFailed('permission_prompt'));
+api
+  .onPermissionAnswered((a) => typeof a?.id === 'string' && store.getState().removePermissionPrompt(a.id))
+  .catch(listenFailed('permission_answered'));
 void store.getState().init();
 
 export default function MainApp() {

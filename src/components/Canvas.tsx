@@ -29,6 +29,7 @@ import { MODEL_COLORS } from '../lib/status';
 import { harnessLabel } from '../lib/harness';
 import { graphStore, useGraphStore } from '../store/graphStore';
 import type { DenialsByNode } from '../store/runHelpers';
+import { waitingNodeIds } from '../store/permissionSlice';
 import { BriefNode } from './BriefNode';
 import { WireEdge } from './WireEdge';
 
@@ -44,6 +45,7 @@ export function Canvas() {
   const selectedNodeId = useGraphStore((s) => s.selectedNodeId);
   const liveDenials = useGraphStore((s) => (s.eventsRunId !== null && s.eventsRunId === s.runState?.run_id ? s.liveDenials : NO_DENIALS));
   const harnesses = useGraphStore((s) => s.harnesses);
+  const prompts = useGraphStore((s) => s.permissionPrompts);
   const { screenToFlowPosition } = useReactFlow();
   const [nodes, setNodes] = useState<BriefFlowNode[]>(() => (graph ? graphToFlowNodes(graph, runState) : []));
   const [edges, setEdges] = useState<WireFlowEdge[]>(() => (graph ? graphToFlowEdges(graph, runState) : []));
@@ -52,9 +54,10 @@ export function Canvas() {
     if (!graph) return;
     const denied = new Set(Object.keys(liveDenials));
     const labelOf = (id: string): string => harnessLabel(harnesses, id);
-    setNodes((prev) => mergeFlowNodes(graphToFlowNodes(graph, runState, denied, labelOf), prev));
+    const waiting = waitingNodeIds(prompts, runState);
+    setNodes((prev) => mergeFlowNodes(graphToFlowNodes(graph, runState, denied, labelOf, waiting), prev));
     setEdges((prev) => mergeFlowEdges(graphToFlowEdges(graph, runState), prev));
-  }, [graph, runState, liveDenials, harnesses]);
+  }, [graph, runState, liveDenials, harnesses, prompts]);
 
   // M2: RF selection follows the store; a programmatic selection deselects the others.
   useEffect(() => setNodes((ns) => selectOnly(ns, selectedNodeId)), [selectedNodeId, graph]);

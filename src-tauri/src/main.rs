@@ -7,5 +7,10 @@ fn main() {
     if let Some(code) = claude_graph_lib::launch::notify_from_process() {
         std::process::exit(code);
     }
+    // Hidden mode (the "Ask me in the app" approval server): MCP on stdio,
+    // relaying to the running app over loopback.
+    if let Some(code) = claude_graph_lib::approve::mcp::from_process() {
+        std::process::exit(code);
+    }
     claude_graph_lib::run()
 }

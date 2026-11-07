@@ -18,6 +18,7 @@ import type {
 } from '../types/contract';
 import { runModeOf } from '../types/contract';
 import type { Timers } from './debounce';
+import type { AskDecision, AskRequest } from './mockPermissions';
 import { deriveSession, groupSessions } from './sessions';
 import { targetSet } from './graphOps';
 import { assertNever } from './status';
@@ -44,6 +45,14 @@ export interface RunnerDeps {
   emitEvent: (dir: string, runId: string, nodeId: string, kind: NodeEventKind, text: string) => void;
   /** Harness label for session titles (default: the id). */
   harnessLabel?: (id: string) => string;
+  /** Approval relay for FAKE_ASK (ASKAPP_CONTRACT); without it FAKE_ASK is ignored. */
+  permissions?: MockPermissionHooks;
+}
+
+export interface MockPermissionHooks {
+  ask: (req: AskRequest, onDecision: (d: AskDecision) => void) => void;
+  cancel: (runId: string, nodeId?: string) => void;
+  endRun: (runId: string) => void;
 }
 
 const TERMINAL: ReadonlySet<NodeStatus> = new Set(['succeeded', 'failed', 'blocked', 'skipped', 'cancelled']);
@@ -56,10 +65,23 @@ export const FAKE_BLOCKED = 'FAKE_BLOCKED';
 export const FAKE_DENY = 'FAKE_DENY';
 export const MOCK_DENIED_TOOL = 'WebSearch';
 export const MOCK_BLOCKED_QUESTION = 'Which dataset should I use? (mock)';
+/** `FAKE_ASK=<tool>`: the node asks for approval of one call of <tool> and waits for the answer. */
+export const FAKE_ASK_RE = /FAKE_ASK=([A-Za-z0-9_]+)/;
+/** Input of the asked call, like scripts/fake-claude.mjs. */
+export const MOCK_ASK_INPUT = { command: 'echo hi' } as const;
+export const ASK_ALLOWED_FILE = 'asked-allowed.txt';
+export const ASK_DENIED_FILE = 'asked-denied.txt';
 const hasMarker = (node: Node, marker: string): boolean =>
   node.prompt.includes(marker) || node.extra_context.includes(marker);
 
+/** Tool named by FAKE_ASK=<tool> in the prompt or extra context; null when absent. */
+export function askedTool(node: Pick<Node, 'prompt' | 'extra_context'>): string | null {
+  const m = FAKE_ASK_RE.exec(node.prompt) ?? FAKE_ASK_RE.exec(node.extra_context);
+  return m?.[1] ?? null;
+}
+
 type Outcome = 'succeeded' | 'failed' | 'blocked';
+type Step = [NodeEventKind, string];
 
 function outcomeOf(node: Node): Outcome {
   if (hasMarker(node, 'FAKE_FAIL')) return 'failed';
@@ -207,14 +229,49 @@ export function createMockRunner(deps: RunnerDeps) {
     advance(run);
   };
 
-  const startNode = (run: MockRun, node: Node): void => {
-    setNode(run, node.id, { status: 'running', started_at: stamp() });
-    script(node).forEach(([kind, text], i) => {
+  /** Emit `steps` one per stepMs, then call `then` one step later. */
+  const play = (run: MockRun, node: Node, steps: readonly Step[], then: () => void): void => {
+    steps.forEach(([kind, text], i) => {
       later(run, node.id, deps.stepMs * (i + 1), () =>
         deps.emitEvent(run.state.graph_dir, run.state.run_id, node.id, kind, text),
       );
     });
-    later(run, node.id, deps.stepMs * (script(node).length + 1), () => finishNode(run, node));
+    later(run, node.id, deps.stepMs * (steps.length + 1), then);
+  };
+
+  const stillRunning = (run: MockRun, nodeId: string): boolean =>
+    run.state.status === 'running' && run.state.nodes[nodeId]?.status === 'running';
+
+  /** FAKE_ASK: play the head of the script, wait for the answer, then the rest. */
+  const playWithAsk = (run: MockRun, node: Node, tool: string, hooks: MockPermissionHooks): void => {
+    const steps = script(node);
+    const head: Step[] = [...steps.slice(0, 2), ['tool_use', `${tool} ${MOCK_ASK_INPUT.command}`]];
+    play(run, node, head, () => {
+      const req: AskRequest = {
+        graph_dir: run.state.graph_dir,
+        run_id: run.state.run_id,
+        node_id: node.id,
+        tool_name: tool,
+        input: { ...MOCK_ASK_INPUT },
+      };
+      hooks.ask(req, (d) => {
+        if (!stillRunning(run, node.id)) return;
+        const outcome: Step = d.allow
+          ? ['tool_result', `wrote ${ASK_ALLOWED_FILE}`]
+          : ['tool_result', `wrote ${ASK_DENIED_FILE}: ${d.message ?? ''}`];
+        play(run, node, [outcome, ...steps.slice(2)], () => finishNode(run, node));
+      });
+    });
+  };
+
+  const startNode = (run: MockRun, node: Node): void => {
+    setNode(run, node.id, { status: 'running', started_at: stamp() });
+    const tool = askedTool(node);
+    if (tool !== null && deps.permissions && run.state.mode !== 'terminal') {
+      playWithAsk(run, node, tool, deps.permissions);
+      return;
+    }
+    play(run, node, script(node), () => finishNode(run, node));
   };
 
   /** Settle pending nodes, start what may start, finish the run when nothing is left. */
@@ -265,6 +322,7 @@ export function createMockRunner(deps: RunnerDeps) {
           ? 'cancelled'
           : 'succeeded';
       run.state = { ...run.state, status: final, finished_at: stamp() };
+      deps.permissions?.endRun(run.state.run_id);
     }
     emit(run);
   }
@@ -309,6 +367,8 @@ export function createMockRunner(deps: RunnerDeps) {
         if (!TERMINAL.has(n.status)) setNode(run, id, { status: 'cancelled', finished_at: stamp(), reason: 'run cancelled' });
       }
       run.state = { ...run.state, status: 'cancelled', finished_at: stamp() };
+      deps.permissions?.cancel(runId);
+      deps.permissions?.endRun(runId);
       emit(run);
     },
     /** Queue a follow-up; a finished node resumes (running) until the fake reply lands. */
@@ -358,6 +418,7 @@ export function createMockRunner(deps: RunnerDeps) {
       if (!run || !n || TERMINAL.has(n.status)) return;
       clearTimers(runId, nodeId);
       setNode(run, nodeId, { status: 'cancelled', finished_at: stamp(), reason: 'cancelled by user' });
+      deps.permissions?.cancel(runId, nodeId);
       advance(run);
     },
   };

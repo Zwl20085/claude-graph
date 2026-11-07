@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::app_settings::{self, default_data_dir};
+use crate::approve::{Approvals, Registration};
 use crate::assistant::AssistantTurns;
 use crate::claude_bin::{resolve, ClaudeCommand, Resolution, ResolveEnv};
 use crate::contract::{
@@ -77,8 +78,10 @@ pub struct AppState {
     terminals: Terminals,
     data_dir: PathBuf,
     /// The program Codex's notify runs (`<exe> --notify <hooks.log>`): this
-    /// app's binary.
+    /// app's binary; also the "Ask me in the app" approval server.
     notify_exe: PathBuf,
+    /// "Ask me in the app": listener, pending prompts, remembered scopes.
+    approvals: Approvals,
 }
 
 impl Default for AppState {
@@ -137,6 +140,7 @@ impl AppState {
             registry: Arc::new(Mutex::new(Registry::default())),
             assistant: AssistantTurns::default(),
             terminals: Terminals::default(),
+            approvals: Approvals::new(data_dir.clone()),
             data_dir,
             notify_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("claude-graph")),
         }
@@ -175,6 +179,48 @@ impl AppState {
                 display: "claude (not found)".into(),
             }),
         }
+    }
+
+    /// "Ask me in the app" state (pending prompts, answers).
+    pub fn approvals(&self) -> &Approvals {
+        &self.approvals
+    }
+
+    /// An approval registration for a run of `graph` when it uses `ask_app`
+    /// anywhere (`run_id` "assistant" for an assistant turn).
+    pub(crate) fn approval_for(
+        &self,
+        graph_dir: &Path,
+        graph: &crate::contract::Graph,
+        run_id: &str,
+        emitter: &Arc<dyn Emitter>,
+    ) -> AppResult<Option<Registration>> {
+        if !crate::runner::graph_asks_app(graph) {
+            return Ok(None);
+        }
+        self.approvals
+            .register(run_id, graph_dir, &self.notify_exe, emitter.clone())
+            .map(Some)
+    }
+
+    /// The assistant turn's registration when the graph default is `ask_app`.
+    pub(crate) fn assistant_approval(
+        &self,
+        graph_dir: &Path,
+        emitter: &Arc<dyn Emitter>,
+    ) -> AppResult<Option<Registration>> {
+        let graph = read_graph(graph_dir)?;
+        if graph.settings.default_permission_mode != crate::contract::PermissionMode::AskApp {
+            return Ok(None);
+        }
+        self.approvals
+            .register(
+                crate::assistant::RUN_ID,
+                graph_dir,
+                &self.notify_exe,
+                emitter.clone(),
+            )
+            .map(Some)
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -366,6 +412,7 @@ impl AppState {
             emitter,
             harnesses,
             notify_exe: self.notify_exe.clone(),
+            approval: None,
         });
         self.close_earlier_sessions(&ctx, &plans);
         let run_loop = TerminalLoop::new(ctx, plans, self.terminals.clone());
@@ -411,6 +458,7 @@ impl AppState {
         let harnesses = self.harnesses();
         harness::check_targets(&graph, sched.target(), &harnesses, true)?;
         let run_id = new_run_id(&graph_dir, Utc::now())?;
+        let approval = self.approval_for(&graph_dir, &graph, &run_id, &emitter)?;
         let ctx = Arc::new(RunCtx {
             graph_dir,
             graph,
@@ -419,6 +467,7 @@ impl AppState {
             emitter,
             harnesses,
             notify_exe: self.notify_exe.clone(),
+            approval,
         });
         let state = initial_state(&ctx, &sched);
         let run_loop = RunLoop::new(ctx, sched, state);
@@ -439,6 +488,7 @@ impl AppState {
     /// Cancel an active run. A finished terminal run's sessions that are
     /// still alive are killed too.
     pub fn cancel_run(&self, run_id: &str) -> AppResult<()> {
+        self.approvals.cancel_run(run_id);
         match self.send(run_id, LoopMsg::CancelRun) {
             Err(_) if self.terminals.has_run(run_id) => {
                 self.terminals.kill_run(run_id);
@@ -450,6 +500,7 @@ impl AppState {
 
     /// Cancel one node; in terminal mode this kills the node's session.
     pub fn cancel_node(&self, run_id: &str, node_id: &str) -> AppResult<()> {
+        self.approvals.cancel_node(run_id, node_id);
         match self.send(run_id, LoopMsg::CancelNode(node_id.to_string())) {
             Err(e) => match self.terminals.session_of_node(run_id, node_id) {
                 Some(session) => {
@@ -476,6 +527,10 @@ impl AppState {
             if h.tx.send(LoopMsg::CancelRun).is_err() {
                 log::warn!("shutdown: run {id} already finished");
             }
+        }
+        let denied = self.approvals.cancel_all();
+        if denied > 0 {
+            log::info!("shutdown: denied {denied} waiting approval(s)");
         }
         let turns = self.assistant.kill_all();
         if turns > 0 {
@@ -592,6 +647,7 @@ impl AppState {
         }
         let claude = self.find_claude()?;
         let sched = Scheduler::resume(&graph, &state)?;
+        let approval = self.approval_for(&graph_dir, &graph, run_id, &emitter)?;
         let ctx = Arc::new(RunCtx {
             graph_dir,
             graph,
@@ -600,6 +656,7 @@ impl AppState {
             emitter,
             harnesses: self.harnesses(),
             notify_exe: self.notify_exe.clone(),
+            approval,
         });
         let run_loop = RunLoop::new(ctx, sched, state);
         // Queue the message before the loop starts so it cannot finish first.

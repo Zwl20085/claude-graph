@@ -9,6 +9,8 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
+use crate::approve::args::{prompt_tool_args, with_flags};
+use crate::approve::Registration;
 use crate::claude_bin::ClaudeCommand;
 use crate::contract::{
     AppResult, AssistantKind, AssistantMessage, AssistantRole, AssistantSession, AssistantState,
@@ -36,7 +38,23 @@ pub const DENIAL_HINT: &str =
 pub const RESET_HINT: &str = "Reset the session to start again";
 const EMPTY_REPLY: &str = "the scheduler returned an empty reply";
 
-/// The scheduler's arguments: no model, permission mode, tools or turn limit.
+/// The spec with the "Ask me in the app" flags added when `approval` is set
+/// (the graph default permission mode is `ask_app`):
+/// `--permission-mode default --permission-prompt-tool … --mcp-config …`.
+pub fn with_approval(spec: TurnSpec, approval: Option<&Registration>) -> TurnSpec {
+    let Some(reg) = approval else { return spec };
+    let extra = ["--permission-mode".to_string(), "default".to_string()]
+        .into_iter()
+        .chain(prompt_tool_args(reg, NODE_ID))
+        .collect();
+    TurnSpec {
+        args: with_flags(spec.args.clone(), extra),
+        ..spec
+    }
+}
+
+/// The scheduler's arguments: no model, permission mode, tools or turn limit
+/// (unless the graph default is `ask_app`, see [`with_approval`]).
 /// `resume` must already be checked with [`checked_session`].
 pub fn build_args(graph_dir: &Path, resume: Option<&str>) -> Vec<String> {
     let base = [

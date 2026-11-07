@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use claude_graph_lib::claude_bin::ENV_CLAUDE_BIN;
 use claude_graph_lib::contract::{
-    AppResult, AssistantState, Graph, NodeEvent, NodeEventKind, PtyData, RunState,
+    AppResult, AssistantState, Graph, NodeEvent, NodeEventKind, PermissionAnswered,
+    PermissionPrompt, PtyData, RunState,
 };
 use claude_graph_lib::events::{Emitter, WindowSpec};
 use claude_graph_lib::run_api::{abs, AppState};
@@ -59,6 +60,10 @@ pub struct Recorder {
     pub windows: Mutex<Vec<WindowSpec>>,
     /// Terminal mode: `pty:data` chunks (window label, payload).
     pub pty: Mutex<Vec<(String, PtyData)>>,
+    /// "Ask me in the app": `permission_prompt` events.
+    pub prompts: Mutex<Vec<PermissionPrompt>>,
+    /// "Ask me in the app": ids of `permission_answered` events.
+    pub answered: Mutex<Vec<String>>,
 }
 
 impl Emitter for Recorder {
@@ -80,6 +85,12 @@ impl Emitter for Recorder {
     fn open_window(&self, spec: &WindowSpec) -> AppResult<()> {
         self.windows.lock().unwrap().push(spec.clone());
         Ok(())
+    }
+    fn permission_prompt(&self, prompt: &PermissionPrompt) {
+        self.prompts.lock().unwrap().push(prompt.clone());
+    }
+    fn permission_answered(&self, answered: &PermissionAnswered) {
+        self.answered.lock().unwrap().push(answered.id.clone());
     }
 }
 

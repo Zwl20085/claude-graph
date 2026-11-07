@@ -229,10 +229,10 @@ export function ChipsInput({ values, onChange, suggestions = RESOURCE_SUGGESTION
   );
 }
 
-const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+export const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /** Keep Tab / Shift+Tab inside `root`. */
-function trapTab(e: KeyboardEvent<HTMLElement>, root: HTMLElement | null): void {
+export function trapTab(e: KeyboardEvent<HTMLElement>, root: HTMLElement | null): void {
   if (e.key !== 'Tab' || !root) return;
   const items = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)];
   const first = items[0];

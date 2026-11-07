@@ -39,7 +39,7 @@ Standalone reference extracted from [ARCHITECTURE.md](ARCHITECTURE.md) §2. Type
   "do_nots": ["Do not install packages", "Do not touch tests"],
   "model": "sonnet" | "opus" | "haiku" | "inherit",
   "resources": ["cpu"],                   // any of cpu, memory, gpu, exclusive, or free text tags
-  "permission_mode": "claude_settings" | "acceptEdits" | "default" | "plan" | "dontAsk" | "bypassPermissions" | "inherit",
+  "permission_mode": "claude_settings" | "ask_app" | "acceptEdits" | "default" | "plan" | "dontAsk" | "bypassPermissions" | "inherit",
   "allowed_tools": ["Read", "Write", "Bash(python:*)"],   // optional
   "max_turns": 50,                        // optional
   "working_dir": null,                    // null = graph dir
@@ -67,6 +67,14 @@ Deliverable paths are relative to `nodes/<id>/deliverables/`.
   settings decide. `create_graph` writes it as `settings.default_permission_mode` of new
   graphs; a graph without that setting still loads with `"acceptEdits"`. Any other
   explicit mode overrides the user's settings.
+- `"ask_app"` ("Ask me in the app", headless engine): `--permission-mode default` plus the
+  app's own permission prompt tool, so each permission prompt becomes a dialog in the app
+  (ARCHITECTURE.md "Ask me in the app"). As `settings.default_permission_mode` it also
+  applies to Assistant-tab turns; in terminal mode it means `default` (the session asks in
+  its own window). Not an elevated setting (no trust consent). "Always for this graph"
+  answers are kept per machine, never in graph.json: `<app data>/claude-graph/approvals.json`
+  (`{ "<canonical graph folder>": [ { "tool": "Bash", "key": "<command>" }, … ] }`; key =
+  the exact command / file path / url / query, else `sha256:<hex>` of the canonical JSON input).
 - Resource tags: capacity comes from `settings.resources`; unknown tags have
   capacity 1; `exclusive` means nothing else runs alongside the node.
 - `run_mode`: `"terminal"` runs each connected component as one interactive Claude Code

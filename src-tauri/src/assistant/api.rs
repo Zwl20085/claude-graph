@@ -16,6 +16,7 @@ use chrono::Utc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::approve::Registration;
 use crate::contract::{
     AppError, AppResult, AssistantKind, AssistantRole, AssistantSession, AssistantState,
     AssistantStatus,
@@ -136,9 +137,11 @@ async fn run_and_record(
     emitter: Arc<dyn Emitter>,
     kill: watch::Receiver<bool>,
     guard: Deregister,
+    approval: Option<Registration>,
 ) {
     let dir = guard.dir.clone();
     let outcome = run_turn(spec, emitter.clone(), kill).await;
+    drop(approval);
     let recorded = blocking(move || record(&dir, turn, resumed, &outcome, Utc::now())).await;
     let shown = guard.dir.display().to_string();
     drop(guard);
@@ -188,6 +191,8 @@ impl AppState {
         }
         let claude = self.find_claude()?;
         let prepared = prepare(&graph_dir, &previous, text, claude, now)?;
+        let approval = self.assistant_approval(&graph_dir, &emitter)?;
+        let spec = super::turn::with_approval(prepared.spec, approval.as_ref());
         append_messages(&graph_dir, std::slice::from_ref(&prepared.message))?;
         write_session(&graph_dir, &prepared.session)?;
         let state = read_state(&graph_dir)?;
@@ -199,12 +204,13 @@ impl AppState {
         // The task cannot leave the registry before the insert below: its
         // guard needs the lock this function holds.
         let join = tokio::spawn(run_and_record(
-            prepared.spec,
+            spec,
             prepared.turn,
             prepared.resumed,
             emitter.clone(),
             kill_rx,
             guard,
+            approval,
         ));
         map.insert(
             graph_dir,
@@ -226,6 +232,7 @@ impl AppState {
             AppError::new("not_found", "no scheduler turn is running for this graph")
         })?;
         live.kill.send_replace(true);
+        self.approvals().cancel_assistant(&graph_dir);
         Ok(())
     }
 

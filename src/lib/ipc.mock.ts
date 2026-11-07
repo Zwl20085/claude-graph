@@ -6,6 +6,8 @@
  * skips dependents, max_parallel respected). A node whose extra_context
  * contains FAKE_FAIL fails, like scripts/fake-claude.mjs; a prompt with
  * FAKE_BLOCKED ends blocked and one with FAKE_DENY reports a denied tool call.
+ * FAKE_ASK=<tool> (headless) asks for approval of one call and waits for
+ * `answer_permission` (see ./mockPermissions).
  */
 import example from '../../examples/hello-pipeline/graph.json';
 import type {
@@ -18,6 +20,8 @@ import type {
   NodeEvent,
   NodeEventKind,
   NodeResult,
+  PermissionAnswered,
+  PermissionPrompt,
   PtyData,
   RunMode,
   RunState,
@@ -30,6 +34,7 @@ import { defaultTimers, type Timers } from './debounce';
 import { emptyGraph } from './graphOps';
 import { createMockAssistant, MOCK_ASSISTANT_REPLY_MS } from './mockAssistant';
 import { createMockHarnesses } from './mockHarness';
+import { createMockPermissions } from './mockPermissions';
 import { createMockRunner, targetSet, type MockRun } from './mockRunner';
 import { createMockTerminal, MOCK_PTY_REPLY_MS, type MockChannel } from './mockTerminal';
 import { countStatuses } from './status';
@@ -114,6 +119,8 @@ export function createMockIpc(options: MockOptions = {}): Api {
   const eventListeners = new Set<(e: NodeEvent) => void>();
   const assistantListeners = new Set<(s: AssistantState) => void>();
   const ptyListeners = new Set<(d: PtyData) => void>();
+  const promptListeners = new Set<(p: PermissionPrompt) => void>();
+  const answeredListeners = new Set<(a: PermissionAnswered) => void>();
   /** dir -> accepted fingerprint of the elevated fields (stand-in for trusted.json). */
   const trusted = new Map<string, string>();
   let appSettings: AppSettings = { claude_bin: null };
@@ -139,6 +146,19 @@ export function createMockIpc(options: MockOptions = {}): Api {
     channel: openChannel(options),
   });
 
+  const nodeEvent = (runId: string, nodeId: string, kind: NodeEventKind, text: string): void => {
+    const ev: NodeEvent = { run_id: runId, node_id: nodeId, kind, text, ts: (options.now ?? (() => new Date()))().toISOString() };
+    eventListeners.forEach((h) => h(ev));
+    terminal.onNodeEvent(runId, nodeId, kind, text);
+  };
+
+  const permissions = createMockPermissions({
+    now: options.now ?? (() => new Date()),
+    emitPrompt: (p) => promptListeners.forEach((h) => h(clone(p))),
+    emitAnswered: (id) => answeredListeners.forEach((h) => h({ id })),
+    emitEvent: nodeEvent,
+  });
+
   const runner = createMockRunner({
     timers: options.timers ?? defaultTimers,
     stepMs: options.stepMs ?? 600,
@@ -150,10 +170,9 @@ export function createMockIpc(options: MockOptions = {}): Api {
     },
     emitEvent: (dir, runId, nodeId, kind: NodeEventKind, text) => {
       void dir;
-      const ev: NodeEvent = { run_id: runId, node_id: nodeId, kind, text, ts: (options.now ?? (() => new Date()))().toISOString() };
-      eventListeners.forEach((h) => h(ev));
-      terminal.onNodeEvent(runId, nodeId, kind, text);
+      nodeEvent(runId, nodeId, kind, text);
     },
+    permissions,
   });
 
   const assistant = createMockAssistant({
@@ -317,6 +336,16 @@ export function createMockIpc(options: MockOptions = {}): Api {
     onPtyData: async (handler): Promise<Unlisten> => {
       ptyListeners.add(handler);
       return () => ptyListeners.delete(handler);
+    },
+    listPermissionPrompts: async () => clone(permissions.list()),
+    answerPermission: async (answer) => permissions.answer(clone(answer)),
+    onPermissionPrompt: async (handler): Promise<Unlisten> => {
+      promptListeners.add(handler);
+      return () => promptListeners.delete(handler);
+    },
+    onPermissionAnswered: async (handler): Promise<Unlisten> => {
+      answeredListeners.add(handler);
+      return () => answeredListeners.delete(handler);
     },
   };
 }

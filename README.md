@@ -171,6 +171,16 @@ machine does not have refuses to start and says which node asked for it.
   denied tools in the node's Results tab, and marks the card. Fix it by switching the
   node to "Claude Code settings", adding the tool to its allowed tools, or changing your
   Claude Code settings.
+- **"Ask me in the app".** Pick this permission mode on a node, or as the graph default,
+  to get the interactive feel without a terminal. When Claude wants a tool that needs
+  approval, the run pauses and the app shows a dialog with the node, the tool and what it
+  wants to do (the command, file, URL or query). Answer with **Allow once** (Enter),
+  **Allow for this node** (until the run ends), **Always for this graph** (remembered for
+  the folder), or **Deny** (Esc), optionally telling Claude why. While a request waits,
+  the card says "waiting for you" and the top bar shows how many approvals are pending;
+  "Decide later" hides the dialog until you click that badge. Cancelling the run denies
+  whatever is still waiting. The Assistant tab uses the same dialog when the graph default
+  is "Ask me in the app".
 
 - **Run folder.** Every stdout line is appended untouched to `events.jsonl`. The final
   text goes to `result.md`, session id, cost and turns to `summary.json`. The agent
@@ -481,7 +491,7 @@ A graph folder can come from someone else. The app treats it as data.
 
 ## Status and limits
 
-v0.3. Three ways to run a graph: Claude Code windows (default: one interactive session
+v0.4. Three ways to run a graph: Claude Code windows (default: one interactive session
 per chain, your own settings), the headless engine (one process per node, explicit
 settings) and Assistant mode (one scheduler session that runs the whole workflow).
 Verified on Windows 11 with Claude Code 2.1.x. CI builds and tests the backend

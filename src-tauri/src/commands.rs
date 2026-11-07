@@ -448,6 +448,23 @@ pub async fn open_session_window(
     term::open_session_window(state.terminals(), &*emitter(&app), &run_id, &sid)
 }
 
+/// "Ask me in the app": the prompts waiting for the user, oldest first.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_permission_prompts(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::contract::PermissionPrompt>> {
+    Ok(state.approvals().list())
+}
+
+/// "Ask me in the app": answer one prompt (`not_found` when already answered).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn answer_permission(
+    state: State<'_, AppState>,
+    answer: crate::contract::PermissionAnswer,
+) -> AppResult<()> {
+    state.approvals().answer(&answer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,6 +25,7 @@ export type Model = (typeof MODELS)[number];
 
 export const PERMISSION_MODES = [
   'claude_settings',
+  'ask_app',
   'acceptEdits',
   'default',
   'plan',
@@ -36,6 +37,8 @@ export const PERMISSION_MODES = [
  * `inherit` on a node means `settings.default_permission_mode`.
  * `claude_settings` passes no `--permission-mode` flag: the user's own Claude
  * Code settings decide (the default of new graphs).
+ * `ask_app` (headless engine): a tool call that needs approval is relayed to
+ * the app, which asks the user in a dialog (ASKAPP_CONTRACT). Not elevated.
  */
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
@@ -319,6 +322,10 @@ export const NODE_EVENT_KINDS = [
   'user_message',
   /** A tool call the CLI denied; text = tool name plus a short input summary. */
   'permission_denied',
+  /** ask_app: a tool call waits for the user's answer; text = `<tool>: <summary>`. */
+  'permission_prompt',
+  /** ask_app: the answer; text = `allowed` / `denied` plus the scope. */
+  'permission_answered',
 ] as const;
 export type NodeEventKind = (typeof NODE_EVENT_KINDS)[number];
 
@@ -562,4 +569,70 @@ export function isAssistantState(value: unknown): value is AssistantState {
   if (!(ASSISTANT_STATUSES as readonly unknown[]).includes(s.status) || typeof s.turns !== 'number') return false;
   if (!isNullableString(s.session_id) || !isNullableString(s.model) || !isNullableString(s.last_error)) return false;
   return value.messages.every(isAssistantMessage);
+}
+
+// ---------------------------------------------------------------------------
+// "Ask me in the app" permission prompts (ASKAPP_CONTRACT)
+// ---------------------------------------------------------------------------
+
+/** Event: one `PermissionPrompt` that waits for the user's answer. */
+export const EVENT_PERMISSION_PROMPT = 'permission_prompt';
+/** Event: `{ id }` of a prompt that was resolved (by the user, by cancel, or by a remembered scope). */
+export const EVENT_PERMISSION_ANSWERED = 'permission_answered';
+
+/** One tool call waiting for approval (`list_permission_prompts`, `permission_prompt`). */
+export interface PermissionPrompt {
+  id: string;
+  /** `assistant` for Assistant-tab turns. */
+  run_id: string;
+  /** `scheduler` for the assistant. */
+  node_id: string;
+  /** e.g. Bash, WebSearch, mcp__x__y. */
+  tool_name: string;
+  /** The tool input as received (JSON). */
+  input: unknown;
+  /** Backend-made one-liner (command, file path, query, url, or the start of the JSON). */
+  summary: string;
+  /** Raw permission update suggestions of the CLI; [] when none. */
+  suggestions: unknown[];
+  ts: string;
+}
+
+export const PERMISSION_SCOPES = ['once', 'node', 'graph'] as const;
+/** once: this call only; node: until the run ends, for this node; graph: remembered for the graph folder. */
+export type PermissionScope = (typeof PERMISSION_SCOPES)[number];
+
+/** Argument of `answer_permission`. */
+export interface PermissionAnswer {
+  id: string;
+  allow: boolean;
+  scope: PermissionScope;
+  message?: string;
+}
+
+/** Payload of `permission_answered`. */
+export interface PermissionAnswered {
+  id: string;
+}
+
+/** Shape check of a PermissionPrompt (event or command reply); `suggestions` may be missing. */
+export function isPermissionPrompt(value: unknown): value is PermissionPrompt {
+  if (!isObject(value)) return false;
+  const { id, run_id, node_id, tool_name, summary, ts, suggestions } = value;
+  return (
+    typeof id === 'string' &&
+    id !== '' &&
+    typeof run_id === 'string' &&
+    typeof node_id === 'string' &&
+    typeof tool_name === 'string' &&
+    typeof summary === 'string' &&
+    typeof ts === 'string' &&
+    (suggestions === undefined || Array.isArray(suggestions))
+  );
+}
+
+/** Well-formed prompts of a reply, `suggestions` defaulted to []; malformed entries are dropped. */
+export function validPermissionPrompts(value: unknown): PermissionPrompt[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isPermissionPrompt).map((p) => ({ ...p, suggestions: Array.isArray(p.suggestions) ? [...p.suggestions] : [] }));
 }

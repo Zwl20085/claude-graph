@@ -5,6 +5,7 @@ use std::time::Duration;
 use tauri::{Manager, RunEvent};
 
 pub mod app_settings;
+pub mod approve;
 pub mod assistant;
 pub mod claude_bin;
 pub mod commands;
@@ -96,6 +97,8 @@ pub fn run() {
             commands::pty_resize,
             commands::pty_replay,
             commands::open_session_window,
+            commands::list_permission_prompts,
+            commands::answer_permission,
         ])
         .build(tauri::generate_context!());
     let app = match app {

@@ -160,3 +160,59 @@ claude -p "<short instruction>" --output-format stream-json --verbose \
   project MCP server dialog come first (the test answers them like a user).
 - Real run (`real_deepseek`, needs `DEEPSEEK_API_KEY`): succeeded, reply.md `● ok` /
   `✻ Crunched for 2s`, about 9 s.
+
+## Permission prompt tool (`ask_app`) — verified 2026-11-07, Claude Code 2.1.319, Windows 11
+
+Probe: `scripts/probe-prompt-tool.mjs` (a logging stdio MCP stub, env `PROBE_LOG` = log file,
+`PROBE_DENY=1` answers deny), run as
+
+```
+claude -p "<ask for a shell command>" --output-format stream-json --verbose --model haiku \
+       --permission-mode default --permission-prompt-tool mcp__claude_graph__approve \
+       --mcp-config '{"mcpServers":{"claude_graph":{"command":"node","args":["C:/…/probe-prompt-tool.mjs"],"env":{"PROBE_LOG":"C:/…/probe.log"}}}}'
+```
+
+- `--mcp-config` takes the inline JSON string. Invalid JSON (for example unescaped Windows
+  backslashes) is silently treated as a **file path** ("MCP config file not found: <cwd>\{…}"),
+  so the app builds it with a JSON serializer.
+- Handshake as the server sees it (one JSON object per line):
+  1. `{"jsonrpc":"2.0","id":"server-discover-probe-1","method":"server/discover","params":{"_meta":{…"protocolVersion":"2026-07-28"…}}}`
+     — a probe with a **string id**; answering JSON-RPC `-32601` method-not-found is fine.
+  2. `initialize` with `"protocolVersion":"2025-11-25"` and `"id":0`; echoing the version works.
+  3. `notifications/initialized` (no id, no reply), then `tools/list` (`"id":1`).
+- `system/init` lists the server as `{"name":"claude_graph","status":"connected","source":"dynamic"}`
+  in `mcp_servers`, next to the user's own servers (we do not pass `--strict-mcp-config`).
+  No `mcp_server_errors` key was present when all is well.
+- The prompt tool is called only when a tool call would otherwise prompt. `echo probe-ok`
+  was auto-allowed by the user's settings (`permission_decision.source: "config"`) and the
+  tool was **not** called. `mkdir probe-dir-allowed` did prompt and produced:
+
+```
+{"method":"tools/call","params":{"name":"approve",
+  "arguments":{"tool_name":"Bash",
+               "input":{"command":"mkdir probe-dir-allowed","description":"Create probe-dir-allowed directory"},
+               "tool_use_id":"toolu_01Fihbi38pqnRE6HpLenNe2X"},
+  "_meta":{"claudecode/toolUseId":"toolu_01Fihbi38pqnRE6HpLenNe2X","progressToken":2}},
+ "jsonrpc":"2.0","id":2}
+```
+
+  So `arguments` = `{tool_name, input, tool_use_id}`; no `suggestions` (permission updates)
+  were sent for this Bash call (the app still forwards them if a later CLI sends any).
+- Allow answer (tool result text, a JSON string):
+  `{"content":[{"type":"text","text":"{\"behavior\":\"allow\",\"updatedInput\":{…the input…}}"}]}`
+  → the command ran; the tool result carried
+  `tool_result_meta[].permission_decision = {"decision":"accept","source":"user_temporary"}`.
+  `--allowedTools` did **not** need to list `mcp__claude_graph__approve`.
+- Deny answer `{"behavior":"deny","message":"probe says no"}` → Claude saw a tool_result with
+  `"content":"probe says no","is_error":true`, `permission_decision {"decision":"reject","source":"user_reject"}`;
+  the run still ended `result/success` and listed the call in `permission_denials`.
+- Modes: probed with `--permission-mode default` only. `bypassPermissions` never prompts and
+  `dontAsk` denies instead of prompting, so the tool is only useful with `default` (the app
+  uses `default` for `ask_app`). Not measured: how long the CLI waits for a `tools/call`
+  answer (the app's server waits without a timeout; a user who leaves a dialog open for very
+  long may hit the CLI's MCP tool timeout, `MCP_TOOL_TIMEOUT`).
+- Cost: about one cent per probe run with haiku.
+- App end to end (`cargo test --test real_ask -- --ignored --nocapture`, 2026-11-07): an
+  `ask_app` node asked to `mkdir ask-app-probe-dir` produced one prompt
+  `{tool_name:"Bash", input:{command:"mkdir ask-app-probe-dir", description:"…"}, suggestions:[]}`,
+  the test answered allow/once, the folder was created, node succeeded ($0.009, about 17 s).

@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { harnessOf, MODELS, PERMISSION_MODES, runModeOf, type RunMode, type Settings } from '../types/contract';
-import { permissionLabel } from '../lib/status';
+import { ASK_APP_HINT, permissionLabel } from '../lib/status';
 import { IGNORED_CLAUDE_BIN_TEXT, useGraphStore } from '../store/graphStore';
 import { HarnessDialog } from './HarnessDialog';
 import { HarnessSelect } from './HarnessSelect';
@@ -167,6 +167,9 @@ export function SettingsPopover() {
           label={permissionLabel}
           onChange={(default_permission_mode) => update({ default_permission_mode })}
         />
+        {settings.default_permission_mode === 'ask_app' && (
+          <span className="mt-1 block text-[11px] text-[#f59e0b]">{ASK_APP_HINT}</span>
+        )}
         {settings.default_permission_mode === 'bypassPermissions' && (
           <span className="mt-1 block text-[11px] text-[#ef4444]">
             bypassPermissions lets every node run any tool without asking. Use only in a sandbox.

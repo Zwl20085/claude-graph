@@ -12,6 +12,7 @@ import { StartScreen } from './components/StartScreen';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
 import { TrustDialog } from './components/TrustDialog';
+import { PermissionDialog } from './components/PermissionDialog';
 import { errorMessage } from './store/runHelpers';
 import { assistantStore } from './store/assistantStore';
 
@@ -156,6 +157,7 @@ export default function App() {
         </ReactFlowProvider>
       )}
       <TrustDialog />
+      <PermissionDialog />
       <Toasts />
     </div>
   );

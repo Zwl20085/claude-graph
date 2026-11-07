@@ -18,6 +18,8 @@ export interface BriefNodeData extends Record<string, unknown> {
   denied: boolean;
   /** Label of the node's own harness when it overrides the graph default; else null. */
   harnessLabel: string | null;
+  /** A permission prompt of this node waits for the user ("Ask me in the app"). */
+  waiting: boolean;
 }
 export type BriefFlowNode = FlowNode<BriefNodeData, 'brief'>;
 
@@ -39,6 +41,7 @@ export function graphToFlowNodes(
   run: RunState | null,
   liveDenied: ReadonlySet<string> = new Set(),
   labelOf: (harness: string) => string = (h) => h,
+  waitingIds: ReadonlySet<string> = new Set(),
 ): BriefFlowNode[] {
   const graphHarness = harnessOf(graph.settings);
   return graph.nodes.map((node) => ({
@@ -51,6 +54,7 @@ export function graphToFlowNodes(
       reason: run?.nodes[node.id]?.reason ?? null,
       denied: run !== null && (liveDenied.has(node.id) || deniedTools(run.nodes[node.id]).length > 0),
       harnessLabel: node.harness !== null && node.harness !== graphHarness ? labelOf(node.harness) : null,
+      waiting: waitingIds.has(node.id),
     },
   }));
 }

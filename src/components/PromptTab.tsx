@@ -1,7 +1,7 @@
 /** Simple mode: one prompt box plus model / permission / resources. */
 import { effectiveHarness, harnessOf, MODELS, PERMISSION_MODES, runModeOf, type Node } from '../types/contract';
 import { harnessLabel, isClaudeKind, NOT_CLAUDE_MODEL_NOTE } from '../lib/harness';
-import { permissionLabel } from '../lib/status';
+import { ASK_APP_HINT, permissionLabel } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
 import { HarnessSelect } from './HarnessSelect';
 import { ChipsInput, Field, inputCls, Select } from './ui';
@@ -46,6 +46,7 @@ export function PromptTab({ node }: { node: Node }) {
           />
         </Field>
       </div>
+      {node.permission_mode === 'ask_app' && <p className="text-[11px] text-[#f59e0b]">{ASK_APP_HINT}</p>}
       {node.permission_mode === 'bypassPermissions' && (
         <p className="text-[11px] text-[#ef4444]">bypassPermissions lets this node run any tool without asking.</p>
       )}

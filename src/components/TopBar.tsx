@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Save,
   Settings as SettingsIcon,
+  ShieldQuestion,
   Square,
 } from 'lucide-react';
 import { api, MOCK_MODE } from '../lib/api';
@@ -25,6 +26,7 @@ import { SettingsPopover } from './SettingsPopover';
 import { StatusPill } from './AssistantHeader';
 import { showsPill } from '../lib/assistantView';
 import { useAssistantStore } from '../store/assistantStore';
+import { approvalsText } from '../store/permissionSlice';
 import { btnCls } from './ui';
 import { newGraphFlow, openFolderFlow } from './StartScreen';
 
@@ -101,6 +103,25 @@ function AssistantChip({ onOpen }: { onOpen: () => void }) {
   );
 }
 
+/** Amber "N approvals waiting" while permission prompts are pending; a click shows the dialog. */
+export function ApprovalsBadge() {
+  const count = useGraphStore((s) => s.permissionPrompts.length);
+  const show = useGraphStore((s) => s.showPermissionDialog);
+  if (count === 0) return null;
+  const text = approvalsText(count);
+  return (
+    <button
+      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#f59e0b] px-2 py-0.5 text-[11px] font-semibold text-black hover:bg-[#fbbf24]"
+      onClick={show}
+      title="Show the approval dialog"
+      aria-label={text}
+    >
+      <ShieldQuestion size={12} />
+      {text}
+    </button>
+  );
+}
+
 interface TopBarProps {
   logVisible: boolean;
   onToggleLog: () => void;
@@ -167,6 +188,7 @@ export function TopBar({ logVisible, onToggleLog, onOpenAssistant }: TopBarProps
       <SessionChips />
       <div className="ml-auto flex shrink-0 items-center gap-2">
         {MOCK_MODE && <span className="rounded bg-[#f59e0b]/15 px-1.5 text-[11px] text-[#f59e0b]" title="No Tauri backend: in-memory mock">mock</span>}
+        <ApprovalsBadge />
         <AssistantChip onOpen={onOpenAssistant} />
         <ClaudeChip state={claude} />
         <button className={`${btnCls} ${logVisible ? 'bg-[#37373d]' : ''}`} onClick={onToggleLog} title="Show/hide the log panel" aria-label="show or hide the log panel" aria-pressed={logVisible}>

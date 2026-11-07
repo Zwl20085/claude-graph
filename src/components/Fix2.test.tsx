@@ -73,9 +73,9 @@ describe('permission selects', () => {
     const selects = [...document.querySelectorAll('select')];
     const nodeSelect = selects.find((s) => (s as HTMLSelectElement).value === 'inherit');
     expect(optionTexts(nodeSelect)).toEqual([
-      'Claude Code settings (recommended)', 'acceptEdits', 'default', 'plan', 'dontAsk', 'bypassPermissions', 'inherit',
+      'Claude Code settings (recommended)', 'Ask me in the app', 'acceptEdits', 'default', 'plan', 'dontAsk', 'bypassPermissions', 'inherit',
     ]);
-    const graphSelect = selects.find((s) => optionTexts(s).length === 6);
+    const graphSelect = selects.find((s) => optionTexts(s).length === 7);
     expect(optionTexts(graphSelect)[0]).toBe('Claude Code settings (recommended)');
     expect((graphSelect?.querySelector('option') as HTMLOptionElement).value).toBe('claude_settings');
   });

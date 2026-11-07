@@ -94,6 +94,8 @@ export function permissionLabel(mode: PermissionMode): string {
   switch (mode) {
     case 'claude_settings':
       return 'Claude Code settings (recommended)';
+    case 'ask_app':
+      return 'Ask me in the app';
     case 'acceptEdits':
     case 'default':
     case 'plan':
@@ -106,6 +108,9 @@ export function permissionLabel(mode: PermissionMode): string {
       return assertNever(mode);
   }
 }
+
+/** Hint under a permission select set to ask_app. */
+export const ASK_APP_HINT = 'Tool calls that need approval open a dialog in this app (headless engine).';
 
 /** Hint shown with denied tools (toast, Results tab). */
 export const DENIED_HINT = 'Set its permission mode to "Claude Code settings" or add the tool to its allowed tools.';

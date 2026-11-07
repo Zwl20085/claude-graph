@@ -28,6 +28,11 @@ pub const EVENT_NODE_EVENT: &str = "node:event";
 pub const EVENT_ASSISTANT_UPDATE: &str = "assistant_update";
 /// Event name: a chunk of terminal output ([`PtyData`]), sent to one session window only.
 pub const EVENT_PTY_DATA: &str = "pty:data";
+/// Event name: a [`PermissionPrompt`] waiting for the user ("Ask me in the app").
+pub const EVENT_PERMISSION_PROMPT: &str = "permission_prompt";
+/// Event name: a prompt was resolved ([`PermissionAnswered`]): by the user,
+/// by cancel, or by a remembered scope.
+pub const EVENT_PERMISSION_ANSWERED: &str = "permission_answered";
 
 // ---------------------------------------------------------------------------
 // Graph (graph.json)
@@ -133,6 +138,11 @@ pub enum PermissionMode {
     /// decide. Default of new graphs.
     #[serde(rename = "claude_settings")]
     ClaudeSettings,
+    /// "Ask me in the app": `--permission-mode default` plus the app's own
+    /// permission prompt tool, so each prompt becomes a dialog in the app
+    /// (docs/ARCHITECTURE.md "Ask me in the app"). Not elevated.
+    #[serde(rename = "ask_app")]
+    AskApp,
     /// Node: use `settings.default_permission_mode`.
     #[serde(rename = "inherit")]
     #[default]
@@ -477,6 +487,60 @@ pub enum NodeEventKind {
     PermissionDenied,
     /// Terminal mode: Claude Code is waiting for the user in a session window.
     Notification,
+    /// "Ask me in the app": a tool call waits for the user; text `<tool>: <summary>`.
+    PermissionPrompt,
+    /// "Ask me in the app": the prompt was answered; text `allowed (<scope>)` or
+    /// `denied (<scope>)`, plus `: <message>` when a deny carries one.
+    PermissionAnswered,
+}
+
+/// One tool call waiting for the user's decision (`list_permission_prompts`,
+/// event `permission_prompt`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PermissionPrompt {
+    /// uuid.
+    pub id: String,
+    /// `assistant` for Assistant-tab turns.
+    pub run_id: String,
+    /// `scheduler` for the assistant.
+    pub node_id: String,
+    /// For example `Bash`, `WebSearch`, `mcp__x__y`.
+    pub tool_name: String,
+    /// The tool input as received.
+    pub input: serde_json::Value,
+    /// One line: the command, path, url or query, else the start of the JSON input.
+    pub summary: String,
+    /// Raw `suggestions` (permission updates) if the CLI sent any.
+    pub suggestions: Vec<serde_json::Value>,
+    pub ts: DateTime<Utc>,
+}
+
+/// How far an answer reaches: this call only, the rest of this node's run, or
+/// this graph from now on (persisted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionScope {
+    #[default]
+    Once,
+    Node,
+    Graph,
+}
+
+/// Argument of `answer_permission`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionAnswer {
+    pub id: String,
+    pub allow: bool,
+    #[serde(default)]
+    pub scope: PermissionScope,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Payload of the `permission_answered` event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionAnswered {
+    pub id: String,
 }
 
 /// Payload of the `node:event` event.

@@ -879,3 +879,75 @@ design and report nodes, the fake's early side-turn notify ignored, reply.md for
 a custom profile with `stop_mode: quiet`; `${MISSING_VAR}` failing the session with no
 process and no window; the notify helper with hostile payloads. `tests/real_harness.rs`
 (ignored): `real_codex`, `real_deepseek`.
+
+## Ask me in the app (backend, 2026-11-07)
+
+Permission mode `ask_app` ("Ask me in the app", headless engine and Assistant tab). Module
+`src-tauri/src/approve/` (`wire`, `mcp`, `hub`, `registration`, `listen`, `scopes`, `args`);
+types `PermissionPrompt`, `PermissionScope`, `PermissionAnswer`, `PermissionAnswered` in
+`contract.rs`; commands `list_permission_prompts`, `answer_permission { answer }`; events
+`permission_prompt` (payload `PermissionPrompt`) and `permission_answered` (`{ id }`) through
+`Emitter::permission_prompt` / `permission_answered`; node event kinds `permission_prompt`
+(`<tool>: <summary>`) and `permission_answered` (`allowed (once|node|graph)`,
+`denied (<scope>)[: <message>]`). Wire format: docs/CLAUDE_CLI_NOTES.md "Permission prompt
+tool".
+
+- **Flags.** A node whose effective mode is `ask_app` gets `--permission-mode default
+  --permission-prompt-tool mcp__claude_graph__approve --mcp-config <inline JSON>` (inserted
+  before the variadic `--allowedTools`), first turns and `--resume` follow-ups alike. The JSON
+  is `{"mcpServers":{"claude_graph":{"command":"<app exe>","args":["--mcp-approve"],"env":
+  {CLAUDE_GRAPH_APPROVE_ADDR, CLAUDE_GRAPH_APPROVE_TOKEN, CLAUDE_GRAPH_RUN_ID,
+  CLAUDE_GRAPH_NODE_ID, CLAUDE_GRAPH_APPROVE_REG}}}}`. No `--strict-mcp-config` (the user's
+  own servers stay), no `--allowedTools` entry (the probe showed none is needed). When the
+  graph default is `ask_app` the assistant turn gets the same three flags (the only exception
+  to "no permission flags for the assistant"). In terminal mode `ask_app` means `default`.
+  The `--mcp-config` value holds the token, so `runner::display_command` (the `spawn:` event
+  and the log line) shows `<claude-graph approval server config>` instead.
+- **Init check.** For such a turn the stdout reader looks at the `system/init` event: unless
+  `mcp_servers` lists `claude_graph` with status `connected`, the turn is killed and the node
+  fails with "approval server did not connect[: <mcp_server_errors>]".
+- **Hidden mode `claude-graph --mcp-approve`** (`approve::mcp`, run from `main.rs` before
+  Tauri, like `--notify`): MCP over stdio, one JSON object per line. `initialize` echoes a
+  known protocolVersion (else `2025-06-18`), capabilities `{tools:{}}`, serverInfo
+  `claude-graph`; `notifications/*` get no reply; `ping` → `{}`; `tools/list` → `approve`
+  (inputSchema any object); `tools/call` → one TCP connection to ADDR, line
+  `{token, run_id, node_id, reg, arguments}`, wait (no timeout) for `{decision}`, answer
+  `{content:[{type:"text",text:"<decision JSON>"}]}`. Unknown methods (also the CLI's
+  `server/discover` probe) → `-32601`. Calls run on threads so `ping` is answered while a
+  dialog is open. An unreachable app is a deny. When stdin closes it exits without waiting,
+  which closes its connections. The env is validated (loopback address, hex token); the
+  token is never printed.
+- **Listener** (`approve::listen`): `127.0.0.1:0`, started on the first registration, on the
+  async runtime. A 32-byte hex token per app start (two v4 uuids). One request line (max
+  32 MB, 30 s) per connection; a wrong token or malformed line is closed without a reply
+  (logged without the token). While waiting, the connection is watched: if the asker closes
+  it, the prompt is withdrawn (`denied (once): the asking process went away`).
+- **Registrations** (`Approvals::register`): one per run loop whose graph uses `ask_app`
+  anywhere (held in `RunCtx::approval`, dropped with the run) and one per assistant turn when
+  the graph default is `ask_app` (run id `assistant`, node `scheduler`). The registration id
+  (`CLAUDE_GRAPH_APPROVE_REG`, an addition to the contract) tells apart two graphs' assistant
+  turns; a request whose registration or run id does not match is denied. Dropping a
+  registration denies its pending prompts with `cancelled` and forgets its node scopes. A
+  resumed loop (follow-up to a finished run) is a new registration.
+- **Pending** prompts are kept oldest first; at most 64 (beyond: deny "too many approvals are
+  waiting"). Summary: Bash → command, Write/Edit → file_path, WebSearch → query, WebFetch →
+  url, else the first 120 chars of the canonical JSON input. `suggestions` (or
+  `permission_suggestions`) are passed through raw; the probe saw none.
+- **Matching and scopes.** A remembered entry is `(tool_name, key)`, key = the exact
+  command / path / url / query for those five tools, else `sha256:<hex>` of the canonical
+  JSON (keys sorted at every level). Only allows are remembered. `node`: per (registration,
+  node), until the run ends. `graph`: persisted in `<data_dir>/claude-graph/approvals.json`
+  keyed by canonical graph folder. A new request matching either is answered at once (node
+  events still emitted, plus `permission_answered`). Answering with `node`/`graph` scope also
+  answers every other pending prompt it now covers.
+- **Cancel.** `cancel_run` / `cancel_node` deny that run's / node's pending prompts with
+  `cancelled` before the process is killed; `assistant_cancel` does the same for the graph's
+  assistant turn; app exit (`shutdown`) denies all.
+- **Tests.** `approve/tests.rs`: MCP framing with the recorded handshake (string id probe,
+  initialize, notifications, ping, tools/call), unknown version/tool/method, env validation,
+  summaries and keys, canonical JSON, flag insertion and redaction, the init check, the
+  pending cap, node scope and close, wrong-token rejection and a real TCP round trip.
+  `tests/e2e_ask.rs` (fake CLI `FAKE_ASK=<tool>` / `FAKE_ASK_COUNT` / `FAKE_MCP_FAIL`,
+  `scripts/fake-ask.mjs`, built app binary as server): allow once, deny with message, node
+  scope, graph scope across app instances, cancel, failed server, assistant turn.
+  `tests/real_ask.rs` (ignored, one haiku turn): a real `mkdir` allowed from the test.

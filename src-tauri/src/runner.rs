@@ -61,6 +61,25 @@ pub fn model_flag(node: Model, default: Model) -> Option<&'static str> {
     }
 }
 
+/// The node's mode, or the graph default when the node inherits.
+pub fn effective_permission(node: &Node, settings: &Settings) -> PermissionMode {
+    if node.permission_mode == PermissionMode::Inherit {
+        settings.default_permission_mode
+    } else {
+        node.permission_mode
+    }
+}
+
+/// Whether any node of the graph (or the assistant, via the default) uses
+/// "Ask me in the app".
+pub fn graph_asks_app(graph: &crate::contract::Graph) -> bool {
+    graph.settings.default_permission_mode == PermissionMode::AskApp
+        || graph
+            .nodes
+            .iter()
+            .any(|n| effective_permission(n, &graph.settings) == PermissionMode::AskApp)
+}
+
 /// `--permission-mode` value, or `None` for no flag: `claude_settings` (the
 /// user's own Claude Code settings decide) and inherit-of-inherit.
 pub fn permission_flag(node: PermissionMode, default: PermissionMode) -> Option<&'static str> {
@@ -71,7 +90,8 @@ pub fn permission_flag(node: PermissionMode, default: PermissionMode) -> Option<
     };
     match mode {
         PermissionMode::AcceptEdits => Some("acceptEdits"),
-        PermissionMode::Default => Some("default"),
+        // ask_app: `default` plus the app's prompt tool (crate::approve::args).
+        PermissionMode::Default | PermissionMode::AskApp => Some("default"),
         PermissionMode::Plan => Some("plan"),
         PermissionMode::BypassPermissions => Some("bypassPermissions"),
         PermissionMode::DontAsk => Some("dontAsk"),
@@ -198,6 +218,7 @@ fn elapsed_ms(started: Instant) -> u64 {
 }
 
 /// The command line as one display string (logged; shown in test output).
+/// The approval server's `--mcp-config` value (it holds a token) is redacted.
 pub fn display_command(spec: &TurnSpec) -> String {
     let quote = |a: String| {
         if a.contains(char::is_whitespace) {
@@ -213,7 +234,7 @@ pub fn display_command(spec: &TurnSpec) -> String {
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned()),
         )
-        .chain(spec.args.iter().cloned())
+        .chain(crate::approve::args::redact(&spec.args))
         .map(quote)
         .collect::<Vec<_>>()
         .join(" ")
@@ -311,11 +332,14 @@ pub async fn run_turn(
     });
     let acc: SharedAcc = Arc::new(Mutex::new(StreamAccumulator::new()));
     let tail: SharedTail = Arc::new(Mutex::new(VecDeque::new()));
+    // Set by the stdout reader when the approval server did not connect.
+    let (fail_tx, mut fail_rx) = watch::channel(None::<String>);
     let mut stdout = tokio::spawn(read_stdout(
         child.stdout.take(),
         spec.clone(),
         emitter.clone(),
         acc.clone(),
+        fail_tx,
     ));
     let mut stderr = tokio::spawn(read_stderr(
         child.stderr.take(),
@@ -328,7 +352,9 @@ pub async fn run_turn(
     let exited = tokio::select! {
         status = child.wait() => Some(status.ok()),
         Ok(_) = kill.wait_for(|k| *k) => None,
+        Ok(_) = fail_rx.wait_for(Option::is_some) => None,
     };
+    let failure = fail_rx.borrow().clone();
     let (exit, cancelled) = match exited {
         Some(status) => (status, false),
         None => {
@@ -346,6 +372,14 @@ pub async fn run_turn(
     drop(job);
     let acc = lock(&acc).clone();
     let stderr_tail = Vec::from(lock(&tail).clone()).join("\n");
+    if let (true, Some(reason)) = (cancelled, failure) {
+        emit(&*emitter, &spec, NodeEventKind::Stderr, reason.clone());
+        return TurnOutcome {
+            session_id: acc.session_id().map(str::to_string),
+            model: acc.model().map(str::to_string),
+            ..TurnOutcome::failed(reason, started)
+        };
+    }
     if cancelled {
         return TurnOutcome {
             session_id: acc.session_id().map(str::to_string),
@@ -507,8 +541,11 @@ async fn read_stdout(
     spec: TurnSpec,
     emitter: Arc<dyn Emitter>,
     acc: SharedAcc,
+    fail: watch::Sender<Option<String>>,
 ) {
     let Some(stdout) = stdout else { return };
+    // ask_app turns: check the init event's MCP servers once.
+    let mut check_server = crate::approve::args::uses_prompt_tool(&spec.args);
     let mut file = open_append(&spec.out_dir.join(EVENTS_FILE)).await.ok();
     let mut reader = BufReader::new(stdout);
     let mut buf = Vec::new();
@@ -541,6 +578,14 @@ async fn read_stdout(
         };
         for (kind, text) in events {
             emit(&*emitter, &spec, kind, text);
+        }
+        if check_server {
+            if let Some(fields) = lock(&acc).init_mcp().cloned() {
+                check_server = false;
+                if let Some(reason) = crate::approve::args::server_problem(&fields) {
+                    fail.send_replace(Some(reason));
+                }
+            }
         }
     }
     if let Some(mut f) = file {

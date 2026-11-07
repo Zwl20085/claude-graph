@@ -17,7 +17,9 @@
 // (or arg `--fake-delay-ms N`) adds a pause between lines (useful to watch or
 // cancel a run). `--resume <id>` reuses that session id unless `--fork-session`
 // is also given (then a new id, as the real CLI does). A prompt containing
-// FAKE_NO_STATUS ends without any "## Status:" line.
+// FAKE_NO_STATUS ends without any "## Status:" line. FAKE_ASK=<tool> (with
+// `--mcp-config` and `--permission-prompt-tool`) asks the app's approval server
+// first, in node and scheduler mode: see scripts/fake-ask.mjs.
 // `--hold-stdout-ms N` starts a child process that inherits stdout and sleeps
 // N ms, so the pipe stays open after this process exits (tests the runner's
 // drain grace and leftover kill).
@@ -61,6 +63,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
+import { startAsk } from './fake-ask.mjs';
 
 const VERSION = '2.1.0 (fake-claude)';
 const SCHEDULER_PREFIX = 'You are the work scheduler';
@@ -146,6 +149,7 @@ async function main() {
   const deliverables = findDeliverables(prompt);
   const base = { session_id: sessionId, parent_tool_use_id: null };
 
+  const asker = await startAsk(prompt);
   await emit({
     type: 'system',
     subtype: 'init',
@@ -153,9 +157,12 @@ async function main() {
     cwd,
     model,
     tools: ['Read', 'Write', 'Edit', 'Bash'],
+    ...mcpFields(asker),
     permissionMode: argValue('--permission-mode') ?? 'default',
     claude_code_version: VERSION,
   });
+  await asker.ask();
+  asker.close();
   await emit({
     type: 'assistant',
     ...base,
@@ -243,6 +250,14 @@ async function main() {
   return 0;
 }
 
+/** init-event fields for the prompt tool's server (fake-ask.mjs), if any. */
+function mcpFields(asker) {
+  if (!asker.mcpServers) return {};
+  return asker.mcpServerErrors
+    ? { mcp_servers: asker.mcpServers, mcp_server_errors: asker.mcpServerErrors }
+    : { mcp_servers: asker.mcpServers };
+}
+
 /** FAKE_DENY: a WebSearch call the CLI refuses, streamed as the real CLI does. */
 async function deniedSearch(base, sessionId) {
   const id = 'toolu_fake_denied_search';
@@ -267,6 +282,7 @@ async function deniedSearch(base, sessionId) {
 async function scheduler(prompt, sessionId, started) {
   const cwd = process.cwd();
   const base = { session_id: sessionId, parent_tool_use_id: null };
+  const asker = await startAsk(prompt);
   await emit({
     type: 'system',
     subtype: 'init',
@@ -274,9 +290,12 @@ async function scheduler(prompt, sessionId, started) {
     cwd,
     model: 'claude-fake-scheduler',
     tools: ['Read', 'Write', 'Edit', 'Bash', 'Task'],
+    ...mcpFields(asker),
     permissionMode: 'default',
     claude_code_version: VERSION,
   });
+  await asker.ask();
+  asker.close();
   const plan = join(cwd, 'assistant', 'PLAN.md');
   await emit({
     type: 'assistant',

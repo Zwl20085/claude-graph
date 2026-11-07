@@ -22,7 +22,7 @@ export function cardSummary(goal: string, prompt: string): string {
 }
 
 function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
-  const { node, status, reason, denied, harnessLabel } = data;
+  const { node, status, reason, denied, harnessLabel, waiting } = data;
   const ring = ringStyle(status);
   const color = MODEL_COLORS[node.model];
   const empty = isEmptyNode(node);
@@ -67,9 +67,18 @@ function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
               {r}
             </span>
           ))}
+          {waiting && (
+            <span
+              className="ml-auto rounded bg-[#f59e0b] px-1 text-[10px] font-semibold text-black"
+              title="A tool call of this node waits for your approval."
+              aria-label="waiting for you"
+            >
+              waiting for you
+            </span>
+          )}
           {denied && (
             <span
-              className="ml-auto rounded bg-[#f59e0b]/20 px-1 text-[10px] text-[#f59e0b]"
+              className={`${waiting ? '' : 'ml-auto '}rounded bg-[#f59e0b]/20 px-1 text-[10px] text-[#f59e0b]`}
               title="A tool call of this node was denied in the shown run. See the Results tab."
               aria-label="tool call denied"
             >
@@ -77,7 +86,7 @@ function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
             </span>
           )}
           {node.deliverables.length > 0 && (
-            <span className={`${denied ? '' : 'ml-auto '}text-[10px] text-[#9a9a9a]`}>
+            <span className={`${denied || waiting ? '' : 'ml-auto '}text-[10px] text-[#9a9a9a]`}>
               {node.deliverables.length} deliverable{node.deliverables.length === 1 ? '' : 's'}
             </span>
           )}
