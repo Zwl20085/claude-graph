@@ -468,7 +468,8 @@ mod tests {
         // node on PATH (another folder).
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
-        let node_on_path = bin.join(exe_name("node"));
+        // Named with the extension the explicit PATHEXT below expects, on every OS.
+        let node_on_path = bin.join("node.exe");
         touch(&node_on_path);
         let env = ResolveEnv {
             path_var: Some(bin.as_os_str().to_owned()),
