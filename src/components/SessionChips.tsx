@@ -25,13 +25,13 @@ export function SessionChips() {
   if (runId === null || sessions.length === 0) return null;
 
   return (
-    <div className="flex min-w-0 items-center gap-1 overflow-x-auto" role="group" aria-label="Claude Code sessions">
+    <div className="flex min-w-0 shrink items-center gap-1 overflow-hidden text-ellipsis whitespace-nowrap" role="group" aria-label="Claude Code sessions">
       {sessions.map((s) => {
         const color = SESSION_COLORS[s.status];
         return (
           <button
             key={s.sid}
-            className="flex max-w-[180px] shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] hover:bg-[#37373d]"
+            className="flex min-w-[2.5rem] max-w-[180px] shrink items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] hover:bg-[#37373d]"
             style={{ borderColor: color, color }}
             title={`${s.title} (${s.status}) — open the Claude Code window`}
             aria-label={`open Claude Code window ${s.title}, ${s.status}`}

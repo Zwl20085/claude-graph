@@ -16,6 +16,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -60,6 +61,8 @@ pub struct Output {
     /// and the number of bytes emitted in all.
     replay: Mutex<(String, u64, u64)>,
     last: Mutex<Option<Instant>>,
+    /// Bytes appended to `transcript.log` so far.
+    transcript: AtomicU64,
 }
 
 impl Output {
@@ -96,6 +99,11 @@ impl Output {
             start += 1;
         }
         buf.0[start..].to_string()
+    }
+
+    /// Length of `transcript.log` (bytes written by the reader so far).
+    pub fn transcript_len(&self) -> u64 {
+        self.transcript.load(Ordering::SeqCst)
     }
 
     /// Note output activity.
@@ -323,9 +331,16 @@ fn read_loop(
             continue;
         }
         if let Some(f) = file.as_mut() {
-            if let Err(e) = f.write_all(&chunk) {
-                log::warn!("appending to the transcript failed: {e}");
-                file = None;
+            match f.write_all(&chunk) {
+                Ok(()) => {
+                    output
+                        .transcript
+                        .fetch_add(chunk.len() as u64, Ordering::SeqCst);
+                }
+                Err(e) => {
+                    log::warn!("appending to the transcript failed: {e}");
+                    file = None;
+                }
             }
         }
         output.touch();

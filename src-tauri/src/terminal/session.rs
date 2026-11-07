@@ -59,6 +59,8 @@ pub(super) struct Session {
     pub(super) done: BTreeMap<String, NodeStatus>,
     /// Output mark when the dialog on screen was announced.
     pub(super) announced: Option<u64>,
+    /// Transcript span of the node turn that just ended (see `send.rs`).
+    pub(super) span: Option<(u64, u64)>,
 }
 
 impl SessionTask {
@@ -75,6 +77,7 @@ impl SessionTask {
             finished_at: None,
             done: BTreeMap::new(),
             announced: None,
+            span: None,
         };
         s.drive().await;
         if let Some(pty) = &s.pty {
@@ -247,6 +250,7 @@ impl Session {
                 reason: reason.clone(),
                 started_at,
                 finished_at: Utc::now(),
+                transcript: self.span.take(),
             };
             if let Err(e) = record(&self.t.ctx, &finished) {
                 log::error!("recording node {id} failed: {e}");

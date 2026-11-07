@@ -6,26 +6,35 @@
 //! message that is not taken after the last cycle fails the node with
 //! [`NOT_SUBMITTED`]; the session goes on unless `stop_on_failure`.
 
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 
 use crate::contract::{Model, Node, NodeEventKind, NodeStatus};
+use crate::run_store::node_run_dir;
 use crate::runner::model_flag;
 use crate::terminal::deliver::{deliver, Delivery, Halt, Outcome, NOT_SUBMITTED};
 use crate::terminal::hooks::Hook;
 use crate::terminal::message::Typed;
 use crate::terminal::node::{evaluate, prepare};
 use crate::terminal::port::{PtyPort, Tick};
+use crate::terminal::reply::write_reply;
 use crate::terminal::session::{End, Session, CANCELLED, POLL};
+use crate::terminal::{session_dir, TRANSCRIPT_FILE};
 
 /// Node event while the message is on its way.
 pub const DELIVERING: &str = "delivering message…";
+/// After the Stop hook, wait until the output is quiet this long …
+const SETTLE_QUIET: Duration = Duration::from_millis(250);
+/// … but at most this long, so the reply's last redraw is in the transcript.
+const SETTLE_MAX: Duration = Duration::from_millis(1500);
+const SETTLE_STEP: Duration = Duration::from_millis(100);
 
 type NodeEnd = (NodeStatus, Option<String>, Option<End>);
 
 impl Session {
     pub(super) async fn run_node(&mut self, id: &str, started_at: DateTime<Utc>) -> NodeEnd {
+        self.span = None;
         self.report(|i| i.current_node = Some(id.to_string()));
         self.event(NodeEventKind::Text, DELIVERING.to_string());
         let ctx = self.t.ctx.clone();
@@ -39,8 +48,8 @@ impl Session {
                 return (NodeStatus::Failed, Some(reason), None);
             }
         };
-        let carried = match self.deliver_node(id, node, &typed).await {
-            Ok(Some(carried)) => carried,
+        let (carried, from) = match self.deliver_node(id, node, &typed).await {
+            Ok(Some(submitted)) => submitted,
             Ok(None) => return (NodeStatus::Failed, Some(NOT_SUBMITTED.to_string()), None),
             Err(halt) => return ended(halt_end(halt)),
         };
@@ -50,18 +59,49 @@ impl Session {
             NodeEventKind::Text,
             format!("sent node {id} to window {title}"),
         );
-        self.wait_stop(node, SystemTime::from(started_at), carried)
-            .await
+        let end = self
+            .wait_stop(node, SystemTime::from(started_at), carried)
+            .await;
+        if end.2.is_none() {
+            self.settle().await;
+        }
+        self.span = self.save_reply(id, typed.text(), from);
+        end
     }
 
-    /// `/model` (if the node sets one) and the message. `Some(hooks seen
-    /// right after the submit line)` once submitted, `None` if never taken.
+    /// Wait (bounded) for the output to go quiet after the Stop hook.
+    async fn settle(&mut self) {
+        let t0 = Instant::now();
+        while !self.quiet_for(SETTLE_QUIET) && t0.elapsed() < SETTLE_MAX {
+            if !matches!(self.tick(SETTLE_STEP).await, Tick::Poll) {
+                return;
+            }
+        }
+    }
+
+    /// reply.md / result.md of the turn from transcript offset `from` to now;
+    /// returns the span (also when writing failed: it is logged).
+    fn save_reply(&self, id: &str, prompt: &str, from: u64) -> Option<(u64, u64)> {
+        let to = self.pty.as_ref()?.output.transcript_len();
+        let ctx = &self.t.ctx;
+        let transcript =
+            session_dir(&ctx.graph_dir, &ctx.run_id, &self.t.plan.sid).join(TRANSCRIPT_FILE);
+        let dir = node_run_dir(&ctx.graph_dir, &ctx.run_id, id);
+        if let Err(e) = write_reply(&dir, &transcript, from, to, prompt) {
+            log::warn!("writing the reply of node {id} failed: {e}");
+        }
+        Some((from, to))
+    }
+
+    /// `/model` (if the node sets one) and the message. `Some((hooks seen
+    /// right after the submit line, transcript length when the message's
+    /// delivery began))` once submitted, `None` if never taken.
     async fn deliver_node(
         &mut self,
         id: &str,
         node: &Node,
         typed: &Typed,
-    ) -> Result<Option<Vec<Hook>>, Halt> {
+    ) -> Result<Option<(Vec<Hook>, u64)>, Halt> {
         let shared = self.t.shared.clone();
         let _typing = shared.typing().await;
         self.poll_hooks(); // hooks of earlier, user-typed prompts do not count
@@ -91,8 +131,9 @@ impl Session {
                 );
             }
         }
+        let from = port.pty.output.transcript_len();
         match deliver(&mut port, &Delivery::prompt(typed, &title)).await? {
-            Outcome::Submitted => Ok(Some(port.after_submit)),
+            Outcome::Submitted => Ok(Some((port.after_submit, from))),
             Outcome::NotSubmitted => Ok(None),
         }
     }

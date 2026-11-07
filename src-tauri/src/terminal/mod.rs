@@ -26,6 +26,7 @@ pub mod message;
 pub mod node;
 mod port;
 pub mod pty;
+pub mod reply;
 pub mod run;
 pub mod screen;
 mod send;
@@ -87,6 +88,13 @@ pub struct TerminalNodeSummary {
     pub num_turns: Option<u32>,
     pub is_error: bool,
     pub permission_denials: Vec<String>,
+    /// Byte offsets in the session's transcript.log of the node's turn: when
+    /// its message started to be typed and when its Stop hook was seen
+    /// (`null` when the message was never submitted).
+    #[serde(default)]
+    pub transcript_from: Option<u64>,
+    #[serde(default)]
+    pub transcript_to: Option<u64>,
 }
 
 /// A change reported by a session task to the run loop.

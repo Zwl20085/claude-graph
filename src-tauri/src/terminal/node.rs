@@ -86,6 +86,8 @@ pub struct Finished<'a> {
     pub reason: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
+    /// Transcript span of the turn (`from`, `to`), if the message was submitted.
+    pub transcript: Option<(u64, u64)>,
 }
 
 /// summary.json and the GRAPH_LOG line (cost `-`).
@@ -106,6 +108,8 @@ pub fn record(ctx: &RunCtx, f: &Finished<'_>) -> AppResult<()> {
         num_turns: None,
         is_error: f.status != NodeStatus::Succeeded,
         permission_denials: Vec::new(),
+        transcript_from: f.transcript.map(|t| t.0),
+        transcript_to: f.transcript.map(|t| t.1),
     };
     let path: PathBuf = node_run_dir(&ctx.graph_dir, &ctx.run_id, f.node_id).join(SUMMARY_FILE);
     write_json(&path, &summary)?;

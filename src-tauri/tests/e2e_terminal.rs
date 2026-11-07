@@ -90,6 +90,23 @@ async fn terminal_run_types_messages_in_order_and_keeps_sessions_alive() {
     )
     .unwrap();
     assert_eq!(summary["session"], "s2");
+    // Each turn's screen text: reply.md (= result.md) and its transcript span.
+    let a_dir = dir.join("runs").join(&run_id).join("a");
+    let reply = fs::read_to_string(a_dir.join("reply.md")).unwrap();
+    assert!(reply.starts_with("> first task\n\n"), "{reply}");
+    assert!(reply.contains("you said: first task"), "{reply}");
+    assert!(!reply.contains("you said: line one"), "{reply}");
+    let a_result = run_store::read_node_result(dir, &run_id, "a").unwrap();
+    assert_eq!(a_result.result_md.as_deref(), Some(reply.as_str()));
+    let a_summary: Value =
+        serde_json::from_str(&fs::read_to_string(a_dir.join("summary.json")).unwrap()).unwrap();
+    let (from, to) = (
+        a_summary["transcript_from"].as_u64().unwrap(),
+        a_summary["transcript_to"].as_u64().unwrap(),
+    );
+    assert!(from < to, "{from}..{to}");
+    let c_reply = fs::read_to_string(dir.join("runs").join(&run_id).join("c/reply.md")).unwrap();
+    assert!(c_reply.starts_with("> line one\n\n") && c_reply.contains("you said: line one"));
     let session: Value = serde_json::from_str(
         &fs::read_to_string(
             dir.join("runs")

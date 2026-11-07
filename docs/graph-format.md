@@ -98,8 +98,23 @@ runs/<run-id>/sessions/<sid>/      sid = s1, s2, … (one per connected componen
   session.json      { sid, title, node_ids, pid, status, started_at, finished_at }
 ```
 
-and per node `runs/<run-id>/<node-id>/prompt.md` (the brief sent) and `summary.json`
-(`{ session, started_at, finished_at, status, reason, … }`).
+and per node `runs/<run-id>/<node-id>/`:
+
+```
+  prompt.md         the brief sent
+  reply.md          the node's turn as text: "> <first line of the typed message>", a blank
+                    line, then the session's screen output from the start of typing the
+                    message to the Stop hook, escapes removed and redraws collapsed
+                    (duplicate / growing / recently repeated lines dropped); its last 256 KiB
+  result.md         the same text as reply.md (shown in the Results tab)
+  summary.json      { session, started_at, finished_at, status, reason, transcript_from,
+                      transcript_to, … }
+```
+
+`transcript_from` / `transcript_to` are byte offsets into the session's `transcript.log`: its
+length when the node's message started to be typed and when the Stop hook was seen (after up
+to 1.5 s for the output to go quiet); `null` when the message was never submitted. The raw
+bytes of the turn are `transcript.log[transcript_from..transcript_to]`.
 
 The scheduler writes node deliverables to the same `nodes/<id>/deliverables/` folders as graph
 mode. See ARCHITECTURE.md "Assistant mode (backend)".

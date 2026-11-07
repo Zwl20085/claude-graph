@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import {
+  type LucideIcon,
   ExternalLink,
   FilePlus,
   FolderOpen,
@@ -26,6 +27,29 @@ import { showsPill } from '../lib/assistantView';
 import { useAssistantStore } from '../store/assistantStore';
 import { btnCls } from './ui';
 import { newGraphFlow, openFolderFlow } from './StartScreen';
+
+/** Breakpoint below which toolbar buttons show only their icon (the bar stays one line). */
+export const LABEL_CLS = 'hidden min-[1200px]:inline';
+const barBtnCls = `${btnCls} shrink-0 whitespace-nowrap`;
+
+interface BarButtonProps {
+  icon: LucideIcon;
+  label: string;
+  title?: string;
+  disabled?: boolean;
+  className?: string;
+  onClick: () => void;
+}
+
+/** Toolbar button: icon plus a label that hides below 1200 px (name kept in aria-label / title). */
+function BarButton({ icon: Icon, label, title, disabled, className = '', onClick }: BarButtonProps) {
+  return (
+    <button className={`${barBtnCls} ${className}`} disabled={disabled} onClick={onClick} title={title ?? label} aria-label={label}>
+      <Icon size={14} className="shrink-0" />
+      <span className={LABEL_CLS}>{label}</span>
+    </button>
+  );
+}
 
 function ClaudeChip({ state }: { state: ClaudeState }) {
   if (state.kind === 'checking') return <span className="text-[11px] text-[#8a8a8a]">checking claude…</span>;
@@ -107,39 +131,41 @@ export function TopBar({ logVisible, onToggleLog, onOpenAssistant }: TopBarProps
   };
 
   return (
-    <header className="flex h-10 shrink-0 items-center gap-1 border-b border-[#3c3c3c] bg-[#252526] px-2 text-[13px]">
-      <span className="mr-1 font-semibold text-[#3b82f6]">Claude Graph</span>
+    <header className="flex h-10 shrink-0 flex-nowrap items-center gap-1 overflow-hidden whitespace-nowrap border-b border-[#3c3c3c] bg-[#252526] px-2 text-[13px]">
+      <span className="mr-1 shrink-0 font-semibold text-[#3b82f6]">Claude Graph</span>
       <input
-        className="w-48 rounded bg-transparent px-1 py-0.5 outline-none hover:bg-[#1e1e1e] focus:bg-[#1e1e1e]"
+        className="w-48 min-w-[5rem] shrink rounded bg-transparent px-1 py-0.5 outline-none hover:bg-[#1e1e1e] focus:bg-[#1e1e1e]"
         value={name}
         aria-label="graph name"
         onChange={(e) => store().setName(e.target.value)}
       />
-      <span title={dirty ? 'unsaved changes' : 'saved'} className={`h-2 w-2 rounded-full ${dirty ? 'bg-[#f59e0b]' : 'bg-transparent'}`} />
-      <div className="mx-2 h-5 w-px bg-[#3c3c3c]" />
-      <button className={btnCls} onClick={() => void newGraphFlow()} title="New graph"><FilePlus size={14} />New</button>
-      <button className={btnCls} onClick={() => void openFolderFlow()} title="Open graph folder"><FolderOpen size={14} />Open</button>
-      <button className={btnCls} onClick={revealGraph} title="Show the graph folder in the file manager"><ExternalLink size={14} />Open folder</button>
-      <button className={btnCls} onClick={() => void store().save()} title="Save (Ctrl+S)"><Save size={14} />Save</button>
-      <button className={btnCls} onClick={addNode} title="Add node (or double-click the canvas)"><Plus size={14} />Add node</button>
-      <div className="mx-2 h-5 w-px bg-[#3c3c3c]" />
-      <button className={btnCls} disabled={active} onClick={() => void store().startRun('all')}><Play size={14} />Run all</button>
-      <button className={btnCls} disabled={active || selected === null} onClick={() => selected && void store().startRun({ from: selected })}>
-        <PlayCircle size={14} />Run from selected
-      </button>
-      <button
-        className={btnCls}
-        disabled={active || !runHasFailures(runState)}
+      <span title={dirty ? 'unsaved changes' : 'saved'} className={`h-2 w-2 shrink-0 rounded-full ${dirty ? 'bg-[#f59e0b]' : 'bg-transparent'}`} />
+      <div className="mx-2 h-5 w-px shrink-0 bg-[#3c3c3c]" />
+      <BarButton icon={FilePlus} label="New" title="New graph" onClick={() => void newGraphFlow()} />
+      <BarButton icon={FolderOpen} label="Open" title="Open graph folder" onClick={() => void openFolderFlow()} />
+      <BarButton icon={ExternalLink} label="Open folder" title="Show the graph folder in the file manager" onClick={revealGraph} />
+      <BarButton icon={Save} label="Save" title="Save (Ctrl+S)" onClick={() => void store().save()} />
+      <BarButton icon={Plus} label="Add node" title="Add node (or double-click the canvas)" onClick={addNode} />
+      <div className="mx-2 h-5 w-px shrink-0 bg-[#3c3c3c]" />
+      <BarButton icon={Play} label="Run all" disabled={active} onClick={() => void store().startRun('all')} />
+      <BarButton
+        icon={PlayCircle}
+        label="Run from selected"
+        disabled={active || selected === null}
+        onClick={() => selected && void store().startRun({ from: selected })}
+      />
+      <BarButton
+        icon={RotateCcw}
+        label="Rerun failed"
         title={RERUN_FAILED_TITLE}
+        disabled={active || !runHasFailures(runState)}
         onClick={() => runState && void store().startRun({ failed_of: runState.run_id })}
-      >
-        <RotateCcw size={14} />Rerun failed
-      </button>
+      />
       {isRunActive(runState) && (
-        <button className={`${btnCls} text-[#ef4444]`} onClick={() => void store().cancelRun()}><Square size={14} />Cancel</button>
+        <BarButton icon={Square} label="Cancel" className="text-[#ef4444]" onClick={() => void store().cancelRun()} />
       )}
       <SessionChips />
-      <div className="ml-auto flex items-center gap-2">
+      <div className="ml-auto flex shrink-0 items-center gap-2">
         {MOCK_MODE && <span className="rounded bg-[#f59e0b]/15 px-1.5 text-[11px] text-[#f59e0b]" title="No Tauri backend: in-memory mock">mock</span>}
         <AssistantChip onOpen={onOpenAssistant} />
         <ClaudeChip state={claude} />

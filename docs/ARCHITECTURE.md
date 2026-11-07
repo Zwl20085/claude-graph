@@ -679,8 +679,17 @@ starting/running at once; a session that is `done` no longer counts (its process
    deliverables present and written since node start − 2 s → `succeeded`, else `failed`
    "deliverables missing: a, b". `stop_on_failure`: the rest of that session is `skipped`
    ("stopped after <id>"). Per node `runs/<run>/<id>/summary.json` = `{ session, started_at,
-   finished_at, status, reason }` plus the headless `NodeSummary` fields (so
-   `read_node_result` reads it) and a GRAPH_LOG line (cost `-`).
+   finished_at, status, reason, transcript_from, transcript_to }` plus the headless
+   `NodeSummary` fields (so `read_node_result` reads it) and a GRAPH_LOG line (cost `-`).
+   **Reply text** (`reply.rs`): once a message is submitted, the transcript span from the
+   transcript length when its delivery began (`Output::transcript_len`, bytes the reader
+   appended; the `submit` line is only seen on a 300 ms poll, after the CLI has started
+   drawing) to the length when the node ends (after `stop`: up to 1.5 s for 250 ms of quiet)
+   is written as `reply.md` and `result.md`: `> <first message line>`, then the span's
+   escapes stripped with the screen regex (row moves → newline, SGR / erase-line dropped,
+   other escapes → space), consecutive duplicates, strict prefixes of the next line,
+   lines ≥ 8 chars repeated within the last 60 kept lines, rule lines and blank runs
+   dropped; last 256 KiB. Cut-short turns (kill, exit) are saved too.
 6. Node list exhausted → session `done`; the process stays alive for the user. Process exit
    while a node runs → node `failed`, the rest `skipped`, session `failed`. Kill while a
    node runs → node and the rest `cancelled`, session `cancelled`. Once the process is gone

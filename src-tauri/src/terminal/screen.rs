@@ -77,7 +77,7 @@ pub fn plain_tail(text: &str, max: usize) -> String {
     plain[start..].to_string()
 }
 
-fn escapes() -> &'static Regex {
+pub(crate) fn escapes() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b.")
