@@ -5,8 +5,9 @@
  */
 import { useRef } from 'react';
 import { SquareTerminal } from 'lucide-react';
-import { runStateMode, sessionsOf } from '../types/contract';
+import { DEFAULT_HARNESS, runStateMode, sessionHarness, sessionsOf } from '../types/contract';
 import { api } from '../lib/api';
+import { harnessLabel } from '../lib/harness';
 import { SESSION_COLORS } from '../lib/sessions';
 import { useGraphStore } from '../store/graphStore';
 import { errorMessage } from '../store/runHelpers';
@@ -18,6 +19,7 @@ export function openSessionWindow(runId: string, sid: string, toast: (text: stri
 export function SessionChips() {
   const runState = useGraphStore((s) => s.runState);
   const pushToast = useGraphStore((s) => s.pushToast);
+  const harnesses = useGraphStore((s) => s.harnesses);
   const terminal = runStateMode(runState) === 'terminal';
   const sessions = terminal ? sessionsOf(runState) : [];
   const runId = terminal ? (runState?.run_id ?? null) : null;
@@ -28,17 +30,28 @@ export function SessionChips() {
     <div className="flex min-w-0 shrink items-center gap-1 overflow-hidden text-ellipsis whitespace-nowrap" role="group" aria-label="Claude Code sessions">
       {sessions.map((s) => {
         const color = SESSION_COLORS[s.status];
+        const harness = sessionHarness(s);
+        const label = harnessLabel(harnesses, harness);
+        const other = harness !== DEFAULT_HARNESS;
+        // The backend appends " (<label>)" to a non-claude session title; the badge shows it instead.
+        const suffix = ` (${label})`;
+        const shown = other && s.title.endsWith(suffix) ? s.title.slice(0, -suffix.length) : s.title;
         return (
           <button
             key={s.sid}
             className="flex min-w-[2.5rem] max-w-[180px] shrink items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] hover:bg-[#37373d]"
             style={{ borderColor: color, color }}
-            title={`${s.title} (${s.status}) — open the Claude Code window`}
-            aria-label={`open Claude Code window ${s.title}, ${s.status}`}
+            title={`${s.title} (${s.status}, ${label}) — open the session window`}
+            aria-label={`open Claude Code window ${s.title}, ${s.status}, harness ${label}`}
             onClick={() => openSessionWindow(runId, s.sid, toast)}
           >
             <SquareTerminal size={11} className="shrink-0" />
-            <span className="truncate">{s.title || s.sid}</span>
+            <span className="truncate">{shown || s.sid}</span>
+            {other && (
+              <span className="shrink-0 rounded bg-black/30 px-1 text-[10px]" aria-hidden="true">
+                {label}
+              </span>
+            )}
           </button>
         );
       })}

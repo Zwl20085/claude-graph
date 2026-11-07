@@ -62,6 +62,11 @@ export interface Settings {
    * setting (`AppSettings.claude_bin`).
    */
   claude_bin: string | null;
+  /**
+   * Default harness profile id of the graph's nodes. Missing in older
+   * graph.json files: `validateGraph` fills `DEFAULT_HARNESS` (serde default).
+   */
+  harness: string;
 }
 
 export interface Position {
@@ -100,6 +105,8 @@ export interface Node {
   /** Upstream node id whose session is resumed. */
   continue_session_of: string | null;
   extra_context: string;
+  /** Harness profile id; null = inherit `settings.harness`. */
+  harness: string | null;
 }
 
 export interface Edge {
@@ -114,6 +121,69 @@ export interface Graph {
   settings: Settings;
   nodes: Node[];
   edges: Edge[];
+}
+
+// ---------------------------------------------------------------------------
+// Harness profiles (HARNESS_CONTRACT): which coding-agent CLI a session runs
+// ---------------------------------------------------------------------------
+
+/** Id of the default harness (Claude Code). */
+export const DEFAULT_HARNESS = 'claude';
+
+export const HARNESS_KINDS = ['claude', 'codex', 'custom'] as const;
+/** Picks the adapter: readiness / submit / stop detection and the command shape. */
+export type HarnessKind = (typeof HARNESS_KINDS)[number];
+
+export const STOP_MODES = ['quiet', 'claude_hooks', 'codex_notify'] as const;
+/** How a custom harness's turn end is detected. */
+export type StopMode = (typeof STOP_MODES)[number];
+
+/**
+ * One harness profile (`list_harnesses`). Machine-local: stored in app data,
+ * never in graph.json. Env values may hold `${VAR}`, read from the app's
+ * environment when a session starts; the app stores no secrets.
+ */
+export interface HarnessProfile {
+  /** ^[a-z0-9][a-z0-9-]{0,31}$; built-ins: claude, claude-deepseek, codex. */
+  id: string;
+  label: string;
+  kind: HarnessKind;
+  /** null = resolve the default program of the kind; else a program path or name. */
+  command: string | null;
+  /** Extra args appended at session start. */
+  args: string[];
+  env: Record<string, string>;
+  /** Harness-native model passed at start (codex: -m, claude: --model, custom: ignored). */
+  model: string | null;
+  /** Built-ins cannot be deleted; their command, args, env and model may be edited. */
+  builtin: boolean;
+  /** custom only: text on screen when the CLI waits for input. */
+  idle_marker: string | null;
+  /** custom only: texts that mean a dialog is open. */
+  dialog_markers: string[];
+  /** custom only. */
+  stop_mode: StopMode;
+  /** custom only, stop_mode quiet: ms of no output after the submit = turn over (default 8000). */
+  quiet_ms: number | null;
+}
+
+/** Return value of `check_harness`. */
+export interface HarnessCheck {
+  id: string;
+  ok: boolean;
+  version: string | null;
+  message: string | null;
+}
+
+/** Graph default harness id; a missing or empty value means `claude`. */
+export function harnessOf(settings: { harness?: unknown } | null | undefined): string {
+  const h = settings?.harness;
+  return typeof h === 'string' && h !== '' ? h : DEFAULT_HARNESS;
+}
+
+/** Effective harness of a node: its own, else the graph default. */
+export function effectiveHarness(node: { harness?: string | null }, settings: { harness?: unknown } | null | undefined): string {
+  return node.harness ?? harnessOf(settings);
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +238,11 @@ export interface TerminalSession {
   status: SessionStatus;
   pid: number | null;
   current_node: string | null;
+  /**
+   * Harness profile id the session runs. Missing in older runs (serde default
+   * `claude`): read it through `sessionHarness`.
+   */
+  harness?: string;
 }
 
 /** Payload of `pty:data`. */
@@ -363,7 +438,8 @@ export function isTerminalSession(v: unknown): v is TerminalSession {
     v.node_ids.every((x) => typeof x === 'string') &&
     (SESSION_STATUSES as readonly unknown[]).includes(v.status) &&
     (v.pid === null || v.pid === undefined || typeof v.pid === 'number') &&
-    (v.current_node === null || v.current_node === undefined || typeof v.current_node === 'string')
+    (v.current_node === null || v.current_node === undefined || typeof v.current_node === 'string') &&
+    (v.harness === undefined || typeof v.harness === 'string')
   );
 }
 
@@ -377,6 +453,11 @@ export function validSessions(v: unknown): TerminalSession[] {
   return v
     .filter(isTerminalSession)
     .map((s) => ({ ...s, node_ids: [...s.node_ids], pid: s.pid ?? null, current_node: s.current_node ?? null }));
+}
+
+/** Harness id of a session; sessions of older runs ran Claude Code. */
+export function sessionHarness(s: { harness?: unknown } | null | undefined): string {
+  return typeof s?.harness === 'string' && s.harness !== '' ? s.harness : DEFAULT_HARNESS;
 }
 
 /** Shape check of a RunState payload (event or command reply) before it enters the store. */

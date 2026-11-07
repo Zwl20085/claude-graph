@@ -141,11 +141,12 @@ interface SelectProps<T extends string> {
   title?: string;
   /** Display text of an option (default: the value). */
   label?: (value: T) => string;
+  disabled?: boolean;
 }
 
-export function Select<T extends string>({ value, options, onChange, title, label }: SelectProps<T>) {
+export function Select<T extends string>({ value, options, onChange, title, label, disabled }: SelectProps<T>) {
   return (
-    <select className={inputCls} value={value} title={title} {...useFieldA11y()} onChange={(e) => onChange(e.target.value as T)}>
+    <select className={inputCls} value={value} title={title} disabled={disabled} {...useFieldA11y()} onChange={(e) => onChange(e.target.value as T)}>
       {options.map((o) => (
         <option key={o} value={o}>
           {label ? label(o) : o}

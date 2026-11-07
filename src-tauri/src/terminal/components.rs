@@ -1,17 +1,22 @@
 //! Splitting a graph into terminal-mode sessions (pure, unit-tested).
 //!
-//! A session is one weakly connected component (edges in either direction).
-//! Components are numbered `s1`, `s2`, … in the order of their smallest node
-//! position (y, then x, then id); inside a component nodes are sent in
-//! topological order (Kahn), ties broken the same way. Sids are numbered over
-//! the whole graph, so a component keeps its sid whatever the run target.
+//! A session is one weakly connected component (edges in either direction),
+//! cut into maximal runs of consecutive nodes with the same effective harness
+//! (node.harness, else settings.harness). Components are ordered by their
+//! smallest node position (y, then x, then id); inside a component nodes are
+//! sent in topological order (Kahn), ties broken the same way. Sids `s1`,
+//! `s2`, … are numbered over the whole graph (components, then their harness
+//! runs), so a session keeps its sid whatever the run target.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::contract::{AppError, AppResult, Graph, Node, NodeStatus, RunState, RunTarget};
+use crate::contract::{
+    AppError, AppResult, Graph, Node, NodeStatus, RunState, RunTarget, DEFAULT_HARNESS,
+};
 use crate::events::truncate_chars;
 use crate::graph_util::{downstream_map, upstream_map, validate};
+use crate::harness::effective;
 
 /// Longest session title, in chars.
 pub const TITLE_MAX: usize = 60;
@@ -27,6 +32,11 @@ pub struct SessionPlan {
     pub node_ids: Vec<String>,
     /// Index in `node_ids` of the first node sent; earlier ones are skipped.
     pub start: usize,
+    /// Harness profile id of every node of the session.
+    pub harness: String,
+    /// Index of the connected component; sessions of one component run one
+    /// after the other.
+    pub component: usize,
 }
 
 impl SessionPlan {
@@ -118,21 +128,51 @@ fn kahn(
     order
 }
 
-/// Root titles of a component joined with " + ", at most [`TITLE_MAX`] chars.
-fn session_title(graph: &Graph, ids: &[String]) -> String {
+/// Titles of the session's own roots (nodes with no upstream inside it)
+/// joined with " + ", plus the harness label in parentheses when it is not
+/// the default; at most [`TITLE_MAX`] chars.
+fn session_title(graph: &Graph, ids: &[String], harness: &str, labels: &Labels) -> String {
     let up = upstream_map(graph);
+    let inside = |u: &String| ids.contains(u);
     let titles: Vec<&str> = ids
         .iter()
-        .filter(|id| !up.get(*id).is_some_and(|u| !u.is_empty()))
+        .filter(|id| !up.get(*id).is_some_and(|u| u.iter().any(inside)))
         .filter_map(|id| graph.nodes.iter().find(|n| &n.id == id))
         .map(title_of)
         .collect();
     let joined = titles.join(" + ");
-    if joined.chars().count() > TITLE_MAX {
-        truncate_chars(&joined, TITLE_MAX - 1)
+    let suffix = if harness == DEFAULT_HARNESS {
+        String::new()
+    } else {
+        format!(" ({})", labels.get(harness).map_or(harness, String::as_str))
+    };
+    let room = TITLE_MAX.saturating_sub(suffix.chars().count()).max(1);
+    let base = if joined.chars().count() > room {
+        truncate_chars(&joined, room - 1)
     } else {
         joined
+    };
+    format!("{base}{suffix}")
+}
+
+/// Harness labels by id (for session titles).
+pub type Labels = BTreeMap<String, String>;
+
+/// `ids` (a component in send order) cut into maximal runs of consecutive
+/// nodes with the same effective harness.
+fn split<'a>(graph: &'a Graph, ids: &[String]) -> Vec<(&'a str, Vec<String>)> {
+    let mut out: Vec<(&str, Vec<String>)> = Vec::new();
+    for id in ids {
+        let Some(node) = graph.nodes.iter().find(|n| &n.id == id) else {
+            continue;
+        };
+        let h = effective(node, &graph.settings);
+        match out.last_mut() {
+            Some((last, part)) if *last == h => part.push(id.clone()),
+            _ => out.push((h, vec![id.clone()])),
+        }
     }
+    out
 }
 
 fn failed_like(status: NodeStatus) -> bool {
@@ -142,30 +182,62 @@ fn failed_like(status: NodeStatus) -> bool {
     )
 }
 
-/// The sessions a run of `target` uses. `prior_runs` is searched for `FailedOf`.
+/// Every session of the graph (sids numbered over components, then over
+/// the harness runs inside each component).
+fn all_sessions(graph: &Graph, labels: &Labels) -> Vec<SessionPlan> {
+    let mut all = Vec::new();
+    for (component, ids) in components(graph).into_iter().enumerate() {
+        for (harness, part) in split(graph, &ids) {
+            all.push(SessionPlan {
+                sid: format!("s{}", all.len() + 1),
+                title: session_title(graph, &part, harness, labels),
+                node_ids: part,
+                start: 0,
+                harness: harness.to_string(),
+                component,
+            });
+        }
+    }
+    all
+}
+
+/// The sessions of `component` starting at session `at`, node `pos`: earlier
+/// sessions of the component keep all their nodes before the start.
+fn from_session(all: &[SessionPlan], at: usize, pos: usize) -> Vec<SessionPlan> {
+    let component = all[at].component;
+    all.iter()
+        .enumerate()
+        .filter(|(_, p)| p.component == component)
+        .map(|(i, p)| {
+            let start = match i.cmp(&at) {
+                Ordering::Less => p.node_ids.len(),
+                Ordering::Equal => pos,
+                Ordering::Greater => 0,
+            };
+            SessionPlan { start, ..p.clone() }
+        })
+        .collect()
+}
+
+/// The sessions a run of `target` uses. `prior_runs` is searched for
+/// `FailedOf`. A plan whose nodes all come before the start node sends
+/// nothing (it only marks them skipped).
 pub fn plan(
     graph: &Graph,
     target: &RunTarget,
     prior_runs: &[RunState],
+    labels: &Labels,
 ) -> AppResult<Vec<SessionPlan>> {
     validate(graph)?;
-    let all: Vec<SessionPlan> = components(graph)
-        .into_iter()
-        .enumerate()
-        .map(|(i, ids)| SessionPlan {
-            sid: format!("s{}", i + 1),
-            title: session_title(graph, &ids),
-            node_ids: ids,
-            start: 0,
-        })
-        .collect();
+    let all = all_sessions(graph, labels);
     match target {
         RunTarget::All => Ok(all),
         RunTarget::From(id) => all
-            .into_iter()
-            .find_map(|p| {
-                let start = p.node_ids.iter().position(|n| n == id)?;
-                Some(vec![SessionPlan { start, ..p }])
+            .iter()
+            .enumerate()
+            .find_map(|(i, p)| {
+                let pos = p.node_ids.iter().position(|n| n == id)?;
+                Some(from_session(&all, i, pos))
             })
             .ok_or_else(|| AppError::new("not_found", format!("no node {id:?}"))),
         RunTarget::FailedOf(run_id) => {
@@ -174,13 +246,17 @@ pub fn plan(
                 .find(|r| &r.run_id == run_id)
                 .ok_or_else(|| AppError::new("not_found", format!("no run {run_id:?}")))?;
             let failed = |id: &String| run.nodes.get(id).is_some_and(|s| failed_like(s.status));
-            let plans: Vec<SessionPlan> = all
-                .into_iter()
-                .filter_map(|p| {
-                    let start = p.node_ids.iter().position(failed)?;
-                    Some(SessionPlan { start, ..p })
-                })
-                .collect();
+            let mut plans = Vec::new();
+            let mut done_components = BTreeSet::new();
+            for (i, p) in all.iter().enumerate() {
+                if done_components.contains(&p.component) {
+                    continue;
+                }
+                if let Some(pos) = p.node_ids.iter().position(failed) {
+                    done_components.insert(p.component);
+                    plans.extend(from_session(&all, i, pos));
+                }
+            }
             if plans.is_empty() {
                 return Err(AppError::new(
                     "not_found",
@@ -193,119 +269,5 @@ pub fn plan(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::contract::{NodeRunState, RunMode, RunStatus};
-    use serde_json::json;
-
-    /// Nodes `(id, x, y)` and edges `(from, to)`.
-    fn graph(nodes: &[(&str, f64, f64)], edges: &[(&str, &str)]) -> Graph {
-        serde_json::from_value(json!({
-            "version": 1,
-            "name": "g",
-            "nodes": nodes.iter().map(|(id, x, y)| json!({
-                "id": id, "title": format!("T {id}"), "position": {"x": x, "y": y}
-            })).collect::<Vec<_>>(),
-            "edges": edges.iter().enumerate().map(|(i, (f, t))| json!({
-                "id": format!("e{i}"), "from": f, "to": t
-            })).collect::<Vec<_>>(),
-        }))
-        .unwrap()
-    }
-
-    fn sample() -> Graph {
-        // Component A: a -> c, b -> c (two roots); component B: x -> y, above A.
-        graph(
-            &[
-                ("a", 200.0, 100.0),
-                ("b", 0.0, 100.0),
-                ("c", 0.0, 300.0),
-                ("x", 500.0, 0.0),
-                ("y", 500.0, 200.0),
-                ("z", 900.0, 50.0),
-            ],
-            &[("a", "c"), ("b", "c"), ("x", "y")],
-        )
-    }
-
-    #[test]
-    fn components_are_ordered_by_position_and_topologically() {
-        let comps = components(&sample());
-        assert_eq!(
-            comps,
-            vec![
-                vec!["x".to_string(), "y".into()],
-                vec!["z".into()],
-                vec!["b".into(), "a".into(), "c".into()],
-            ]
-        );
-    }
-
-    #[test]
-    fn plan_all_numbers_sessions_and_titles_roots() {
-        let plans = plan(&sample(), &RunTarget::All, &[]).unwrap();
-        let sids: Vec<&str> = plans.iter().map(|p| p.sid.as_str()).collect();
-        assert_eq!(sids, ["s1", "s2", "s3"]);
-        assert_eq!(plans[2].title, "T b + T a");
-        assert_eq!(plans[2].to_send(), ["b", "a", "c"]);
-        assert!(plans[2].before_start().is_empty());
-    }
-
-    #[test]
-    fn plan_from_node_keeps_one_component_and_skips_earlier_nodes() {
-        let plans = plan(&sample(), &RunTarget::From("a".into()), &[]).unwrap();
-        assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].sid, "s3");
-        assert_eq!(plans[0].before_start(), ["b"]);
-        assert_eq!(plans[0].to_send(), ["a", "c"]);
-        let err = plan(&sample(), &RunTarget::From("nope".into()), &[]).unwrap_err();
-        assert_eq!(err.code, "not_found");
-    }
-
-    #[test]
-    fn plan_failed_of_starts_at_the_first_failed_node_per_component() {
-        let status = |s| NodeRunState {
-            status: s,
-            ..NodeRunState::pending()
-        };
-        let run = RunState {
-            run_id: "R1".into(),
-            graph_dir: "/g".into(),
-            started_at: "2026-11-07T10:00:00Z".parse().unwrap(),
-            finished_at: None,
-            status: RunStatus::Failed,
-            nodes: [
-                ("x".to_string(), status(NodeStatus::Succeeded)),
-                ("y".to_string(), status(NodeStatus::Succeeded)),
-                ("b".to_string(), status(NodeStatus::Succeeded)),
-                ("a".to_string(), status(NodeStatus::Failed)),
-                ("c".to_string(), status(NodeStatus::Skipped)),
-            ]
-            .into_iter()
-            .collect(),
-            mode: RunMode::Terminal,
-            sessions: Vec::new(),
-        };
-        let plans = plan(
-            &sample(),
-            &RunTarget::FailedOf("R1".into()),
-            std::slice::from_ref(&run),
-        )
-        .unwrap();
-        assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].sid, "s3");
-        assert_eq!(plans[0].to_send(), ["a", "c"]);
-        let err = plan(&sample(), &RunTarget::FailedOf("R2".into()), &[run]).unwrap_err();
-        assert_eq!(err.code, "not_found");
-    }
-
-    #[test]
-    fn long_titles_are_cut() {
-        let mut g = graph(&[("a", 0.0, 0.0), ("b", 1.0, 0.0)], &[]);
-        g.nodes[0].title = "x".repeat(100);
-        let plans = plan(&g, &RunTarget::All, &[]).unwrap();
-        assert_eq!(plans[0].title.chars().count(), TITLE_MAX);
-        assert!(plans[0].title.ends_with('…'));
-        assert_eq!(plans[1].title, "T b");
-    }
-}
+#[path = "components_tests.rs"]
+mod tests;

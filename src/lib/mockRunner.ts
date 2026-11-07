@@ -42,6 +42,8 @@ export interface RunnerDeps {
   now: () => Date;
   emitState: (state: RunState) => void;
   emitEvent: (dir: string, runId: string, nodeId: string, kind: NodeEventKind, text: string) => void;
+  /** Harness label for session titles (default: the id). */
+  harnessLabel?: (id: string) => string;
 }
 
 const TERMINAL: ReadonlySet<NodeStatus> = new Set(['succeeded', 'failed', 'blocked', 'skipped', 'cancelled']);
@@ -291,7 +293,7 @@ export function createMockRunner(deps: RunnerDeps) {
           status: 'running',
           nodes: Object.fromEntries(ids.map((id) => [id, blankNode()])),
           mode,
-          sessions: mode === 'terminal' ? groupSessions(graph, ids) : [],
+          sessions: mode === 'terminal' ? groupSessions(graph, ids, deps.harnessLabel) : [],
         },
       };
       runs.set(runId, run);

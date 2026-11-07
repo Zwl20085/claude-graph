@@ -118,3 +118,45 @@ claude -p "<short instruction>" --output-format stream-json --verbose \
   (two short replies with `/model haiku`, about one to two cents): run 1 in a fresh folder
   leaves the trust dialog alone for 5 s (node `queued`, notification, nothing typed), then
   answers it like a user; run 2 in the same folder has no dialog.
+
+## OpenAI Codex CLI in a pty (harness `codex`) — verified 2026-11-07, codex-cli 0.167.0, Windows 11
+
+- Invocation used: `codex -C <cwd> --no-alt-screen -c notify=["<claude-graph.exe>","--notify","<session>\\hooks.log"]`
+  (plus `-m <model>` when the profile sets one). The `-c` value is TOML; basic strings with
+  doubled backslashes work. A boolean flag given twice is a clap error, so the adapter adds
+  `--no-alt-screen` only when the profile's args do not have it.
+- `notify`: after every finished turn Codex runs the program with ONE extra argument, a JSON
+  object: `{"type":"agent-turn-complete","thread-id":…,"turn-id":…,"cwd":…,"client":"codex-tui","input-messages":[…],"last-assistant-message":…}`.
+  Observed in a probe: on a thread's first message Codex also runs a side turn that writes
+  the thread title, with its own `thread-id` and `input-messages` =
+  `["Generate a concise, single-line task title … User prompt:\n<your message>"]`
+  (`last-assistant-message` `{"title":"Reply ok"}`), and notifies for it as well. In the
+  probe it came right after the real one; for a long turn it can come first. The app keeps
+  the payload (`stop {json}` in hooks.log) and only counts a `stop` whose `input-messages`
+  contain the typed message.
+- Screen as rendered (vt100 rows, 120×40). Idle: banner `>_ OpenAI Codex (v0.167.0)`, the
+  folder, `permissions: YOLO mode`, a list of slash commands, then the composer row
+  `› Ask Codex to do anything` and a footer row
+  `GPT-… medium · <folder> · ← for agents …  ⚠ 2 warnings · f2 to view`. Typed text replaces
+  the placeholder in the `›` row. 0.5 s after Enter: the message stays in the history as
+  `› <message>`, a row `• Working (0s • esc to interrupt)` appears (the bullet alternates
+  `•`/`◦`), and the composer below shows the placeholder again. After the reply: `• ok`,
+  `Worked for 2s • 22:01`, then the empty composer.
+- Trust dialog: not shown on this machine (the owner's Codex config runs in "YOLO mode",
+  also in a fresh temp folder), so its rendering was not observed. The dialog markers are
+  the documented texts ("Folder access", "Trust this folder?", "Continue only if you trust
+  these files", "Trust and continue", "Quit"; older: "Do you trust the contents of this
+  directory?").
+- Real run (`cargo test --test real_harness real_codex -- --ignored --nocapture`): ready,
+  typed, submitted (composer check), one `stop {…}` line with
+  `"input-messages":["Reply with the single word ok and create no files"],"last-assistant-message":"ok"`,
+  node succeeded, reply.md holds `› Reply with …`, `• ok`, `Worked for 3s • …`. About 9 s.
+
+## Claude Code against DeepSeek (harness `claude-deepseek`) — verified 2026-11-07
+
+- The same interactive Claude Code (2.1.319) with the profile's env; the banner's model line
+  reads `deepseek-flash[1m] with xhigh effort`. The hooks (`start`, `submit`, `stop`) work
+  as with Anthropic's API. In a fresh folder the usual trust dialog and, on this machine, a
+  project MCP server dialog come first (the test answers them like a user).
+- Real run (`real_deepseek`, needs `DEEPSEEK_API_KEY`): succeeded, reply.md `● ok` /
+  `✻ Crunched for 2s`, about 9 s.

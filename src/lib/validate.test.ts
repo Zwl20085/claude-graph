@@ -15,10 +15,14 @@ describe('contract types', () => {
 });
 
 describe('validateGraph', () => {
-  it('accepts the example graph unchanged (plus the defaulted prompt field)', () => {
+  it('accepts the example graph unchanged (plus the defaulted prompt and harness fields)', () => {
     const g = validateGraph(example);
     expect(g).not.toBeInstanceOf(Error);
-    expect(g).toEqual({ ...example, nodes: example.nodes.map((n) => ({ prompt: '', ...n })) });
+    expect(g).toEqual({
+      ...example,
+      settings: { harness: 'claude', ...example.settings },
+      nodes: example.nodes.map((n) => ({ prompt: '', harness: null, ...n })),
+    });
   });
 
   it('fills defaults for a minimal node like serde(default)', () => {

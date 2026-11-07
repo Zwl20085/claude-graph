@@ -208,7 +208,7 @@ pub fn split_command_line(line: &str) -> Vec<String> {
 }
 
 /// `node scripts/fake-claude.mjs` → program `node` (looked up on PATH) + args.
-fn resolve_command_line(line: &str, env: &ResolveEnv) -> Resolution {
+pub fn resolve_command_line(line: &str, env: &ResolveEnv) -> Resolution {
     let tokens = split_command_line(line);
     let Some((first, rest)) = tokens.split_first() else {
         return Resolution::Missing { tried: None };
@@ -242,7 +242,7 @@ fn resolve_command_line(line: &str, env: &ResolveEnv) -> Resolution {
     }
 }
 
-fn exe_name(stem: &str) -> String {
+pub fn exe_name(stem: &str) -> String {
     if cfg!(windows) {
         format!("{stem}.exe")
     } else {

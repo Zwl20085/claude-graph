@@ -127,6 +127,13 @@ fn report(dir: &std::path::Path, run_id: &str, rec: &Recorder, state: &RunState)
         std::fs::read_to_string(session_dir.join("transcript.log")).unwrap_or_default();
     let plain = plain_tail(&transcript, 1500);
     println!("--- run {run_id} hooks.log ---\n{hooks}--- transcript (plain tail) ---\n{plain}");
+    let reply_md = dir.join("runs").join(run_id).join("ok").join("reply.md");
+    let reply = std::fs::read_to_string(&reply_md).unwrap_or_default();
+    println!("--- reply.md ---\n{reply}--- end reply.md ---");
+    assert!(
+        reply.starts_with("> Reply with the single word ok"),
+        "reply.md: {reply}"
+    );
     for kind in [
         NodeEventKind::Notification,
         NodeEventKind::Text,

@@ -44,6 +44,7 @@ const h = vi.hoisted(() => {
     ptyReplay: vi.fn(() => new Promise<{ text: string; seq: number }>((r) => (replayResolve = r))),
     ptyWrite: vi.fn(async () => undefined),
     ptyResize: vi.fn(async () => undefined),
+    listHarnesses: vi.fn(async (): Promise<unknown[]> => []),
     onPtyData: vi.fn(async (fn: (d: PtyData) => void) => {
       handlers.pty = fn;
       return () => (handlers.pty = null);
@@ -169,6 +170,20 @@ describe('TerminalWindow', () => {
     await act(async () => h.handlers.state?.({ ...rs, sessions: [session({ status: 'done', current_node: null })] }));
     expect(document.querySelector('[aria-label="session status"]')?.textContent).toBe('done');
     expect(document.querySelector('[aria-current="step"]')).toBeNull();
+  });
+
+  it('header and window title show the session harness label from list_harnesses', async () => {
+    h.api.listHarnesses.mockResolvedValue([{ id: 'my-cli', label: 'My CLI', kind: 'custom' }]);
+    h.api.listSessions.mockResolvedValue([session({ harness: 'my-cli' })]);
+    await render(<TerminalWindow runId="R1" sid="s1" dir="/g" />);
+    expect(h.api.listHarnesses).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('[aria-label="harness"]')?.textContent).toBe('My CLI');
+    expect(document.title).toBe('My CLI — Survey + Notes');
+  });
+
+  it('a claude session (or one from an older run) shows Claude Code', async () => {
+    await render(<TerminalWindow runId="R1" sid="s1" dir="/g" />);
+    expect(document.querySelector('[aria-label="harness"]')?.textContent).toBe('Claude Code');
   });
 
   it('errors show in an inline banner that can be dismissed; unmount disposes the terminal', async () => {

@@ -15,7 +15,8 @@ Standalone reference extracted from [ARCHITECTURE.md](ARCHITECTURE.md) §2. Type
     "default_model": "sonnet",
     "default_permission_mode": "acceptEdits",
     "claude_bin": null,                   // deprecated and ignored: the claude path is a per-machine app setting
-    "run_mode": "terminal"                // "terminal" (default; missing = terminal) | "headless"
+    "run_mode": "terminal",               // "terminal" (default; missing = terminal) | "headless"
+    "harness": "claude"                   // default harness profile id of the nodes (missing = "claude")
   },
   "nodes": [ { ...Node } ],
   "edges": [ { "id": "e1", "from": "node-a", "to": "node-b" } ]
@@ -43,7 +44,8 @@ Standalone reference extracted from [ARCHITECTURE.md](ARCHITECTURE.md) §2. Type
   "max_turns": 50,                        // optional
   "working_dir": null,                    // null = graph dir
   "continue_session_of": null,            // upstream node id whose session is resumed
-  "extra_context": ""                     // free text appended to the brief
+  "extra_context": "",                    // free text appended to the brief
+  "harness": null                         // harness profile id; null (or missing) = settings.harness
 }
 ```
 
@@ -72,6 +74,15 @@ Deliverable paths are relative to `nodes/<id>/deliverables/`.
   tags, `allowed_tools`, `max_turns`, `continue_session_of`, per-node permission modes and
   `default_model`. `"headless"` is the `claude -p` engine.
 
+- `settings.harness` / `node.harness` name harness profiles (ARCHITECTURE.md "Harness
+  profiles"): `claude`, `claude-deepseek` and `codex` are built in; other profiles are
+  defined per machine in the app data (`harnesses.json`), never in graph.json. An unknown id
+  loads fine and fails at run start (for the targeted nodes) with `invalid_input` "node
+  <id>: harness <h> is not defined on this machine; add it under Settings → Harnesses". In
+  terminal mode a chain is split into one session per run of consecutive nodes with the
+  same harness; headless runs accept only claude-kind harnesses. `model` is a Claude model
+  and is not sent to other harnesses (their model is set in the profile).
+
 ## Other folders
 
 Next to `graph.json` the app writes `nodes/<id>/` (brief and deliverables), `runs/<run-id>/`
@@ -91,11 +102,14 @@ A terminal-mode run (`run.json` has `"mode": "terminal"` and a `sessions` list; 
 run.json files load as `"headless"` with no sessions) also writes one folder per session:
 
 ```
-runs/<run-id>/sessions/<sid>/      sid = s1, s2, … (one per connected component)
+runs/<run-id>/sessions/<sid>/      sid = s1, s2, … (one per connected component, split where the harness changes)
   hooks.json        --settings file: SessionStart/Stop/Notification hooks appending to hooks.log
-  hooks.log         start / stop / notify, one word per line, written by Claude Code
+  hooks.log         start / submit / stop / notify, one word per line, written by Claude Code;
+                    Codex sessions: "stop {notify JSON}" lines written by `claude-graph --notify`
   transcript.log    raw terminal output of the session
-  session.json      { sid, title, node_ids, pid, status, started_at, finished_at }
+  session.json      { sid, title, node_ids, pid, status, harness, started_at, finished_at }
+                    (harness: profile id; missing in older files = "claude"; run.json's
+                    `sessions[]` entries carry `harness` too)
 ```
 
 and per node `runs/<run-id>/<node-id>/`:
@@ -103,9 +117,11 @@ and per node `runs/<run-id>/<node-id>/`:
 ```
   prompt.md         the brief sent
   reply.md          the node's turn as text: "> <first line of the typed message>", a blank
-                    line, then the session's screen output from the start of typing the
-                    message to the Stop hook, escapes removed and redraws collapsed
-                    (duplicate / growing / recently repeated lines dropped); its last 256 KiB
+                    line, then the lines that appeared on the session's screen (and its
+                    scrollback) from the start of typing the message to the Stop hook, as
+                    a terminal emulator replaying the transcript shows them (spinners and
+                    counters repainted in place are gone; the idle input box, footer and
+                    box-drawing rules are left out); its last 256 KiB
   result.md         the same text as reply.md (shown in the Results tab)
   summary.json      { session, started_at, finished_at, status, reason, transcript_from,
                       transcript_to, … }

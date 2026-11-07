@@ -86,6 +86,11 @@ pub fn message_for(node: &Node, brief: &str, deliverables: &str) -> Typed {
             return Typed::Paste(paste_text(prompt));
         }
     }
+    brief_line(node, brief, deliverables)
+}
+
+/// The one-line message pointing at the brief file.
+pub fn brief_line(node: &Node, brief: &str, deliverables: &str) -> Typed {
     Typed::Line(one_line(&format!(
         "Node \"{}\" ({}): read the brief at {brief} and do it; write all outputs to {deliverables}.",
         title_of(node),

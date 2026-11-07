@@ -124,6 +124,7 @@ pub fn prepare(
     };
     Ok(PreparedTurn {
         spec: TurnSpec {
+            env: Vec::new(),
             run_id: RUN_ID.to_string(),
             node_id: NODE_ID.to_string(),
             claude,

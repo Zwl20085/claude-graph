@@ -10,12 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use std::time::Duration;
+
 use tokio::sync::watch;
 
 use crate::contract::{AppError, AppResult, PtyReplay, TerminalSession};
 use crate::events::{Emitter, WindowSpec};
 use crate::prompt::display_dir;
 use crate::run_store::{check_id, read_run_state};
+use crate::terminal::deliver::{Expect, FALLBACK_QUIET};
 use crate::terminal::port::spawn_followup;
 use crate::terminal::pty::Pty;
 use crate::terminal::window_label;
@@ -42,6 +45,8 @@ pub struct SessionShared {
     task_alive: AtomicBool,
     /// Held while a message is delivered, so two never interleave.
     typing: tokio::sync::Mutex<()>,
+    /// How the harness confirms a typed message, and its readiness quiet.
+    delivery: Mutex<(Expect, Duration)>,
 }
 
 impl SessionShared {
@@ -54,7 +59,17 @@ impl SessionShared {
             kill: watch::channel(false).0,
             task_alive: AtomicBool::new(false),
             typing: tokio::sync::Mutex::new(()),
+            delivery: Mutex::new((Expect::Submit, FALLBACK_QUIET)),
         })
+    }
+
+    /// The harness's submit check (set by the session task at its start).
+    pub fn set_delivery(&self, expect: Expect, ready: Duration) {
+        *lock(&self.delivery) = (expect, ready);
+    }
+
+    pub fn delivery(&self) -> (Expect, Duration) {
+        lock(&self.delivery).clone()
     }
 
     pub fn info(&self) -> TerminalSession {

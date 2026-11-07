@@ -17,13 +17,15 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, watch};
 
 use crate::contract::{NodeEvent, NodeEventKind, NodeStatus, SessionStatus, TerminalSession};
+use crate::harness::adapter::{behavior, Behavior};
+use crate::harness::claude;
 use crate::store::write_json;
 use crate::terminal::deliver::{asking, dialog_due};
 use crate::terminal::hooks::{Hook, HookLog, HOOKS_LOG};
 use crate::terminal::node::{record, Finished};
 use crate::terminal::port::{tick, Tick};
 use crate::terminal::pty::Pty;
-use crate::terminal::screen::{plain_tail, Screen};
+use crate::terminal::screen::plain_tail;
 use crate::terminal::{
     session_dir, SessionFile, SessionPlan, SessionShared, TermMsg, SESSION_FILE,
 };
@@ -61,13 +63,23 @@ pub(super) struct Session {
     pub(super) announced: Option<u64>,
     /// Transcript span of the node turn that just ended (see `send.rs`).
     pub(super) span: Option<(u64, u64)>,
+    /// How the session's harness is read (markers, submit, stop).
+    pub(super) behavior: Behavior,
 }
 
 impl SessionTask {
     /// Run the session to its end (process exited or killed).
     pub async fn run(self) {
         let dir = session_dir(&self.ctx.graph_dir, &self.ctx.run_id, &self.plan.sid);
+        let behavior = self
+            .ctx
+            .harness(&self.plan.harness)
+            .map(behavior)
+            .unwrap_or_else(|_| claude::behavior());
+        self.shared
+            .set_delivery(behavior.expect.clone(), behavior.ready_quiet);
         let mut s = Session {
+            behavior,
             kill: self.shared.kill_watch(),
             hooks: HookLog::new(dir.join(HOOKS_LOG)),
             t: self,
@@ -131,6 +143,7 @@ impl Session {
             node_ids: info.node_ids.clone(),
             pid: info.pid,
             status: info.status,
+            harness: info.harness.clone(),
             started_at: self.started_at,
             finished_at: self.finished_at,
         };
@@ -204,9 +217,7 @@ impl Session {
         let out = &pty.output;
         let screen = out.screen();
         let quiet = out.last_output().map_or(Duration::ZERO, |t| t.elapsed());
-        if dialog_due(&screen, quiet, self.announced, |m| {
-            Screen::of_all(&out.since(m))
-        }) {
+        if dialog_due(&screen, quiet, self.announced, |m| out.screen_since(m)) {
             self.event(NodeEventKind::Notification, asking(&self.t.plan.title));
             self.announced = Some(out.mark());
         }
@@ -229,7 +240,10 @@ impl Session {
             End::Cancelled => (NodeStatus::Cancelled, CANCELLED.to_string()),
             End::Exited(code) => (
                 NodeStatus::Skipped,
-                format!("Claude Code exited (code {code}) before this node"),
+                format!(
+                    "{} exited (code {code}) before this node",
+                    self.behavior.label
+                ),
             ),
             End::Failed(r) => (NodeStatus::Failed, r.clone()),
         };

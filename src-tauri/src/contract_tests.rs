@@ -33,12 +33,14 @@ fn example_graph_round_trips() {
             .unwrap()
             .entry("prompt")
             .or_insert(json!(""));
+        node.as_object_mut()
+            .unwrap()
+            .entry("harness")
+            .or_insert(json!(null));
     }
-    original["settings"]
-        .as_object_mut()
-        .unwrap()
-        .entry("run_mode")
-        .or_insert(json!("terminal"));
+    let settings = original["settings"].as_object_mut().unwrap();
+    settings.entry("run_mode").or_insert(json!("terminal"));
+    settings.entry("harness").or_insert(json!("claude"));
     let reserialised = serde_json::to_value(&graph).unwrap();
     assert_eq!(
         numbers_as_f64(original),

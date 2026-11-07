@@ -8,8 +8,17 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import type { ITerminalOptions } from '@xterm/xterm';
-import { isRunState, sessionsOf, type PtyData, type TerminalSession } from '../types/contract';
+import {
+  DEFAULT_HARNESS,
+  isRunState,
+  sessionHarness,
+  sessionsOf,
+  type HarnessProfile,
+  type PtyData,
+  type TerminalSession,
+} from '../types/contract';
 import { api, isTauri } from '../lib/api';
+import { BUILTIN_HARNESSES, harnessLabel } from '../lib/harness';
 import { SESSION_COLORS } from '../lib/sessions';
 
 export interface TerminalWindowProps {
@@ -190,6 +199,22 @@ function useSessionInfo(runId: string, sid: string, dir: string | null, report: 
   return session;
 }
 
+/** Label of a harness id: built-ins at once, then this machine's list (list_harnesses). */
+function useHarnessLabel(id: string): string {
+  const [profiles, setProfiles] = useState<readonly HarnessProfile[]>(BUILTIN_HARNESSES);
+  useEffect(() => {
+    let live = true;
+    Promise.resolve()
+      .then(() => api.listHarnesses())
+      .then((list) => live && setProfiles(list))
+      .catch((err: unknown) => console.warn('list_harnesses failed; showing built-in labels', err));
+    return () => {
+      live = false;
+    };
+  }, []);
+  return harnessLabel(profiles, id);
+}
+
 function useWindowTitle(title: string): void {
   useEffect(() => {
     document.title = title;
@@ -200,11 +225,14 @@ function useWindowTitle(title: string): void {
   }, [title]);
 }
 
-function SessionHeader({ session, sid }: { session: TerminalSession | null; sid: string }) {
+function SessionHeader({ session, sid, harness }: { session: TerminalSession | null; sid: string; harness: string }) {
   const color = session ? SESSION_COLORS[session.status] : '#777777';
   return (
     <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[#3c3c3c] bg-[#252526] px-3 py-1.5 text-[12px]">
       <span className="font-semibold text-[#d4d4d4]">{session?.title || `Session ${sid}`}</span>
+      <span className="rounded border border-[#3c3c3c] px-1.5 py-0.5 text-[11px] text-[#9a9a9a]" aria-label="harness">
+        {harness}
+      </span>
       <span
         className="rounded-full px-2 py-0.5 text-[11px]"
         style={{ color, backgroundColor: `${color}26` }}
@@ -238,11 +266,13 @@ export default function TerminalWindow({ runId, sid, dir }: TerminalWindowProps)
   const report = useRef((text: string) => setError(text)).current;
   const session = useSessionInfo(runId, sid, dir, report);
   useSessionTerminal(host, runId, sid, report);
-  useWindowTitle(`Claude Code — ${session?.title || sid}`);
+  const harnessId = sessionHarness(session);
+  const harness = useHarnessLabel(harnessId);
+  useWindowTitle(`${harnessId === DEFAULT_HARNESS ? 'Claude Code' : harness} — ${session?.title || sid}`);
 
   return (
     <div className="flex h-screen flex-col bg-[#1e1e1e] text-[#d4d4d4]">
-      <SessionHeader session={session} sid={sid} />
+      <SessionHeader session={session} sid={sid} harness={harness} />
       {error && (
         <div role="alert" className="flex shrink-0 items-start gap-2 border-b border-[#ef4444] bg-[#ef4444]/10 px-3 py-1.5 text-[12px] text-[#ef4444]">
           <span className="flex-1">{error}</span>

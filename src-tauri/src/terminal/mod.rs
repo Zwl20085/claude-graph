@@ -1,5 +1,7 @@
 //! Terminal mode (docs/ARCHITECTURE.md "Terminal mode (default)"): `Run all`
-//! starts one interactive `claude` per connected component of the graph in a
+//! starts one interactive coding-agent CLI (its harness: Claude Code by
+//! default, Codex CLI, or a custom one; [`crate::harness`]) per connected
+//! component of the graph, split where the harness changes, in a
 //! pseudo terminal, shows it in its own window, and types the node messages
 //! in order as if the user typed them. Between nodes it waits for Claude
 //! Code's Stop hook. The process stays alive after the last node so the user
@@ -10,6 +12,7 @@
 //! - [`hooks`]: `hooks.json` (`--settings`) and `hooks.log` polling.
 //! - [`pty`]: the portable-pty process, its reader thread and transcript.
 //! - [`screen`]: output as text (UTF-8, escapes, dialog detection).
+//! - [`live`]: the live screen as rows (input-area checks).
 //! - [`deliver`]: the readiness gate and the verified delivery of one message.
 //! - `port`: delivery on the live pty; follow-up messages.
 //! - [`node`]: one node inside a session (brief, evaluation, files).
@@ -21,9 +24,12 @@
 pub mod api;
 pub mod components;
 pub mod deliver;
+pub mod emulate;
 pub mod hooks;
+pub mod live;
 pub mod message;
 pub mod node;
+pub mod output;
 mod port;
 pub mod pty;
 pub mod reply;
@@ -68,6 +74,9 @@ pub struct SessionFile {
     pub node_ids: Vec<String>,
     pub pid: Option<u32>,
     pub status: SessionStatus,
+    /// Harness profile id (missing in older files: `claude`).
+    #[serde(default = "crate::contract::default_harness")]
+    pub harness: String,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
 }

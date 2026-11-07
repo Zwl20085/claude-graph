@@ -16,9 +16,9 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::claude_bin;
 use crate::contract::{
-    AppError, AppResult, AppSettings, AssistantState, ClaudeCheck, Graph, LaunchOptions,
-    NodeMessage, NodeResult, PtyReplay, RunState, RunSummary, RunTarget, TerminalSession,
-    TrustStatus,
+    AppError, AppResult, AppSettings, AssistantState, ClaudeCheck, Graph, HarnessCheck,
+    HarnessProfile, LaunchOptions, NodeMessage, NodeResult, PtyReplay, RunState, RunSummary,
+    RunTarget, TerminalSession, TrustStatus,
 };
 use crate::events::{Emitter, TauriEmitter};
 use crate::paths::{canonical, dir_for_create, existing_dir};
@@ -27,7 +27,7 @@ use crate::run_api::AppState;
 use crate::run_loop::blocking;
 use crate::run_store::check_id;
 use crate::terminal::api as term;
-use crate::{launch, run_store, store};
+use crate::{harness, launch, run_store, store};
 
 fn emitter(app: &AppHandle) -> Arc<dyn Emitter> {
     Arc::new(TauriEmitter(app.clone()))
@@ -58,6 +58,59 @@ pub async fn check_claude(state: State<'_, AppState>) -> AppResult<ClaudeCheck> 
     let st = state.inner().clone();
     let configured = blocking(move || Ok(st.app_settings().claude_bin)).await?;
     Ok(claude_bin::check(configured).await)
+}
+
+/// Harness profiles: built-ins (with overrides), then customs.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_harnesses(state: State<'_, AppState>) -> AppResult<Vec<HarnessProfile>> {
+    let st = state.inner().clone();
+    blocking(move || Ok(st.harnesses())).await
+}
+
+/// Validate and store a profile (a built-in id stores an override of its
+/// command, args, env and model); returns the new list.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn save_harness(
+    state: State<'_, AppState>,
+    profile: HarnessProfile,
+) -> AppResult<Vec<HarnessProfile>> {
+    let st = state.inner().clone();
+    blocking(move || st.save_harness(&profile)).await
+}
+
+/// Delete a custom profile; returns the new list.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn delete_harness(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<Vec<HarnessProfile>> {
+    checked_harness_id(&id)?;
+    let st = state.inner().clone();
+    blocking(move || st.delete_harness(&id)).await
+}
+
+/// `<command> --version` with the profile's env (10 s timeout).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn check_harness(state: State<'_, AppState>, id: String) -> AppResult<HarnessCheck> {
+    checked_harness_id(&id)?;
+    let st = state.inner().clone();
+    let (list, claude_bin) =
+        blocking(move || Ok((st.harnesses(), st.app_settings().claude_bin))).await?;
+    let profile = harness::find(&list, &id)
+        .cloned()
+        .ok_or_else(|| AppError::new("not_found", format!("no harness {id:?}")))?;
+    Ok(harness::check(&profile, claude_bin).await)
+}
+
+fn checked_harness_id(id: &str) -> AppResult<()> {
+    if harness::profile::valid_id(id) {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "invalid_input",
+            format!("invalid harness id {id:?}"),
+        ))
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]

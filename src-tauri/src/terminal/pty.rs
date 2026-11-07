@@ -1,4 +1,4 @@
-//! One Claude Code process in a pseudo terminal (portable-pty: ConPTY on
+//! One harness CLI process (Claude Code, Codex, …) in a pseudo terminal (portable-pty: ConPTY on
 //! Windows, a pty on Unix), its reader thread and its transcript.
 //!
 //! The reader thread appends every chunk to `transcript.log`, keeps the last
@@ -16,17 +16,19 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::watch;
 
-use crate::contract::{AppError, AppResult, PtyData, PtyReplay};
+use crate::contract::{AppError, AppResult, PtyData};
 use crate::events::Emitter;
 use crate::job::Job;
-use crate::terminal::screen::{take_utf8, Screen};
+use crate::terminal::emulate::TermSize;
+use crate::terminal::screen::{take_utf8, Markers};
+
+pub use crate::terminal::output::Output;
 
 /// Bytes of output kept in memory for `pty_replay`.
 pub const REPLAY_CAP: usize = 512 * 1024;
@@ -52,80 +54,8 @@ pub struct PtySpec {
     pub sid: String,
     /// Window label that receives `pty:data`.
     pub label: String,
-}
-
-/// Output state shared by the reader thread and the session.
-#[derive(Default)]
-pub struct Output {
-    /// Text of the emitted chunks (last [`REPLAY_CAP`] bytes), their count
-    /// and the number of bytes emitted in all.
-    replay: Mutex<(String, u64, u64)>,
-    last: Mutex<Option<Instant>>,
-    /// Bytes appended to `transcript.log` so far.
-    transcript: AtomicU64,
-}
-
-impl Output {
-    /// The emitted text so far (last [`REPLAY_CAP`] bytes) and its chunk count.
-    pub fn replay(&self) -> PtyReplay {
-        let buf = lock(&self.replay);
-        PtyReplay {
-            text: buf.0.clone(),
-            seq: buf.1,
-        }
-    }
-
-    /// When the process last printed anything.
-    pub fn last_output(&self) -> Option<Instant> {
-        *lock(&self.last)
-    }
-
-    /// What the end of the output shows now.
-    pub fn screen(&self) -> Screen {
-        Screen::of(&lock(&self.replay).0)
-    }
-
-    /// Bytes emitted so far, a mark for [`Output::since`].
-    pub fn mark(&self) -> u64 {
-        lock(&self.replay).2
-    }
-
-    /// Text emitted after `mark` (as much as the replay still holds).
-    pub fn since(&self, mark: u64) -> String {
-        let buf = lock(&self.replay);
-        let new = usize::try_from(buf.2.saturating_sub(mark)).unwrap_or(usize::MAX);
-        let mut start = buf.0.len().saturating_sub(new);
-        while !buf.0.is_char_boundary(start) {
-            start += 1;
-        }
-        buf.0[start..].to_string()
-    }
-
-    /// Length of `transcript.log` (bytes written by the reader so far).
-    pub fn transcript_len(&self) -> u64 {
-        self.transcript.load(Ordering::SeqCst)
-    }
-
-    /// Note output activity.
-    fn touch(&self) {
-        *lock(&self.last) = Some(Instant::now());
-    }
-
-    /// Append one emitted chunk; returns its 1-based sequence number.
-    fn push(&self, text: &str) -> u64 {
-        let mut buf = lock(&self.replay);
-        buf.0.push_str(text);
-        buf.2 += text.len() as u64;
-        if buf.0.len() > REPLAY_CAP {
-            let mut cut = buf.0.len() - REPLAY_CAP;
-            while !buf.0.is_char_boundary(cut) {
-                cut += 1;
-            }
-            buf.0.drain(..cut);
-        }
-        buf.1 += 1;
-        buf.1
-    }
+    /// The CLI's dialog and input-box markers.
+    pub markers: Arc<Markers>,
 }
 
 /// A live (or exited) pty process.
@@ -135,6 +65,9 @@ pub struct Pty {
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     job: Arc<Mutex<Option<Job>>>,
     pid: Option<u32>,
+    /// Every size set (at spawn and by [`Pty::resize`]) with the transcript
+    /// length at that moment.
+    sizes: Mutex<Vec<TermSize>>,
     pub output: Arc<Output>,
     exit: watch::Receiver<Option<u32>>,
 }
@@ -185,6 +118,8 @@ impl Pty {
         let master = Arc::new(Mutex::new(Some(pair.master)));
         let job = Arc::new(Mutex::new(job));
         let output = Arc::new(Output::default());
+        output.set_markers(spec.markers.clone());
+        output.resize_grid(spec.rows, spec.cols);
         let (exit_tx, exit) = watch::channel(None);
         let pty = Pty {
             writer: Arc::new(Mutex::new(writer)),
@@ -192,6 +127,11 @@ impl Pty {
             killer: Mutex::new(killer),
             job: job.clone(),
             pid,
+            sizes: Mutex::new(vec![TermSize {
+                at: 0,
+                cols: spec.cols,
+                rows: spec.rows,
+            }]),
             output: output.clone(),
             exit,
         };
@@ -211,6 +151,12 @@ impl Pty {
             let _ = exit_tx.send(Some(code));
         });
         Ok(pty)
+    }
+
+    /// Every terminal size set so far, with the transcript offset it took
+    /// effect at (for replaying the transcript, [`crate::terminal::emulate`]).
+    pub fn sizes(&self) -> Vec<TermSize> {
+        lock(&self.sizes).clone()
     }
 
     pub fn pid(&self) -> Option<u32> {
@@ -249,9 +195,20 @@ impl Pty {
             pixel_height: 0,
         };
         match lock(&self.master).as_ref() {
-            Some(m) => m
-                .resize(size)
-                .map_err(|e| AppError::new("io", format!("resize failed: {e}"))),
+            Some(m) => {
+                m.resize(size)
+                    .map_err(|e| AppError::new("io", format!("resize failed: {e}")))?;
+                self.output.resize_grid(rows, cols);
+                let at = self.output.transcript_len();
+                let mut sizes = lock(&self.sizes);
+                if !sizes
+                    .last()
+                    .is_some_and(|s| (s.cols, s.rows) == (cols, rows))
+                {
+                    sizes.push(TermSize { at, cols, rows });
+                }
+                Ok(())
+            }
             None => Err(AppError::new(
                 "not_found",
                 "the Claude Code process has exited",
@@ -357,33 +314,5 @@ fn read_loop(
             };
             emitter.pty_data(&spec.label, &data);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn output_keeps_the_last_bytes_and_marks() {
-        let out = Output::default();
-        assert_eq!(out.push(&"a".repeat(REPLAY_CAP)), 1);
-        assert_eq!(out.push("✻z"), 2);
-        let replay = out.replay();
-        assert!(replay.text.ends_with("✻z"));
-        assert!(replay.text.len() <= REPLAY_CAP && replay.text.len() >= REPLAY_CAP - 3);
-        assert_eq!(replay.seq, 2);
-        assert!(out.last_output().is_none());
-        out.touch();
-        assert!(out.last_output().is_some());
-        let mark = out.mark();
-        assert_eq!(mark, (REPLAY_CAP + "✻z".len()) as u64);
-        assert_eq!(out.since(mark), "");
-        out.push("Do you trust this? Enter to confirm");
-        assert_eq!(out.since(mark), "Do you trust this? Enter to confirm");
-        assert!(out.screen().dialog_open());
-        out.push("\r\n>\u{a0}");
-        assert!(out.screen().idle());
-        assert_eq!(out.since(0).len(), out.replay().text.len());
     }
 }

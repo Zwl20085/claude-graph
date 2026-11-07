@@ -20,14 +20,17 @@ use crate::app_settings::{self, default_data_dir};
 use crate::assistant::AssistantTurns;
 use crate::claude_bin::{resolve, ClaudeCommand, Resolution, ResolveEnv};
 use crate::contract::{
-    AppError, AppResult, AppSettings, RunMode, RunState, RunTarget, TrustStatus,
+    AppError, AppResult, AppSettings, HarnessKind, HarnessProfile, RunMode, RunState, RunTarget,
+    TrustStatus,
 };
 use crate::events::Emitter;
+use crate::harness;
 use crate::run_loop::{initial_state, LoopMsg, RunLoop};
 use crate::run_store::{check_id, list_run_states, new_run_id, read_run_state, sweep_run};
 use crate::scheduler::Scheduler;
 use crate::store::read_graph;
 use crate::terminal::api::session_closed;
+use crate::terminal::components::Labels;
 use crate::terminal::run::TerminalLoop;
 use crate::terminal::{plan, Terminals};
 use crate::trust;
@@ -73,6 +76,9 @@ pub struct AppState {
     /// Terminal-mode sessions, alive or not, of this app run.
     terminals: Terminals,
     data_dir: PathBuf,
+    /// The program Codex's notify runs (`<exe> --notify <hooks.log>`): this
+    /// app's binary.
+    notify_exe: PathBuf,
 }
 
 impl Default for AppState {
@@ -132,6 +138,42 @@ impl AppState {
             assistant: AssistantTurns::default(),
             terminals: Terminals::default(),
             data_dir,
+            notify_exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("claude-graph")),
+        }
+    }
+
+    /// Use `exe` as Codex's notify program (tests: the built app binary).
+    pub fn with_notify_exe(self, exe: PathBuf) -> Self {
+        Self {
+            notify_exe: exe,
+            ..self
+        }
+    }
+
+    /// Harness profiles of this machine (built-ins with overrides, customs).
+    pub fn harnesses(&self) -> Vec<HarnessProfile> {
+        harness::store::list(&self.data_dir)
+    }
+
+    pub fn save_harness(&self, profile: &HarnessProfile) -> AppResult<Vec<HarnessProfile>> {
+        harness::store::save(&self.data_dir, profile)
+    }
+
+    pub fn delete_harness(&self, id: &str) -> AppResult<Vec<HarnessProfile>> {
+        harness::store::delete(&self.data_dir, id)
+    }
+
+    /// The claude command when some session needs it; otherwise a missing
+    /// claude is not an error (a Codex-only run) and a placeholder is used.
+    fn claude_for(&self, needed: bool) -> AppResult<ClaudeCommand> {
+        match self.find_claude() {
+            Ok(c) => Ok(c),
+            Err(e) if needed => Err(e),
+            Err(_) => Ok(ClaudeCommand {
+                program: PathBuf::from("claude"),
+                prefix_args: Vec::new(),
+                display: "claude (not found)".into(),
+            }),
         }
     }
 
@@ -302,8 +344,19 @@ impl AppState {
         let reservation = self.reserve(&graph_dir)?;
         let graph = read_graph(&graph_dir)?;
         trust::require_trusted(&self.data_dir, &graph_dir, &graph)?;
-        let claude = self.find_claude()?;
-        let plans = plan(&graph, &target, &list_run_states(&graph_dir)?)?;
+        let harnesses = self.harnesses();
+        let labels: Labels = harnesses
+            .iter()
+            .map(|h| (h.id.clone(), h.label.clone()))
+            .collect();
+        let plans = plan(&graph, &target, &list_run_states(&graph_dir)?, &labels)?;
+        let targets = plans.iter().flat_map(|p| p.to_send());
+        harness::check_targets(&graph, targets, &harnesses, false)?;
+        let needs_claude = plans.iter().filter(|p| !p.to_send().is_empty()).any(|p| {
+            harness::find(&harnesses, &p.harness)
+                .is_some_and(|h| h.kind == HarnessKind::Claude && h.command.is_none())
+        });
+        let claude = self.claude_for(needs_claude)?;
         let run_id = new_run_id(&graph_dir, Utc::now())?;
         let ctx = Arc::new(RunCtx {
             graph_dir,
@@ -311,6 +364,8 @@ impl AppState {
             run_id: run_id.clone(),
             claude,
             emitter,
+            harnesses,
+            notify_exe: self.notify_exe.clone(),
         });
         self.close_earlier_sessions(&ctx, &plans);
         let run_loop = TerminalLoop::new(ctx, plans, self.terminals.clone());
@@ -353,6 +408,8 @@ impl AppState {
         trust::require_trusted(&self.data_dir, &graph_dir, &graph)?;
         let claude = self.find_claude()?;
         let sched = Scheduler::new(&graph, &target, &list_run_states(&graph_dir)?)?;
+        let harnesses = self.harnesses();
+        harness::check_targets(&graph, sched.target(), &harnesses, true)?;
         let run_id = new_run_id(&graph_dir, Utc::now())?;
         let ctx = Arc::new(RunCtx {
             graph_dir,
@@ -360,6 +417,8 @@ impl AppState {
             run_id: run_id.clone(),
             claude,
             emitter,
+            harnesses,
+            notify_exe: self.notify_exe.clone(),
         });
         let state = initial_state(&ctx, &sched);
         let run_loop = RunLoop::new(ctx, sched, state);
@@ -539,6 +598,8 @@ impl AppState {
             run_id: run_id.to_string(),
             claude,
             emitter,
+            harnesses: self.harnesses(),
+            notify_exe: self.notify_exe.clone(),
         });
         let run_loop = RunLoop::new(ctx, sched, state);
         // Queue the message before the loop starts so it cannot finish first.

@@ -58,8 +58,17 @@ pub fn initial_state(ctx: &RunCtx, plans: &[SessionPlan]) -> RunState {
         status: RunStatus::Running,
         nodes,
         mode: RunMode::Terminal,
-        sessions: plans.iter().map(session_info).collect(),
+        sessions: plans
+            .iter()
+            .filter(|p| sends(p))
+            .map(session_info)
+            .collect(),
     }
+}
+
+/// The plan types at least one node (else it only marks nodes skipped).
+fn sends(p: &SessionPlan) -> bool {
+    !p.to_send().is_empty()
 }
 
 fn session_info(p: &SessionPlan) -> TerminalSession {
@@ -70,6 +79,7 @@ fn session_info(p: &SessionPlan) -> TerminalSession {
         status: SessionStatus::Starting,
         pid: None,
         current_node: None,
+        harness: p.harness.clone(),
     }
 }
 
@@ -93,6 +103,7 @@ impl TerminalLoop {
     /// Registers every session of `plans` in `terminals` (not started yet).
     pub fn new(ctx: Arc<RunCtx>, plans: Vec<SessionPlan>, terminals: Terminals) -> Self {
         let state = initial_state(&ctx, &plans);
+        let plans: Vec<SessionPlan> = plans.into_iter().filter(sends).collect();
         let shared: Vec<Arc<SessionShared>> = plans
             .iter()
             .map(|p| SessionShared::new(&ctx.run_id, &ctx.graph_dir, session_info(p)))
@@ -147,17 +158,56 @@ impl TerminalLoop {
             .count()
     }
 
-    /// Start waiting sessions while fewer than `max_parallel` are active.
+    /// Settled state of the sessions before plan `i` of its component:
+    /// `None` while one is still waiting or running, else the first failed
+    /// node among them (`Some(None)`: none failed).
+    fn earlier_settled(&self, i: usize) -> Option<Option<String>> {
+        let component = self.plans[i].component;
+        let mut failed = None;
+        for p in self.plans[..i].iter().filter(|p| p.component == component) {
+            let settled = self
+                .state
+                .sessions
+                .iter()
+                .any(|s| s.sid == p.sid && s.status.is_settled());
+            if !settled {
+                return None;
+            }
+            failed = failed.or_else(|| {
+                p.to_send()
+                    .iter()
+                    .find(|id| {
+                        self.state
+                            .nodes
+                            .get(*id)
+                            .is_some_and(|n| n.status.is_failure())
+                    })
+                    .cloned()
+            });
+        }
+        Some(failed)
+    }
+
+    /// Start waiting sessions while fewer than `max_parallel` are active. A
+    /// session starts after the earlier sessions of its component settled
+    /// (with `stop_on_failure`, a failure there skips it).
     fn launch(&mut self) {
         let max = self.ctx.graph.settings.max_parallel.max(1) as usize;
         for i in 0..self.plans.len() {
             if self.cancelled || self.active() >= max {
                 return;
             }
-            let sid = self.plans[i].sid.clone();
-            if !self.launched.insert(sid) {
+            if self.launched.contains(&self.plans[i].sid) {
                 continue;
             }
+            let Some(failed) = self.earlier_settled(i) else {
+                continue;
+            };
+            if let (Some(id), true) = (failed, self.ctx.graph.settings.stop_on_failure) {
+                self.skip_waiting(i, &format!("stopped after {id}"));
+                continue;
+            }
+            self.launched.insert(self.plans[i].sid.clone());
             let task = SessionTask {
                 ctx: self.ctx.clone(),
                 plan: self.plans[i].clone(),
@@ -180,6 +230,13 @@ impl TerminalLoop {
                 if let Some(i) = self.plans.iter().position(|p| p.node_ids.contains(&id)) {
                     self.shared[i].request_kill();
                     self.cancel_waiting(i);
+                    // Later sessions of the component depend on this one.
+                    let component = self.plans[i].component;
+                    for j in i + 1..self.plans.len() {
+                        if self.plans[j].component == component {
+                            self.cancel_waiting(j);
+                        }
+                    }
                 }
             }
             LoopMsg::SendMessage {
@@ -205,6 +262,15 @@ impl TerminalLoop {
 
     /// A session that has not started yet is cancelled with its nodes.
     fn cancel_waiting(&mut self, i: usize) {
+        self.end_waiting(i, NodeStatus::Cancelled, CANCELLED);
+    }
+
+    /// A session that has not started yet is not started: its nodes skipped.
+    fn skip_waiting(&mut self, i: usize, reason: &str) {
+        self.end_waiting(i, NodeStatus::Skipped, reason);
+    }
+
+    fn end_waiting(&mut self, i: usize, status: NodeStatus, reason: &str) {
         let sid = self.plans[i].sid.clone();
         if !self.launched.insert(sid.clone()) {
             return;
@@ -212,8 +278,8 @@ impl TerminalLoop {
         let now = Some(Utc::now());
         for id in self.plans[i].to_send() {
             if let Some(n) = self.state.nodes.get_mut(id) {
-                n.status = NodeStatus::Cancelled;
-                n.reason = Some(CANCELLED.to_string());
+                n.status = status;
+                n.reason = Some(reason.to_string());
                 n.finished_at = now;
             }
         }

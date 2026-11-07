@@ -2,7 +2,7 @@
 //! removed, and [`Screen`]: what the end of the output shows (a dialog that
 //! waits for the user, Claude Code's empty input box, the text typed into it).
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 
@@ -26,6 +26,44 @@ const NOT_A_DIALOG_AFTER_ESC_TO: &str = " interrupt";
 /// a dialog's choice cursor a cursor move); and the footer hint of CLIs that
 /// show it.
 pub const IDLE_MARKERS: [&str; 3] = ["\u{276f}\u{a0}", ">\u{a0}", "? for shortcuts"];
+/// The texts that mark a dialog and the empty input box of one CLI (lowercase,
+/// normalized as [`normalize`] does). Claude Code's by default; other
+/// harnesses bring their own (`crate::harness`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Markers {
+    pub idle: Vec<String>,
+    pub dialog: Vec<String>,
+}
+
+impl Markers {
+    /// Claude Code's markers ([`IDLE_MARKERS`], [`DIALOG_MARKERS`]).
+    pub fn claude() -> Arc<Markers> {
+        static CLAUDE: OnceLock<Arc<Markers>> = OnceLock::new();
+        CLAUDE
+            .get_or_init(|| {
+                Arc::new(Markers {
+                    idle: IDLE_MARKERS.iter().map(|m| m.to_string()).collect(),
+                    dialog: DIALOG_MARKERS.iter().map(|m| m.to_string()).collect(),
+                })
+            })
+            .clone()
+    }
+
+    /// Markers from user or adapter texts (normalized; blanks dropped).
+    pub fn of(idle: &[&str], dialog: &[&str]) -> Markers {
+        let clean = |list: &[&str]| -> Vec<String> {
+            list.iter()
+                .map(|m| normalize(m))
+                .filter(|m| !m.is_empty())
+                .collect()
+        };
+        Markers {
+            idle: clean(idle),
+            dialog: clean(dialog),
+        }
+    }
+}
+
 /// The screen is the last this many lines of output …
 pub const SCREEN_LINES: usize = 60;
 /// … and at most this many bytes.
@@ -123,6 +161,7 @@ pub fn screen_tail(raw: &str) -> &str {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Screen {
     text: String,
+    markers: Arc<Markers>,
 }
 
 impl Screen {
@@ -135,7 +174,13 @@ impl Screen {
     pub fn of_all(raw: &str) -> Self {
         Self {
             text: normalize(raw),
+            markers: Markers::claude(),
         }
+    }
+
+    /// The same text judged with `markers`.
+    pub fn with(self, markers: Arc<Markers>) -> Self {
+        Self { markers, ..self }
     }
 
     pub fn text(&self) -> &str {
@@ -145,9 +190,11 @@ impl Screen {
     /// End of the last dialog marker.
     fn last_dialog(&self) -> Option<usize> {
         let t = &self.text;
-        DIALOG_MARKERS
+        self.markers
+            .dialog
             .iter()
-            .flat_map(|m| t.match_indices(m).map(move |(i, _)| (*m, i + m.len())))
+            .map(String::as_str)
+            .flat_map(|m| t.match_indices(m).map(move |(i, _)| (m, i + m.len())))
             .filter(|(m, end)| *m != ESC_TO || !t[*end..].starts_with(NOT_A_DIALOG_AFTER_ESC_TO))
             .map(|(_, end)| end)
             .max()
@@ -155,7 +202,11 @@ impl Screen {
 
     /// Start of the last idle marker.
     fn last_idle(&self) -> Option<usize> {
-        IDLE_MARKERS.iter().filter_map(|m| self.text.rfind(m)).max()
+        self.markers
+            .idle
+            .iter()
+            .filter_map(|m| self.text.rfind(m.as_str()))
+            .max()
     }
 
     /// Any dialog marker on screen (open or not).
@@ -187,6 +238,14 @@ impl Screen {
         }
         let from = self.last_idle().unwrap_or(0);
         self.text[from..].contains(want)
+    }
+
+    /// The first [`VISIBLE_PREFIX`] chars of `message` (normalized) show
+    /// anywhere in this text.
+    pub fn shows_prefix(&self, message: &str) -> bool {
+        let want: String = normalize(message).chars().take(VISIBLE_PREFIX).collect();
+        let want = want.trim();
+        !want.is_empty() && self.text.contains(want)
     }
 
     /// `needle` (lowercase) is on screen.
@@ -257,6 +316,24 @@ mod tests {
         let big = "\u{2500}".repeat(SCREEN_BYTES);
         assert!(screen_tail(&big).len() <= SCREEN_BYTES);
         assert_eq!(normalize("A\x1b[1Cb\r\n \u{a0}C\t"), "a b \u{a0}c");
+    }
+
+    #[test]
+    fn other_markers_judge_the_same_text() {
+        let codex = Arc::new(Markers::of(
+            &["Ask Codex to do anything"],
+            &["Trust this folder", "Folder access"],
+        ));
+        let dialog = "Folder access\r\nTrust this folder?\r\n\u{203a} 1. Trust and continue";
+        assert!(Screen::of(dialog).with(codex.clone()).dialog_open());
+        let ready = format!("{dialog}\r\n\u{203a} Ask Codex to do anything");
+        let s = Screen::of(&ready).with(codex.clone());
+        assert!(s.idle() && !s.dialog_open());
+        assert!(
+            !Screen::of(&ready).idle(),
+            "Claude markers do not see Codex's box"
+        );
+        assert_eq!(Markers::of(&["  ", "A  B"], &[]).idle, ["a b"]);
     }
 
     #[test]

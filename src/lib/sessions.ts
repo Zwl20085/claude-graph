@@ -3,7 +3,16 @@
  * TERMINAL_CONTRACT "Sessions"), session liveness, and the colours of a
  * session chip. No store, no IPC: the terminal window imports this too.
  */
-import type { Graph, Node, NodeRunState, NodeStatus, SessionStatus, TerminalSession } from '../types/contract';
+import {
+  DEFAULT_HARNESS,
+  effectiveHarness,
+  type Graph,
+  type Node,
+  type NodeRunState,
+  type NodeStatus,
+  type SessionStatus,
+  type TerminalSession,
+} from '../types/contract';
 
 export const SESSION_TITLE_MAX = 60;
 
@@ -54,19 +63,37 @@ function topoOrder(nodes: readonly Node[], edges: ReadonlyArray<{ from: string; 
   return out;
 }
 
-function sessionTitle(roots: readonly Node[]): string {
+function sessionTitle(roots: readonly Node[], harness: string, label: string): string {
   const text = roots.map((n) => n.title.trim() || n.id).join(' + ');
-  return text.length > SESSION_TITLE_MAX ? text.slice(0, SESSION_TITLE_MAX) : text;
+  const short = text.length > SESSION_TITLE_MAX ? text.slice(0, SESSION_TITLE_MAX) : text;
+  return harness === DEFAULT_HARNESS ? short : `${short} (${label})`;
+}
+
+/** Maximal runs of consecutive nodes (in send order) with the same effective harness. */
+function splitByHarness(ordered: readonly Node[], harnessOfNode: (n: Node) => string): Node[][] {
+  return ordered.reduce<Node[][]>((runs, n) => {
+    const last = runs[runs.length - 1];
+    const prev = last?.[last.length - 1];
+    if (last && prev && harnessOfNode(prev) === harnessOfNode(n)) return [...runs.slice(0, -1), [...last, n]];
+    return [...runs, [n]];
+  }, []);
 }
 
 /**
  * Sessions of a run over `ids`: weakly connected components of the induced
  * subgraph, numbered s1, s2, … by their top-left node; nodes in send order.
+ * A component is split wherever the effective harness changes (HARNESS_CONTRACT
+ * "Sessions"); a session not on `claude` gets the harness label in its title.
  */
-export function groupSessions(graph: Graph, ids: readonly string[]): TerminalSession[] {
+export function groupSessions(
+  graph: Graph,
+  ids: readonly string[],
+  labelOf: (harness: string) => string = (h) => h,
+): TerminalSession[] {
   const inRun = new Set(ids);
   const nodes = graph.nodes.filter((n) => inRun.has(n.id));
   const edges = graph.edges.filter((e) => inRun.has(e.from) && inRun.has(e.to));
+  const harnessOfNode = (n: Node): string => effectiveHarness(n, graph.settings);
   const component = new Map<string, number>();
   let count = 0;
   for (const start of nodes) {
@@ -89,18 +116,22 @@ export function groupSessions(graph: Graph, ids: readonly string[]): TerminalSes
   return groups
     .map((members) => ({ members, first: [...members].sort(byPosition)[0] as Node }))
     .sort((a, b) => byPosition(a.first, b.first))
-    .map(({ members }, i) => {
-      const ids = new Set(members.map((n) => n.id));
-      const inner = edges.filter((e) => ids.has(e.from) && ids.has(e.to));
-      const ordered = topoOrder(members, inner);
-      const roots = ordered.filter((n) => !inner.some((e) => e.to === n.id));
+    .flatMap(({ members }) => {
+      const memberIds = new Set(members.map((n) => n.id));
+      return splitByHarness(topoOrder(members, edges.filter((e) => memberIds.has(e.from) && memberIds.has(e.to))), harnessOfNode);
+    })
+    .map((segment, i) => {
+      const segIds = new Set(segment.map((n) => n.id));
+      const roots = segment.filter((n) => !edges.some((e) => e.to === n.id && segIds.has(e.from)));
+      const harness = harnessOfNode(segment[0] as Node);
       return {
         sid: `s${i + 1}`,
-        title: sessionTitle(roots),
-        node_ids: ordered.map((n) => n.id),
+        title: sessionTitle(roots, harness, labelOf(harness)),
+        node_ids: segment.map((n) => n.id),
         status: 'starting' as const,
         pid: null,
         current_node: null,
+        harness,
       };
     });
 }

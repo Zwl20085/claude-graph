@@ -1,7 +1,9 @@
 /** Simple mode: one prompt box plus model / permission / resources. */
-import { MODELS, PERMISSION_MODES, runModeOf, type Node } from '../types/contract';
+import { effectiveHarness, harnessOf, MODELS, PERMISSION_MODES, runModeOf, type Node } from '../types/contract';
+import { harnessLabel, isClaudeKind, NOT_CLAUDE_MODEL_NOTE } from '../lib/harness';
 import { permissionLabel } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
+import { HarnessSelect } from './HarnessSelect';
 import { ChipsInput, Field, inputCls, Select } from './ui';
 
 const MIN_ROWS = 12;
@@ -10,6 +12,8 @@ export const HEADLESS_ONLY_NOTE = 'Permission mode, tools, turns and resource ta
 export function PromptTab({ node }: { node: Node }) {
   const update = useGraphStore((s) => s.updateNode);
   const terminal = useGraphStore((s) => runModeOf(s.graph?.settings) === 'terminal');
+  const inheritLabel = useGraphStore((s) => harnessLabel(s.harnesses, harnessOf(s.graph?.settings)));
+  const claudeModel = useGraphStore((s) => isClaudeKind(s.harnesses, effectiveHarness(node, s.graph?.settings)));
   const rows = Math.max(MIN_ROWS, node.prompt.split('\n').length + 1);
   return (
     <div className="space-y-3">
@@ -26,9 +30,12 @@ export function PromptTab({ node }: { node: Node }) {
           {HEADLESS_ONLY_NOTE}
         </p>
       )}
+      <Field label="Harness">
+        <HarnessSelect value={node.harness} inheritLabel={inheritLabel} onChange={(harness) => update(node.id, { harness })} />
+      </Field>
       <div className="grid grid-cols-2 gap-2">
-        <Field label="Model">
-          <Select value={node.model} options={MODELS} onChange={(model) => update(node.id, { model })} />
+        <Field label="Model" hint={claudeModel ? undefined : NOT_CLAUDE_MODEL_NOTE}>
+          <Select value={node.model} options={MODELS} disabled={!claudeModel} onChange={(model) => update(node.id, { model })} />
         </Field>
         <Field label="Permission">
           <Select

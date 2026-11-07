@@ -32,6 +32,7 @@ export function newNode(id: string, title: string, position: Position): Node {
     working_dir: null,
     continue_session_of: null,
     extra_context: '',
+    harness: null,
   };
 }
 
@@ -195,6 +196,7 @@ export function emptyGraph(name: string): Graph {
       default_model: 'sonnet',
       default_permission_mode: 'claude_settings',
       claude_bin: null,
+      harness: 'claude',
     },
     nodes: [],
     edges: [],

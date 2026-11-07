@@ -30,6 +30,7 @@ dirs = "6"
 regex = "1"
 sha2 = "0.10"
 portable-pty = "0.9"
+vt100 = "0.18"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
@@ -41,5 +42,6 @@ tempfile = "3"
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
+# "unwind" so the reply renderer's catch_unwind fallback works in release too.
+panic = "unwind"
 strip = true

@@ -685,11 +685,28 @@ starting/running at once; a session that is `done` no longer counts (its process
    transcript length when its delivery began (`Output::transcript_len`, bytes the reader
    appended; the `submit` line is only seen on a 300 ms poll, after the CLI has started
    drawing) to the length when the node ends (after `stop`: up to 1.5 s for 250 ms of quiet)
-   is written as `reply.md` and `result.md`: `> <first message line>`, then the span's
-   escapes stripped with the screen regex (row moves → newline, SGR / erase-line dropped,
-   other escapes → space), consecutive duplicates, strict prefixes of the next line,
-   lines ≥ 8 chars repeated within the last 60 kept lines, rule lines and blank runs
-   dropped; last 256 KiB. Cut-short turns (kill, exit) are saved too.
+   is written as `reply.md` and `result.md`: `> <first message line>`, then the lines the
+   turn put on the screen, by terminal emulation (`emulate.rs`, crate `vt100`): on a
+   blocking thread (`spawn_blocking`), the transcript is replayed from byte 0 (at most its
+   last 16 MiB, up to the span's end) into a screen of the session's size with 10 000 rows
+   of scrollback; the pty records every size it was given (spawn and `pty_resize`) with the
+   transcript length at that moment, and the replay resizes the screen at those offsets.
+   The scrollback + screen lines are taken when the replay reaches the span's start and at
+   its end; the reply is what follows their common prefix (by line position), cut before
+   the idle input box (an empty `>` / `❯` line among the last 12 non-blank lines: box and
+   footer), lines drawn only with box-drawing characters (U+2500–U+257F) dropped, blank
+   runs collapsed, trailing blanks trimmed, the input box's echo of the message dropped;
+   last 256 KiB. Spinner frames and token counters that ConPTY repaints cell by cell end
+   up overwritten on the emulated screen, so they are gone. Fallback (logged as "line
+   heuristic fallback" with the reason; the emulator path logs "terminal emulator"): if
+   the transcript cannot be read or the emulator panics (`catch_unwind`; note the release
+   profile has `panic = "abort"`, so there a panic aborts instead), the span's escapes are
+   stripped with the screen regex (row moves → newline, SGR / erase-line dropped, other
+   escapes → space), consecutive duplicates, strict prefixes of the next line, lines ≥ 8
+   chars repeated within the last 60 kept lines, rule lines and blank runs dropped.
+   Cut-short turns (kill, exit) are saved too. Limits: more than 10 000 lines scrolling
+   off during one turn shift the line positions, and the reply is then the whole retained
+   scrollback (still capped).
 6. Node list exhausted → session `done`; the process stays alive for the user. Process exit
    while a node runs → node `failed`, the rest `skipped`, session `failed`. Kill while a
    node runs → node and the rest `cancelled`, session `cancelled`. Once the process is gone
@@ -779,3 +796,86 @@ model is sent, via `/model`).
 `max_parallel`, cancel killing the child, `pty_replay` seq, typing after the run).
 `tests/real_terminal.rs` (ignored) runs the real CLI for one node and answers the trust/MCP
 dialogs like a user.
+
+## Harness profiles (backend, 2026-11-07)
+
+A **harness** is the coding-agent CLI a terminal session runs. Profiles are machine-local:
+`<data_dir>/claude-graph/harnesses.json` = `{ "profiles": [...] }` holds custom profiles and
+overrides of the built-ins (an entry with a built-in id replaces that built-in's `command`,
+`args`, `env` and `model`; its label and kind stay). Nothing of a profile lives in
+graph.json except the ids (`settings.harness`, `node.harness`), so no graph trust item is
+needed. Built-ins (`harness::profile::builtins()`): `claude` "Claude Code"; `claude-deepseek`
+"Claude Code via DeepSeek" (kind claude, env `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`,
+`ANTHROPIC_AUTH_TOKEN=${DEEPSEEK_API_KEY}`, `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_OPUS_MODEL` /
+`ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-flash[1m]`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` /
+`CLAUDE_CODE_SUBAGENT_MODEL=deepseek-flash`); `codex` "Codex CLI" (args `--no-alt-screen`).
+
+**Module `src-tauri/src/harness/`:**
+
+| File | Role |
+|---|---|
+| `profile.rs` | `HarnessKind`, `StopMode`, `HarnessProfile`, `HarnessCheck` (re-exported by `contract.rs`), built-ins, `validated()`: id `^[a-z0-9][a-z0-9-]{0,31}$`, label ≤ 60, command ≤ 1024 and not UNC/device, ≤ 64 args, ≤ 64 env vars with keys `^[A-Za-z_][A-Za-z0-9_]*$`, model of `A-Za-z0-9 . _ : - / [ ] @` ≤ 100; custom: command required, `quiet_ms` 500..=600000, ≤ 16 dialog markers; custom-only fields reset for claude/codex kinds (so `stop_mode: "quiet"`, `quiet_ms: null`, `idle_marker: null`, `dialog_markers: []` sent by the UI are accepted and ignored); no control characters anywhere; env values never echoed in errors |
+| `store.rs` | `list` (built-ins merged with overrides, then customs; invalid hand-edited entries skipped with a warning), `save`, `delete` (customs only) |
+| `env.rs` | `${NAME}` substitution from the app's process environment at spawn time; an unset or empty variable fails with "harness <id>: environment variable <NAME> (used by <KEY>) is not set in the app's environment; set it and restart Claude Graph". Values are never stored expanded or logged |
+| `command.rs` | the program: `profile.command` (a path, or a name on PATH), else the kind default: claude = the `claude_bin` chain, codex = env `CLAUDE_GRAPH_CODEX_BIN` (a command line, for tests) or `codex` on PATH; an npm `codex.cmd` shim becomes `node …/@openai/codex/bin/codex.js`; never `cmd /C` |
+| `adapter.rs` | `spawn_spec(SpawnInput) -> Launch { program, args, env, display }` (env expansion first: a missing variable fails before any program is looked up or spawned), `behavior(profile) -> Behavior { label, markers, start_hook, expect, ready_quiet, stop, types_model }`, `notify_toml` |
+| `claude.rs` | as before: `--settings hooks.json --add-dir <graph> [--permission-mode] [--model profile.model]`; Claude Code's markers; submit = `submit` hook; stop = `stop` hook; `/model` typed for a node model |
+| `codex.rs` | `-C <cwd> --no-alt-screen [-m model] -c notify=["<app exe>","--notify","<session>/hooks.log"]` + profile args (`--no-alt-screen` only once). Idle markers "Ask Codex to do anything", "Ask a follow-up question"; dialog markers "Folder access", "Trust this folder", "Continue only if you trust", "Do you trust the contents", "Trust and continue"; no start hook (started = placeholder on screen + 1 s quiet, else 3 s quiet; 60 s timeout paused by dialogs); submit = `Expect::Gone` (below); stop = the notify `stop` line of this turn; node Claude models are not typed |
+| `custom.rs` | program = `command`, args = (`--settings hooks.json` for `claude_hooks`, `-c notify=[…]` for `codex_notify`) + `args`; idle = `idle_marker` (none: type after 3 s of quiet), dialogs = `dialog_markers`; submit = text gone from the last 3 non-blank rows; stop per `stop_mode` (`quiet`: no output for `quiet_ms`, default 8000, after the submit) |
+| `headless.rs` | the `claude -p` engine on claude-kind profiles: the profile env goes on the process (`TurnSpec.env`), its `command` replaces the claude program, its `model` replaces the graph default model (a node model still wins). A codex/custom node in a headless run fails at run start (`invalid_input` "… runs in terminal mode only") |
+| `mod.rs` | `effective(node, settings)` (`node.harness`, else `settings.harness`; blank = inherit), `check_targets` (run start, targeted nodes only: every harness exists, else `invalid_input` "node <id>: harness <h> is not defined on this machine; add it under Settings → Harnesses"), `check` (`<program> --version` with the profile env, 10 s) |
+
+**Terminal-mode changes.** `components.rs` cuts each component into maximal runs of
+consecutive nodes (topological order) with the same effective harness; sids are numbered
+over components, then those runs; `SessionPlan` gained `harness` and `component`; the title
+is the session's own roots plus ` (<label>)` when the harness is not `claude`. A `from` /
+`failed_of` target keeps the earlier sessions of the component as plans that send nothing
+(their nodes are `skipped` "before start node", no session entry). The run loop starts a
+session only after the earlier sessions of its component settled; with `stop_on_failure`
+a failure there skips it (nodes `skipped` "stopped after <id>", session `cancelled`);
+`cancel_node` also cancels the later waiting sessions of the component. A terminal run
+needs the claude CLI only when a session runs a claude-kind profile without its own
+command. In a session, an upstream node of another session contributes
+`## Inputs from upstream nodes` with its deliverables, its status from `summary.json` and
+the first 4000 chars of its `reply.md` (else `result.md`), fenced as untrusted data; such a
+node always gets the one-line "read the brief at …" message (any node with a
+cross-session upstream, not only the first of its session). `session.json` and
+`TerminalSession` carry `harness` (always set; old files load as `claude`).
+
+**Screen reading per harness.** `screen::Markers` (idle and dialog texts) replaced the
+fixed lists; `Output` (`terminal/output.rs`) holds the session's markers and a live
+`vt100` grid of the screen (`terminal/live.rs`), fed with every chunk and resized with the
+window. `deliver::Expect::Gone(Composer)` confirms a submit for CLIs without a submit
+hook: the first 30 chars of the message are no longer in the input area (Codex: the last
+row starting with `›` and every row below it; custom: the last 3 non-blank rows) and (a
+busy word, "working" or "esc to interrupt", appeared since typing, or the placeholder is
+gone). The retry ladder is unchanged ("enter again" while the text is still in the input
+area, else Ctrl+U and retype, 3 cycles). Follow-up messages use the session's check
+(`SessionShared::delivery`). reply.md's cut also stops at Codex's empty composer.
+
+**Codex notify mode of the app binary.** `claude-graph --notify <file> [json]` (handled in
+`main.rs` through `launch::notify_from_process` before Tauri starts) appends one line to
+`<file>`, which must be named `hooks.log`, and exits 0: `stop {compact JSON}` when the last
+argument parses as a JSON object, else `stop`. The payload is never executed or given to a
+shell. Codex also notifies for side turns (its thread-title request, other
+`input-messages`, possibly before the real turn ends), so a `stop` line ends the node's
+turn only if it has no payload or its `input-messages` include the typed text
+(whitespace-insensitive; `HookLine::stops_turn`).
+
+**Commands:** `list_harnesses → HarnessProfile[]`, `save_harness { profile } →
+HarnessProfile[]` (validated; a built-in id stores an override of command/args/env/model),
+`delete_harness { id } → HarnessProfile[]` (custom only: `invalid_input` for a built-in,
+`not_found` for an unknown id), `check_harness { id } → HarnessCheck` (`message` holds the
+program on success, the reason otherwise; env values never appear). Ids are checked at the
+command boundary. `AppState::with_notify_exe` sets the notify program (tests: the built
+binary, `CARGO_BIN_EXE_claude-graph`).
+
+**Tests:** unit tests in every `harness/*.rs`, `terminal/live.rs`, `hooks.rs`
+(`stops_turn`), `deliver_tests.rs` (`Expect::Gone`), `launch.rs` (notify parsing),
+`components_tests.rs` (splitting, targets, titles). `tests/e2e_harness.rs`: a chain
+survey(claude) → design(codex) → report(claude) through `scripts/fake-claude.mjs` and
+`scripts/fake-codex.mjs` (three sessions in order, brief form and upstream reply for the
+design and report nodes, the fake's early side-turn notify ignored, reply.md for each);
+a custom profile with `stop_mode: quiet`; `${MISSING_VAR}` failing the session with no
+process and no window; the notify helper with hostile payloads. `tests/real_harness.rs`
+(ignored): `real_codex`, `real_deepseek`.

@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 
 /// Current `graph.json` schema version.
 pub const GRAPH_VERSION: u32 = 1;
+/// Id of the default harness profile (Claude Code).
+pub const DEFAULT_HARNESS: &str = "claude";
+
+pub use crate::harness::profile::{HarnessCheck, HarnessKind, HarnessProfile, StopMode};
 
 /// Event name: full `RunState` whenever any node status changes.
 pub const EVENT_RUN_STATE: &str = "run:state";
@@ -58,6 +62,9 @@ pub struct Settings {
     pub claude_bin: Option<String>,
     /// How `start_run` runs the graph. Missing in older graph.json files: terminal.
     pub run_mode: RunMode,
+    /// Default harness profile id of the nodes (docs/ARCHITECTURE.md
+    /// "Harness profiles"). Missing in older graph.json files: `claude`.
+    pub harness: String,
 }
 
 /// `terminal`: one interactive Claude Code per connected component, in a
@@ -93,6 +100,7 @@ impl Default for Settings {
             default_permission_mode: PermissionMode::AcceptEdits,
             claude_bin: None,
             run_mode: RunMode::Terminal,
+            harness: DEFAULT_HARNESS.to_string(),
         }
     }
 }
@@ -190,6 +198,9 @@ pub struct Node {
     pub continue_session_of: Option<String>,
     #[serde(default)]
     pub extra_context: String,
+    /// Harness profile id; `None` = inherit `settings.harness`.
+    #[serde(default)]
+    pub harness: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,6 +378,14 @@ pub struct TerminalSession {
     pub pid: Option<u32>,
     /// Node whose message was sent last and has not finished.
     pub current_node: Option<String>,
+    /// Harness profile id the session runs. Missing in older run.json files: `claude`.
+    #[serde(default = "default_harness")]
+    pub harness: String,
+}
+
+/// Serde default of [`TerminalSession::harness`].
+pub fn default_harness() -> String {
+    DEFAULT_HARNESS.to_string()
 }
 
 /// Payload of the `pty:data` event.

@@ -22,6 +22,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::contract::NodeEventKind;
+use crate::terminal::live::Composer;
 use crate::terminal::message::Typed;
 use crate::terminal::screen::{normalize, Screen};
 
@@ -66,6 +67,10 @@ pub enum Expect {
     /// Any of these (lowercase) words in the output written since typing,
     /// not counting the echo of the typed text itself.
     Screen(Vec<String>),
+    /// A CLI without a submit hook (Codex, custom): the typed text is gone
+    /// from the input area and (a busy word showed since typing, or the
+    /// empty-box placeholder is gone).
+    Gone(Composer),
 }
 
 /// One message to deliver.
@@ -77,6 +82,8 @@ pub struct Delivery<'a> {
     pub title: &'a str,
     /// Prefix of this delivery's node events ("" for a node's message).
     pub label: &'a str,
+    /// No input box and no dialog on screen: type after this much quiet.
+    pub ready_quiet: Duration,
 }
 
 impl<'a> Delivery<'a> {
@@ -87,6 +94,16 @@ impl<'a> Delivery<'a> {
             cycles: PROMPT_CYCLES,
             title,
             label: "",
+            ready_quiet: FALLBACK_QUIET,
+        }
+    }
+
+    /// A prompt confirmed per `expect` (the harness's submit check).
+    pub fn prompt_with(typed: &'a Typed, title: &'a str, expect: Expect, ready: Duration) -> Self {
+        Self {
+            expect,
+            ready_quiet: ready,
+            ..Self::prompt(typed, title)
         }
     }
 
@@ -100,6 +117,7 @@ impl<'a> Delivery<'a> {
             cycles: SLASH_CYCLES,
             title,
             label: typed.text(),
+            ready_quiet: FALLBACK_QUIET,
         }
     }
 
@@ -137,6 +155,8 @@ pub trait Port {
     /// delivery of a session, so one dialog gets one notification).
     fn announced(&self) -> Option<u64>;
     fn set_announced(&mut self, mark: Option<u64>);
+    /// The CLI's input area per `c` (from the live screen's rows).
+    fn composer(&self, c: &Composer) -> Screen;
 }
 
 /// A dialog is on `screen`, not announced yet (no announcement, or dialog
@@ -153,7 +173,11 @@ pub fn dialog_due(
 }
 
 /// Wait until Claude Code shows its empty input box (see the module doc).
-pub async fn gate<P: Port + Send>(port: &mut P, title: &str) -> Result<(), Halt> {
+pub async fn gate<P: Port + Send>(
+    port: &mut P,
+    title: &str,
+    ready_quiet: Duration,
+) -> Result<(), Halt> {
     loop {
         let screen = port.screen();
         let quiet = port.quiet_for();
@@ -165,7 +189,7 @@ pub async fn gate<P: Port + Send>(port: &mut P, title: &str) -> Result<(), Halt>
             }
         } else {
             port.set_announced(None);
-            if (quiet >= QUIET && screen.idle()) || quiet >= FALLBACK_QUIET {
+            if (quiet >= QUIET && screen.idle()) || quiet >= ready_quiet {
                 return Ok(());
             }
         }
@@ -183,7 +207,7 @@ pub fn clear_keys(typed: &Typed) -> Vec<u8> {
 pub async fn deliver<P: Port + Send>(port: &mut P, d: &Delivery<'_>) -> Result<Outcome, Halt> {
     let text = d.typed.text();
     for cycle in 1..=d.cycles {
-        gate(port, d.title).await?;
+        gate(port, d.title, d.ready_quiet).await?;
         let mark = port.mark();
         if cycle > 1 {
             port.write(&clear_keys(d.typed))?;
@@ -203,7 +227,7 @@ pub async fn deliver<P: Port + Send>(port: &mut P, d: &Delivery<'_>) -> Result<O
             return Ok(submitted(port, d));
         }
         for press in 2..=ENTER_RETRIES + 1 {
-            if port.screen().dialog_open() || !port.since(mark).input_shows(text) {
+            if port.screen().dialog_open() || !still_typed(port, d, mark, text) {
                 break;
             }
             port.event(
@@ -222,7 +246,7 @@ pub async fn deliver<P: Port + Send>(port: &mut P, d: &Delivery<'_>) -> Result<O
 /// "submitted" (prompt) or "confirmed" (slash command on screen).
 fn submitted<P: Port>(port: &mut P, d: &Delivery<'_>) -> Outcome {
     let word = match d.expect {
-        Expect::Submit => "submitted",
+        Expect::Submit | Expect::Gone(_) => "submitted",
         Expect::Screen(_) => "confirmed",
     };
     port.event(NodeEventKind::Text, d.step(word));
@@ -245,6 +269,13 @@ async fn confirmed<P: Port + Send>(
                 let shown = port.since(mark).text().replace(&echo, " ");
                 words.iter().any(|w| shown.contains(w.as_str()))
             }
+            Expect::Gone(c) => {
+                let area = port.composer(c);
+                let shown = port.since(mark).text().replace(&echo, " ");
+                let busy = c.busy.iter().any(|w| shown.contains(w.as_str()));
+                let placeholder = c.placeholders.iter().any(|p| area.contains(p));
+                !area.shows_prefix(d.typed.text()) && (busy || !placeholder)
+            }
         };
         if ok {
             return Ok(true);
@@ -254,6 +285,15 @@ async fn confirmed<P: Port + Send>(
         }
         port.wait(POLL).await?;
         waited += POLL;
+    }
+}
+
+/// The typed text still shows where it was typed (the input area for
+/// [`Expect::Gone`], else after the last empty input box).
+fn still_typed<P: Port>(port: &P, d: &Delivery<'_>, mark: u64, text: &str) -> bool {
+    match &d.expect {
+        Expect::Gone(c) => port.composer(c).shows_prefix(text),
+        Expect::Submit | Expect::Screen(_) => port.since(mark).input_shows(text),
     }
 }
 

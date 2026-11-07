@@ -11,6 +11,7 @@ pub mod commands;
 pub mod contract;
 pub mod events;
 pub mod graph_util;
+pub mod harness;
 pub mod job;
 pub mod launch;
 pub mod paths;
@@ -61,6 +62,10 @@ pub fn run() {
         .manage(run_api::AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::check_claude,
+            commands::list_harnesses,
+            commands::save_harness,
+            commands::delete_harness,
+            commands::check_harness,
             commands::get_app_settings,
             commands::set_app_settings,
             commands::create_graph,

@@ -18,6 +18,8 @@ import {
   type AssistantState,
   type ClaudeCheck,
   type Graph,
+  type HarnessCheck,
+  type HarnessProfile,
   type LaunchOptions,
   type NodeEvent,
   type NodeMessage,
@@ -61,6 +63,18 @@ export const getAppSettings = (): Promise<AppSettings> => call('get_app_settings
 
 /** Validated by the backend (absolute local path to an existing claude file); rejects with invalid_input. */
 export const setAppSettings = (settings: AppSettings): Promise<AppSettings> => call('set_app_settings', { settings });
+
+/** Built-ins (with this machine's overrides), then custom profiles. */
+export const listHarnesses = (): Promise<HarnessProfile[]> => call('list_harnesses');
+
+/** Create or update a profile (a built-in id stores an override); rejects with invalid_input. Returns the new list. */
+export const saveHarness = (profile: HarnessProfile): Promise<HarnessProfile[]> => call('save_harness', { profile });
+
+/** Delete a custom profile (built-ins reject with invalid_input). Returns the new list. */
+export const deleteHarness = (id: string): Promise<HarnessProfile[]> => call('delete_harness', { id });
+
+/** Runs `<command> --version` with the profile env (10 s timeout). */
+export const checkHarness = (id: string): Promise<HarnessCheck> => call('check_harness', { id });
 
 export const graphTrustStatus = (dir: string): Promise<TrustStatus> => call('graph_trust_status', { dir });
 

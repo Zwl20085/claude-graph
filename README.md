@@ -103,6 +103,42 @@ Switch to **headless engine (advanced)** in the settings to get the one-process-
 scheduler described next: explicit model, permission mode and tool list per node,
 resource pools, streamed events and parsed results.
 
+## Harnesses: Claude Code, DeepSeek, Codex CLI, or your own
+
+A harness is the coding-agent CLI a session runs. Pick the graph's default under
+**Settings → Harness**, and override it per node in the Prompt tab. A chain is split into
+separate sessions wherever the harness changes; the next session gets the upstream
+deliverables and replies through its brief.
+
+Three are built in:
+
+| Id | What it runs |
+|----|--------------|
+| `claude` | Claude Code, as above. The default. |
+| `claude-deepseek` | Claude Code pointed at DeepSeek's Anthropic-compatible API. |
+| `codex` | OpenAI Codex CLI, with `--no-alt-screen`. |
+
+**The app stores no secrets.** An environment value may say `${VAR}`; the app reads that
+variable from its own environment when the session starts, and a missing variable fails
+the session with a clear message. The DeepSeek profile sets
+`ANTHROPIC_AUTH_TOKEN=${DEEPSEEK_API_KEY}`, so set `DEEPSEEK_API_KEY` before you start the
+app. For Codex and custom harnesses the node's Claude model is ignored; set the model in
+the profile.
+
+**Settings → Harness → Manage…** lists the profiles. Built-ins keep their name and kind,
+but their command, args, environment and model can be changed. A custom profile has:
+
+- a **command** (program path or name) and **args**, one per line;
+- **environment** lines `KEY=value`;
+- an **idle marker**: text on screen when the CLI waits for input;
+- **dialog markers**, one per line: texts that mean a dialog is open;
+- a **turn end**: output goes quiet for **quiet ms** (default 8000), Claude Code hooks, or
+  Codex notify.
+
+**Check** runs `<command> --version` with the profile's environment. Profiles live in the
+app data folder of this machine, never in `graph.json`. A graph that names a harness this
+machine does not have refuses to start and says which node asked for it.
+
 ## How the headless engine works (advanced)
 
 <p align="center">

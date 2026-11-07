@@ -1,9 +1,11 @@
 /** Graph settings (concurrency, resources, defaults) and per-machine app settings (claude path). */
 import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
-import { MODELS, PERMISSION_MODES, runModeOf, type RunMode, type Settings } from '../types/contract';
+import { harnessOf, MODELS, PERMISSION_MODES, runModeOf, type RunMode, type Settings } from '../types/contract';
 import { permissionLabel } from '../lib/status';
 import { IGNORED_CLAUDE_BIN_TEXT, useGraphStore } from '../store/graphStore';
+import { HarnessDialog } from './HarnessDialog';
+import { HarnessSelect } from './HarnessSelect';
 import { btnCls, errorCls, Field, Input, inputBoxCls, inputCls, NumberInput, Select, tagError } from './ui';
 
 function ResourcesTable({ resources, onChange }: { resources: Settings['resources']; onChange: (r: Settings['resources']) => void }) {
@@ -120,6 +122,22 @@ export function RunModeRadio({ value, onChange }: { value: RunMode; onChange: (m
   );
 }
 
+/** Graph default harness plus "Manage…" (the machine's profiles). */
+function HarnessField({ value, onChange }: { value: string; onChange: (harness: string) => void }) {
+  const [managing, setManaging] = useState(false);
+  return (
+    <Field label="Harness" hint="Nodes inherit this unless they pick their own.">
+      <div className="flex gap-1">
+        <HarnessSelect value={value} onChange={(h) => h !== null && onChange(h)} />
+        <button className={`${btnCls} shrink-0 border border-[#3c3c3c]`} onClick={() => setManaging(true)} aria-label="manage harnesses">
+          Manage…
+        </button>
+      </div>
+      {managing && <HarnessDialog onClose={() => setManaging(false)} />}
+    </Field>
+  );
+}
+
 export function SettingsPopover() {
   const settings = useGraphStore((s) => s.graph?.settings);
   const update = useGraphStore((s) => s.updateSettings);
@@ -132,6 +150,7 @@ export function SettingsPopover() {
     >
       <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[#d4d4d4]">Graph settings</h3>
       <RunModeRadio value={runModeOf(settings)} onChange={(run_mode) => update({ run_mode })} />
+      <HarnessField value={harnessOf(settings)} onChange={(harness) => update({ harness })} />
       <Field label="max_parallel">
         <NumberInput value={settings.max_parallel} min={1} onCommit={(n) => n !== null && update({ max_parallel: n })} />
       </Field>

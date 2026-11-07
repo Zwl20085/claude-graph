@@ -272,6 +272,7 @@ async fn kill_flag_cancels_a_running_turn() {
     let tmp = tempfile::tempdir().unwrap();
     // A brief with no deliverables; the delay keeps the fake running for a while.
     let spec = TurnSpec {
+        env: Vec::new(),
         run_id: "R".into(),
         node_id: "n".into(),
         claude: ClaudeCommand {
@@ -312,6 +313,7 @@ async fn kill_flag_cancels_a_running_turn() {
 async fn missing_working_dir_fails_without_spawning() {
     let tmp = tempfile::tempdir().unwrap();
     let spec = TurnSpec {
+        env: Vec::new(),
         run_id: "R".into(),
         node_id: "n".into(),
         claude: fake_claude(),
@@ -330,6 +332,7 @@ async fn missing_working_dir_fails_without_spawning() {
 
 fn spec_with(claude: ClaudeCommand, dir: &Path, stdin: &str, required: Vec<PathBuf>) -> TurnSpec {
     TurnSpec {
+        env: Vec::new(),
         run_id: "R".into(),
         node_id: "n".into(),
         claude,
@@ -483,6 +486,7 @@ async fn batch_shim_with_hostile_paths_never_executes_commands() {
     ];
     for args in cases {
         let spec = TurnSpec {
+            env: Vec::new(),
             run_id: "R".into(),
             node_id: "n".into(),
             claude: claude.clone(),

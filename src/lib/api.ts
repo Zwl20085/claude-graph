@@ -8,6 +8,8 @@ import type {
   AssistantState,
   ClaudeCheck,
   Graph,
+  HarnessCheck,
+  HarnessProfile,
   LaunchOptions,
   NodeEvent,
   NodeMessage,
@@ -29,6 +31,11 @@ export interface Api {
   checkClaude: () => Promise<ClaudeCheck>;
   getAppSettings: () => Promise<AppSettings>;
   setAppSettings: (settings: AppSettings) => Promise<AppSettings>;
+  // Harness profiles (HARNESS_CONTRACT): machine-local, built-ins first.
+  listHarnesses: () => Promise<HarnessProfile[]>;
+  saveHarness: (profile: HarnessProfile) => Promise<HarnessProfile[]>;
+  deleteHarness: (id: string) => Promise<HarnessProfile[]>;
+  checkHarness: (id: string) => Promise<HarnessCheck>;
   graphTrustStatus: (dir: string) => Promise<TrustStatus>;
   trustGraph: (dir: string) => Promise<void>;
   createGraph: (dir: string, name: string) => Promise<Graph>;

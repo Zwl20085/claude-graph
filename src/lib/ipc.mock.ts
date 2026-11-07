@@ -29,7 +29,8 @@ import { renderBrief } from './brief';
 import { defaultTimers, type Timers } from './debounce';
 import { emptyGraph } from './graphOps';
 import { createMockAssistant, MOCK_ASSISTANT_REPLY_MS } from './mockAssistant';
-import { createMockRunner, type MockRun } from './mockRunner';
+import { createMockHarnesses } from './mockHarness';
+import { createMockRunner, targetSet, type MockRun } from './mockRunner';
 import { createMockTerminal, MOCK_PTY_REPLY_MS, type MockChannel } from './mockTerminal';
 import { countStatuses } from './status';
 import { trustFingerprint, trustItems } from './trust';
@@ -116,6 +117,7 @@ export function createMockIpc(options: MockOptions = {}): Api {
   /** dir -> accepted fingerprint of the elevated fields (stand-in for trusted.json). */
   const trusted = new Map<string, string>();
   let appSettings: AppSettings = { claude_bin: null };
+  const harnesses = createMockHarnesses();
 
   const trustStatus = (dir: string) => {
     const items = trustItems(requireGraph(dir));
@@ -141,6 +143,7 @@ export function createMockIpc(options: MockOptions = {}): Api {
     timers: options.timers ?? defaultTimers,
     stepMs: options.stepMs ?? 600,
     now: options.now ?? (() => new Date()),
+    harnessLabel: (id) => harnesses.label(id),
     emitState: (s) => {
       stateListeners.forEach((h) => h(clone(s)));
       terminal.shareState(clone(s));
@@ -180,6 +183,15 @@ export function createMockIpc(options: MockOptions = {}): Api {
     return g;
   };
 
+  /** Target ids, or [] when the target cannot be resolved (runner.start then reports why). */
+  const knownTargets = (graph: Graph, target: RunTarget): string[] => {
+    try {
+      return targetSet(graph, target, (id) => runner.get(id)?.state);
+    } catch {
+      return [];
+    }
+  };
+
   const requireRun = (dir: string, runId: string): MockRun => {
     const run = runner.get(runId);
     if (!run || run.state.graph_dir !== dir) throw appError('not_found', `run ${runId} not found in ${dir}`);
@@ -200,6 +212,10 @@ export function createMockIpc(options: MockOptions = {}): Api {
       appSettings = { claude_bin: bin };
       return { ...appSettings };
     },
+    listHarnesses: async () => harnesses.list(),
+    saveHarness: async (profile) => harnesses.save(clone(profile)),
+    deleteHarness: async (id) => harnesses.remove(id),
+    checkHarness: async (id) => harnesses.check(id),
     graphTrustStatus: async (dir) => clone(trustStatus(dir)),
     trustGraph: async (dir) => {
       trusted.set(dir, trustFingerprint(trustStatus(dir).items));
@@ -226,7 +242,9 @@ export function createMockIpc(options: MockOptions = {}): Api {
     pickFolder: async (title) => (options.pickFolder ?? promptFolder)(title),
     startRun: async (dir, target: RunTarget) => {
       if (!trustStatus(dir).trusted) throw appError('untrusted_graph', 'graph has elevated settings that were not trusted');
-      return runner.start(dir, clone(requireGraph(dir)), target);
+      const graph = clone(requireGraph(dir));
+      harnesses.assertKnown(graph, knownTargets(graph, target));
+      return runner.start(dir, graph, target);
     },
     cancelRun: async (runId) => {
       if (!runner.get(runId)) throw appError('not_found', `run ${runId} not found`);

@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use super::*;
+use crate::terminal::live::composer_text;
 
 const BOX: &str = "\r\n\u{276f}\u{a0}";
 
@@ -145,6 +146,15 @@ impl Port for Cli {
 
     fn set_announced(&mut self, mark: Option<u64>) {
         self.announced = mark;
+    }
+
+    fn composer(&self, c: &Composer) -> Screen {
+        let rows: Vec<String> = self
+            .out
+            .split('\n')
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .collect();
+        Screen::of_all(&composer_text(&rows, c))
     }
 }
 
@@ -298,4 +308,34 @@ fn model_is_confirmed_on_screen_without_a_hook() {
 fn clear_keys_cover_every_line() {
     assert_eq!(clear_keys(&Typed::Line("a".into())).len(), 4);
     assert_eq!(clear_keys(&Typed::Paste("a\nb\nc".into())).len(), 8);
+}
+
+fn gone() -> Expect {
+    Expect::Gone(Composer {
+        glyph: Some('\u{276f}'),
+        rows: 2,
+        placeholders: vec!["try".into()],
+        busy: vec!["working".into()],
+    })
+}
+
+#[test]
+fn without_a_submit_hook_the_text_leaving_the_input_area_confirms() {
+    let mut cli = Cli::new();
+    let typed = Typed::Line(MSG.into());
+    let d = Delivery::prompt_with(&typed, "T", gone(), Duration::from_secs(3));
+    assert_eq!(run(&mut cli, &d), Ok(Outcome::Submitted));
+    assert_eq!(texts(&cli), ["typed", "submitted"]);
+    assert_eq!(cli.accepted, [MSG]);
+
+    let mut dropped = Cli::new();
+    dropped.drop_enter = true;
+    assert_eq!(run(&mut dropped, &d), Ok(Outcome::Submitted));
+    assert_eq!(texts(&dropped), ["typed", "enter again (2)", "submitted"]);
+
+    let mut deaf = Cli::new();
+    deaf.deaf = true;
+    let once = Delivery { cycles: 1, ..d };
+    assert_eq!(run(&mut deaf, &once), Ok(Outcome::NotSubmitted));
+    assert!(texts(&deaf).contains(&"enter again (4)"));
 }

@@ -11,6 +11,7 @@ fn info(sid: &str, nodes: &[&str]) -> TerminalSession {
         status: SessionStatus::Starting,
         pid: None,
         current_node: None,
+        harness: "claude".into(),
     }
 }
 

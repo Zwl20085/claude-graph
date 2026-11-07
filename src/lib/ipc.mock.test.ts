@@ -117,7 +117,7 @@ function await_node(id: string) {
   return {
     id, title: id, position: { x: 0, y: 0 }, prompt: 'p', goal: '', acceptance: '', scope_in: '', scope_out: '', already_known: '',
     deliverables: [], do_nots: [], model: 'inherit' as const, resources: [], permission_mode: 'inherit' as const,
-    allowed_tools: null, max_turns: null, working_dir: null, continue_session_of: null, extra_context: '',
+    allowed_tools: null, max_turns: null, working_dir: null, continue_session_of: null, extra_context: '', harness: null,
   };
 }
 

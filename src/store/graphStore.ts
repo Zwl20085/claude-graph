@@ -35,6 +35,7 @@ import type { Api } from '../lib/api';
 import { createDebouncer, defaultTimers, type Timers } from '../lib/debounce';
 import * as ops from '../lib/graphOps';
 import { isRunActive } from '../lib/status';
+import { createHarnessActions, INITIAL_HARNESSES, type HarnessActions, type HarnessState } from './harnessSlice';
 import {
   acceptsRunState,
   addDenial,
@@ -133,7 +134,7 @@ export interface GraphActions {
   dismissToast: (id: number) => void;
 }
 
-export type GraphStore = GraphState & GraphActions;
+export type GraphStore = GraphState & GraphActions & HarnessState & HarnessActions;
 
 const CLOSED: Pick<
   GraphState,
@@ -368,6 +369,8 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
 
     return {
       ...CLOSED,
+      ...INITIAL_HARNESSES,
+      ...createHarnessActions(api, set, pushToast),
       saving: false,
       startingRun: false,
       claude: { kind: 'checking' },
@@ -377,7 +380,7 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
       recent: [],
 
       init: async () => {
-        await Promise.all([get().refreshRecent(), get().checkClaude(), get().loadAppSettings()]);
+        await Promise.all([get().refreshRecent(), get().checkClaude(), get().loadAppSettings(), get().loadHarnesses()]);
         await get().launch();
       },
       launch: async () => {

@@ -7,7 +7,7 @@
  * content always comes from the graph (RF never edits node content).
  */
 import type { Edge as FlowEdge, Node as FlowNode } from '@xyflow/react';
-import { deniedTools, type Graph, type Node, type NodeStatus, type Position, type RunState } from '../types/contract';
+import { deniedTools, harnessOf, type Graph, type Node, type NodeStatus, type Position, type RunState } from '../types/contract';
 import { applyPositions } from './graphOps';
 
 export interface BriefNodeData extends Record<string, unknown> {
@@ -16,6 +16,8 @@ export interface BriefNodeData extends Record<string, unknown> {
   reason: string | null;
   /** Some tool call of this node was denied in the shown run. */
   denied: boolean;
+  /** Label of the node's own harness when it overrides the graph default; else null. */
+  harnessLabel: string | null;
 }
 export type BriefFlowNode = FlowNode<BriefNodeData, 'brief'>;
 
@@ -32,7 +34,13 @@ function statusOf(run: RunState | null, id: string): NodeStatus | null {
  * `liveDenied`: ids with a permission_denied event seen live in `run` (the
  * persisted `permission_denials` only fill in when a turn ends).
  */
-export function graphToFlowNodes(graph: Graph, run: RunState | null, liveDenied: ReadonlySet<string> = new Set()): BriefFlowNode[] {
+export function graphToFlowNodes(
+  graph: Graph,
+  run: RunState | null,
+  liveDenied: ReadonlySet<string> = new Set(),
+  labelOf: (harness: string) => string = (h) => h,
+): BriefFlowNode[] {
+  const graphHarness = harnessOf(graph.settings);
   return graph.nodes.map((node) => ({
     id: node.id,
     type: 'brief',
@@ -42,6 +50,7 @@ export function graphToFlowNodes(graph: Graph, run: RunState | null, liveDenied:
       status: statusOf(run, node.id),
       reason: run?.nodes[node.id]?.reason ?? null,
       denied: run !== null && (liveDenied.has(node.id) || deniedTools(run.nodes[node.id]).length > 0),
+      harnessLabel: node.harness !== null && node.harness !== graphHarness ? labelOf(node.harness) : null,
     },
   }));
 }

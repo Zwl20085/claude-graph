@@ -12,32 +12,63 @@ use chrono::{DateTime, Utc};
 use crate::contract::{AppResult, Node, NodeStatus};
 use crate::graph_util::upstream_map;
 use crate::prompt::{deliverables_display, display_dir, upstream_input};
-use crate::run_store::{append_log, node_run_dir, PROMPT_FILE, SUMMARY_FILE};
+use crate::run_store::{append_log, node_run_dir, PROMPT_FILE, RESULT_FILE, SUMMARY_FILE};
 use crate::runner::check_deliverables;
-use crate::store::{deliverables_dir, node_dir, write_atomic, write_json};
-use crate::terminal::message::{message_for, terminal_brief, Typed};
+use crate::store::{deliverables_dir, node_dir, read_optional, write_atomic, write_json};
+use crate::terminal::message::{brief_line, message_for, terminal_brief, Typed};
+use crate::terminal::reply::REPLY_FILE;
 use crate::terminal::TerminalNodeSummary;
 use crate::turns::RunCtx;
 
 /// Status word for an upstream node that did not run in this run.
 const NOT_RUN_HERE: &str = "not run in this run";
 
+/// What an upstream node in another session of this run left: its status
+/// (summary.json) and its reply (`reply.md`, else `result.md`).
+fn other_session(ctx: &RunCtx, up: &Node) -> (String, Option<String>) {
+    let dir = node_run_dir(&ctx.graph_dir, &ctx.run_id, &up.id);
+    let status = read_optional(&dir.join(SUMMARY_FILE))
+        .ok()
+        .flatten()
+        .and_then(|t| serde_json::from_str::<TerminalNodeSummary>(&t).ok())
+        .map_or(NOT_RUN_HERE.to_string(), |s| s.status.as_str().to_string());
+    let reply = [REPLY_FILE, RESULT_FILE]
+        .iter()
+        .find_map(|f| read_optional(&dir.join(f)).ok().flatten());
+    (status, reply)
+}
+
 /// Write the node's terminal brief (`nodes/<id>/brief.md`, copied to the run's
 /// `prompt.md`), create its deliverables folder, and return the message.
-/// `done`: statuses of the nodes this session already handled in this run.
-pub fn prepare(ctx: &RunCtx, node: &Node, done: &BTreeMap<String, NodeStatus>) -> AppResult<Typed> {
+/// `done`: statuses of the nodes this session already handled in this run;
+/// `session`: the session's nodes. An upstream node outside the session ran
+/// in another CLI: its reply goes into the brief (fenced as untrusted data)
+/// and the message is always the one-line "read the brief" form.
+pub fn prepare(
+    ctx: &RunCtx,
+    node: &Node,
+    done: &BTreeMap<String, NodeStatus>,
+    session: &[String],
+) -> AppResult<Typed> {
     let shown = display_dir(&ctx.graph_dir);
     let ups = upstream_map(&ctx.graph)
         .remove(&node.id)
         .unwrap_or_default();
+    let mut crossed = false;
     let upstream: Vec<_> = ctx
         .graph
         .nodes
         .iter()
         .filter(|n| ups.contains(&n.id))
         .map(|up| {
-            let status = done.get(&up.id).map_or(NOT_RUN_HERE, |s| s.as_str());
-            upstream_input(&shown, up, status, None)
+            if session.contains(&up.id) {
+                let status = done.get(&up.id).map_or(NOT_RUN_HERE, |s| s.as_str());
+                upstream_input(&shown, up, status, None)
+            } else {
+                crossed = true;
+                let (status, reply) = other_session(ctx, up);
+                upstream_input(&shown, up, &status, reply.as_deref())
+            }
         })
         .collect();
     let brief = terminal_brief(&shown, &ctx.graph, node, &upstream);
@@ -47,11 +78,12 @@ pub fn prepare(ctx: &RunCtx, node: &Node, done: &BTreeMap<String, NodeStatus>) -
     write_atomic(&run_dir.join(PROMPT_FILE), brief.as_bytes())?;
     std::fs::create_dir_all(deliverables_dir(&ctx.graph_dir, &node.id))?;
     let brief_shown = format!("{shown}/nodes/{}/brief.md", node.id);
-    Ok(message_for(
-        node,
-        &brief_shown,
-        &deliverables_display(&shown, &node.id),
-    ))
+    let deliverables = deliverables_display(&shown, &node.id);
+    Ok(if crossed {
+        brief_line(node, &brief_shown, &deliverables)
+    } else {
+        message_for(node, &brief_shown, &deliverables)
+    })
 }
 
 /// Required deliverables present and written since `started` (2 s slack):

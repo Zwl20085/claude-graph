@@ -28,7 +28,7 @@ pub enum Hook {
 
 impl Hook {
     fn parse(line: &str) -> Option<Hook> {
-        match line.trim() {
+        match line.split_whitespace().next().unwrap_or("") {
             "start" => Some(Hook::Start),
             "submit" => Some(Hook::Submit),
             "stop" => Some(Hook::Stop),
@@ -79,6 +79,12 @@ impl HookLog {
     /// Hooks appended since the last call. A missing file has no lines; a
     /// trailing line without its newline is left for the next poll.
     pub fn poll(&mut self) -> AppResult<Vec<Hook>> {
+        Ok(self.poll_lines()?.into_iter().map(|l| l.hook).collect())
+    }
+
+    /// [`HookLog::poll`] with each line's payload (the text after its word:
+    /// the Codex notify JSON written by `--notify`).
+    pub fn poll_lines(&mut self) -> AppResult<Vec<HookLine>> {
         let text = read_optional(&self.path)?.unwrap_or_default();
         let complete = match text.rfind('\n') {
             Some(i) => &text[..=i],
@@ -87,8 +93,60 @@ impl HookLog {
         let lines: Vec<&str> = complete.lines().collect();
         let new = lines.get(self.seen..).unwrap_or_default();
         self.seen = self.seen.max(lines.len());
-        Ok(new.iter().filter_map(|l| Hook::parse(l)).collect())
+        Ok(new
+            .iter()
+            .filter_map(|l| {
+                let hook = Hook::parse(l)?;
+                let payload = l
+                    .trim()
+                    .split_once(char::is_whitespace)
+                    .map(|(_, p)| p.trim());
+                Some(HookLine {
+                    hook,
+                    payload: payload.filter(|p| !p.is_empty()).map(str::to_string),
+                })
+            })
+            .collect())
     }
+}
+
+/// One parsed hooks.log line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookLine {
+    pub hook: Hook,
+    pub payload: Option<String>,
+}
+
+impl HookLine {
+    /// A `stop` that ends the turn whose typed text was `typed`: no payload,
+    /// a payload that is not a JSON object with `input-messages`, or one
+    /// whose input messages include `typed` (whitespace-insensitive). Codex
+    /// also notifies for side turns (its thread-title request), which carry
+    /// other input messages; those do not end the node's turn.
+    pub fn stops_turn(&self, typed: &str) -> bool {
+        if self.hook != Hook::Stop {
+            return false;
+        }
+        let Some(payload) = &self.payload else {
+            return true;
+        };
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return true,
+        };
+        let Some(inputs) = value.get("input-messages").and_then(|v| v.as_array()) else {
+            return true;
+        };
+        let want = squash(typed);
+        inputs
+            .iter()
+            .filter_map(|m| m.as_str())
+            .any(|m| squash(m) == want)
+    }
+}
+
+fn squash(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -129,5 +187,31 @@ mod tests {
             vec![Hook::Stop, Hook::Notify, Hook::Submit]
         );
         assert!(HookLog::at_end(path).poll().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_payloads_tell_the_main_turn_from_side_turns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(HOOKS_LOG);
+        let main = r#"{"type":"agent-turn-complete","input-messages":["Reply  with ok"]}"#;
+        let side = r#"{"type":"agent-turn-complete","input-messages":["Generate a title.\n\nUser prompt:\nReply with ok"]}"#;
+        std::fs::write(
+            &path,
+            format!("stop {side}\nstop {main}\nstop\nstop not json\n"),
+        )
+        .unwrap();
+        let lines = HookLog::new(path).poll_lines().unwrap();
+        assert_eq!(lines.len(), 4);
+        let stops: Vec<bool> = lines
+            .iter()
+            .map(|l| l.stops_turn("Reply with ok"))
+            .collect();
+        assert_eq!(stops, [false, true, true, true]);
+        assert_eq!(lines[1].payload.as_deref(), Some(main));
+        let submit = HookLine {
+            hook: Hook::Submit,
+            payload: None,
+        };
+        assert!(!submit.stops_turn("x"));
     }
 }

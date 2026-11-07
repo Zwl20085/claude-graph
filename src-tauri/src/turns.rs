@@ -8,12 +8,17 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
-use crate::claude_bin::ClaudeCommand;
+use crate::claude_bin::{ClaudeCommand, ResolveEnv};
 use crate::contract::{
-    AppError, AppResult, Graph, MessageRole, Node, NodeMessage, NodeStatus, NodeSummary, RunState,
+    AppError, AppResult, Graph, HarnessProfile, MessageRole, Node, NodeMessage, NodeStatus,
+    NodeSummary, RunState,
 };
 use crate::events::{dedup, Emitter};
 use crate::graph_util::{is_valid_session_id, upstream_map};
+use crate::harness::command::resolve_program;
+use crate::harness::effective;
+use crate::harness::env::EnvChanges;
+use crate::harness::headless::with_profile_model;
 use crate::prompt::{
     display_dir, render_brief, render_prompt, resolve_working_dir, upstream_input, UpstreamInput,
     INSTRUCTION,
@@ -37,6 +42,11 @@ pub struct RunCtx {
     pub run_id: String,
     pub claude: ClaudeCommand,
     pub emitter: Arc<dyn Emitter>,
+    /// Harness profiles of this machine at run start (built-ins merged with
+    /// overrides, then customs).
+    pub harnesses: Vec<HarnessProfile>,
+    /// The app binary, Codex's notify program (`<exe> --notify <hooks.log>`).
+    pub notify_exe: PathBuf,
 }
 
 impl RunCtx {
@@ -46,6 +56,33 @@ impl RunCtx {
             .iter()
             .find(|n| n.id == id)
             .ok_or_else(|| AppError::new("not_found", format!("no node {id:?} in the graph")))
+    }
+
+    /// The profile `id` (validated at run start).
+    pub fn harness(&self, id: &str) -> AppResult<&HarnessProfile> {
+        crate::harness::find(&self.harnesses, id).ok_or_else(|| {
+            AppError::new(
+                "invalid_input",
+                format!("harness {id} is not defined on this machine"),
+            )
+        })
+    }
+
+    /// The node's claude-kind profile env (expanded) and model, for the
+    /// headless engine.
+    fn headless_harness(&self, node: &Node) -> AppResult<(EnvChanges, Option<String>)> {
+        let profile = self.harness(effective(node, &self.graph.settings))?;
+        let env = crate::harness::env::process_env(profile)?;
+        Ok((env, profile.model.clone()))
+    }
+
+    /// The claude command of the node's profile (its own command, if set).
+    fn headless_claude(&self, node: &Node) -> AppResult<ClaudeCommand> {
+        let profile = self.harness(effective(node, &self.graph.settings))?;
+        match &profile.command {
+            Some(c) => resolve_program(c, &ResolveEnv::from_process(None)),
+            None => Ok(self.claude.clone()),
+        }
     }
 
     fn out_dir(&self, node_id: &str) -> PathBuf {
@@ -186,17 +223,23 @@ pub fn initial_turn(
         }),
         None => None,
     };
+    let (env, model) = ctx.headless_harness(node)?;
     Ok(TurnSpec {
         run_id: ctx.run_id.clone(),
         node_id: node_id.to_string(),
-        claude: ctx.claude.clone(),
-        args: build_args(
+        claude: ctx.headless_claude(node)?,
+        args: with_profile_model(
+            build_args(
+                node,
+                &ctx.graph.settings,
+                &ctx.graph_dir,
+                resume,
+                INSTRUCTION,
+            ),
             node,
-            &ctx.graph.settings,
-            &ctx.graph_dir,
-            resume,
-            INSTRUCTION,
+            model,
         ),
+        env,
         stdin_text: prompt,
         cwd: resolve_working_dir(&ctx.graph_dir, node),
         out_dir: ctx.out_dir(node_id),
@@ -219,17 +262,23 @@ pub fn followup_turn(
         session_id: checked_session(session_id)?,
         fork: false,
     };
+    let (env, model) = ctx.headless_harness(node)?;
     Ok(TurnSpec {
         run_id: ctx.run_id.clone(),
         node_id: node_id.to_string(),
-        claude: ctx.claude.clone(),
-        args: build_args(
+        claude: ctx.headless_claude(node)?,
+        args: with_profile_model(
+            build_args(
+                node,
+                &ctx.graph.settings,
+                &ctx.graph_dir,
+                Some(resume),
+                FOLLOWUP_INSTRUCTION,
+            ),
             node,
-            &ctx.graph.settings,
-            &ctx.graph_dir,
-            Some(resume),
-            FOLLOWUP_INSTRUCTION,
+            model,
         ),
+        env,
         stdin_text: text.to_string(),
         cwd: resolve_working_dir(&ctx.graph_dir, node),
         out_dir: ctx.out_dir(node_id),

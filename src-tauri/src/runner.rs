@@ -143,6 +143,9 @@ pub struct TurnSpec {
     pub node_id: String,
     pub claude: ClaudeCommand,
     pub args: Vec<String>,
+    /// Environment changes on top of the app's (a harness profile's expanded
+    /// env): `Some` sets, `None` removes. Values are never logged.
+    pub env: Vec<(String, Option<String>)>,
     pub stdin_text: String,
     pub cwd: PathBuf,
     /// `runs/<run>/<node>/`; events.jsonl and stderr.log are appended here.
@@ -275,6 +278,12 @@ pub async fn run_turn(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (k, v) in &spec.env {
+        match v {
+            Some(v) => cmd.env(k, v),
+            None => cmd.env_remove(k),
+        };
+    }
     #[cfg(unix)]
     cmd.process_group(0);
     let mut child = match cmd.spawn() {

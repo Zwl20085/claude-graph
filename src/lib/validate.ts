@@ -7,6 +7,7 @@
  * input is never mutated.
  */
 import {
+  DEFAULT_HARNESS,
   GRAPH_VERSION,
   MODELS,
   PERMISSION_MODES,
@@ -14,6 +15,7 @@ import {
   type Deliverable,
   type Edge,
   type Graph,
+  type HarnessProfile,
   type Model,
   type Node,
   type PermissionMode,
@@ -84,6 +86,7 @@ const DEFAULT_SETTINGS: Settings = {
   default_model: 'sonnet',
   default_permission_mode: 'acceptEdits',
   claude_bin: null,
+  harness: DEFAULT_HARNESS,
 };
 
 function parseSettings(v: unknown): Settings {
@@ -114,6 +117,8 @@ function parseSettings(v: unknown): Settings {
       DEFAULT_SETTINGS.default_permission_mode,
     ),
     claude_bin: optStr(o, 'claude_bin', 'settings'),
+    // Unknown ids load fine; the backend checks them at run start.
+    harness: optStr(o, 'harness', 'settings') ?? DEFAULT_HARNESS,
   };
 }
 
@@ -160,6 +165,7 @@ function parseNode(v: unknown, i: number): Node {
     working_dir: optStr(o, 'working_dir', where),
     continue_session_of: optStr(o, 'continue_session_of', where),
     extra_context: str(o, 'extra_context', where, ''),
+    harness: optStr(o, 'harness', where),
   };
 }
 
@@ -252,6 +258,47 @@ export function claudeBinError(path: string): string | null {
   const ext = dot > 0 ? file.slice(dot).toLowerCase() : '';
   if (stem === 'claude' || ((ext === '.exe' || ext === '.cmd') && stem.startsWith('claude'))) return null;
   return 'The file must be claude, claude.exe or claude.cmd.';
+}
+
+// ---------------------------------------------------------------------------
+// Harness profile rules (mirror of the backend's save_harness validation)
+// ---------------------------------------------------------------------------
+
+const HARNESS_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Harness id: lower-case letters, digits and '-', starting with a letter or digit, max 32. */
+export function harnessIdError(id: string): string | null {
+  return HARNESS_ID_RE.test(id)
+    ? null
+    : "Id must start with a lower-case letter or digit and use only a-z, 0-9 and '-' (max 32).";
+}
+
+/** Environment variable name, e.g. ANTHROPIC_BASE_URL. */
+export function envKeyError(key: string): string | null {
+  return ENV_KEY_RE.test(key) ? null : `"${key}" is not a variable name (letters, digits and '_', not starting with a digit).`;
+}
+
+/** Program path or name; null means the default program of the kind. */
+export function harnessCommandError(command: string | null): string | null {
+  if (command === null) return null;
+  if (command.trim() === '') return 'Command is empty.';
+  if (UNC_RE.test(command)) return 'Network (UNC) paths are not allowed.';
+  return null;
+}
+
+/** Profile fields the backend checks on save_harness. First violation, prefixed with the field name. */
+export function harnessProfileError(profile: HarnessProfile): string | null {
+  const custom = profile.kind === 'custom';
+  const checks: Array<[string, string | null]> = [
+    ['id', harnessIdError(profile.id)],
+    ['label', profile.label.trim() === '' ? 'Label is empty.' : null],
+    ['command', custom && profile.command === null ? 'A custom harness needs a command.' : harnessCommandError(profile.command)],
+    ['env', Object.keys(profile.env).map(envKeyError).find((e) => e !== null) ?? null],
+    ['quiet_ms', profile.quiet_ms !== null && !(Number.isInteger(profile.quiet_ms) && profile.quiet_ms > 0) ? 'Must be a positive whole number of ms.' : null],
+  ];
+  const hit = checks.find(([, err]) => err !== null);
+  return hit ? `${hit[0]}: ${hit[1]}` : null;
 }
 
 /** First rule violation of a node in its graph, prefixed with the field name. */

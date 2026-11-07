@@ -22,7 +22,7 @@ export function cardSummary(goal: string, prompt: string): string {
 }
 
 function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
-  const { node, status, reason, denied } = data;
+  const { node, status, reason, denied, harnessLabel } = data;
   const ring = ringStyle(status);
   const color = MODEL_COLORS[node.model];
   const empty = isEmptyNode(node);
@@ -41,6 +41,15 @@ function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
     >
       <div className="flex items-center gap-2 px-2 py-1" style={{ background: color }}>
         <span className="flex-1 truncate text-[13px] font-semibold text-white">{node.title || node.id}</span>
+        {harnessLabel !== null && (
+          <span
+            className="max-w-[110px] truncate rounded bg-black/40 px-1.5 text-[10px] text-white"
+            title={`Harness: ${harnessLabel}`}
+            aria-label={`harness ${harnessLabel}`}
+          >
+            {harnessLabel}
+          </span>
+        )}
         <span className="rounded bg-black/30 px-1.5 text-[10px] uppercase tracking-wide text-white">{node.model}</span>
       </div>
       <div className="space-y-1.5 px-2 py-2 text-[12px]">

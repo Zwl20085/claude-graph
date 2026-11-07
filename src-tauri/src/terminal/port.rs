@@ -13,6 +13,7 @@ use crate::events::Emitter;
 use crate::terminal::api::{session_closed, SessionShared};
 use crate::terminal::deliver::{deliver, Delivery, Halt, Outcome, Port, NOT_SUBMITTED};
 use crate::terminal::hooks::{Hook, HookLog, HOOKS_LOG};
+use crate::terminal::live::{composer_text, Composer};
 use crate::terminal::message::{one_line, Typed};
 use crate::terminal::pty::Pty;
 use crate::terminal::screen::Screen;
@@ -91,7 +92,11 @@ impl Port for PtyPort<'_> {
     }
 
     fn since(&self, mark: u64) -> Screen {
-        Screen::of_all(&self.pty.output.since(mark))
+        self.pty.output.screen_since(mark)
+    }
+
+    fn composer(&self, c: &Composer) -> Screen {
+        Screen::of_all(&composer_text(&self.pty.output.rows(), c))
     }
 
     fn submitted(&mut self) -> bool {
@@ -158,7 +163,9 @@ pub fn spawn_followup(
             run_id: session.run_id.clone(),
             node_id,
         };
-        match deliver(&mut port, &Delivery::prompt(&typed, &info.title)).await {
+        let (expect, ready) = session.delivery();
+        let delivery = Delivery::prompt_with(&typed, &info.title, expect, ready);
+        match deliver(&mut port, &delivery).await {
             Ok(Outcome::Submitted) => {}
             Ok(Outcome::NotSubmitted) => {
                 port.event(NodeEventKind::Stderr, NOT_SUBMITTED.to_string());
