@@ -2,3 +2,5 @@
 *.png binary
 *.ico binary
 *.icns binary
+# terminal transcripts: byte-exact, carriage returns matter to the emulator
+src-tauri/tests/fixtures/*.txt binary
