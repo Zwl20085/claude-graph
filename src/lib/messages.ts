@@ -1,5 +1,6 @@
 /** Pure logic of the Messages tab: merging history with locally sent text, composer rules. */
 import type { NodeMessage, NodeStatus } from '../types/contract';
+import { assertNever } from './status';
 
 export interface DisplayMessage extends NodeMessage {
   key: string;
@@ -78,9 +79,12 @@ export interface ComposerState {
 
 /** Whether the user may message a node, given its status in the shown run (null = not in it). */
 export function composerState(status: NodeStatus | null): ComposerState {
+  if (status === null) return { enabled: false, hint: 'Run the node first.' };
   switch (status) {
     case 'running':
       return { enabled: true, hint: 'Delivered after the current turn finishes.' };
+    case 'blocked':
+      return { enabled: true, hint: 'The node asked you something. Reply here; a DONE reply marks it succeeded.' };
     case 'succeeded':
     case 'failed':
     case 'cancelled':
@@ -88,8 +92,10 @@ export function composerState(status: NodeStatus | null): ComposerState {
     case 'pending':
     case 'queued':
       return { enabled: false, hint: 'Waiting for the node to start.' };
-    default:
+    case 'skipped':
       return { enabled: false, hint: 'Run the node first.' };
+    default:
+      return assertNever(status);
   }
 }
 

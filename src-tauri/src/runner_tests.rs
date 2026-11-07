@@ -89,6 +89,35 @@ fn inherit_everywhere_means_no_flag() {
 }
 
 #[test]
+fn claude_settings_passes_no_permission_flag() {
+    // On the node itself, whatever the graph default.
+    assert_eq!(
+        permission_flag(PermissionMode::ClaudeSettings, PermissionMode::AcceptEdits),
+        None
+    );
+    // Inherited from the graph default.
+    assert_eq!(
+        permission_flag(PermissionMode::Inherit, PermissionMode::ClaudeSettings),
+        None
+    );
+    // An explicit node mode still overrides a claude_settings default.
+    assert_eq!(
+        permission_flag(PermissionMode::Plan, PermissionMode::ClaudeSettings),
+        Some("plan")
+    );
+    let mut g = example();
+    g.settings.default_permission_mode = PermissionMode::ClaudeSettings;
+    let report = &g.nodes[2]; // permission_mode inherits
+    let args = build_args(report, &g.settings, Path::new("/g"), None, "i");
+    assert!(!args.contains(&"--permission-mode".to_string()), "{args:?}");
+    let mut node = report.clone();
+    node.permission_mode = PermissionMode::ClaudeSettings;
+    g.settings.default_permission_mode = PermissionMode::AcceptEdits;
+    let args = build_args(&node, &g.settings, Path::new("/g"), None, "i");
+    assert!(!args.contains(&"--permission-mode".to_string()), "{args:?}");
+}
+
+#[test]
 fn status_line_detection() {
     assert_eq!(
         final_status("x\n## Status: DONE"),
@@ -122,8 +151,29 @@ fn evaluation_rules() {
         &none,
         "",
     );
+    assert_eq!(s, NodeStatus::Blocked);
+    assert_eq!(r.as_deref(), Some("why"), "no 'agent reported' prefix");
+
+    let (s, r) = evaluate(
+        Some(0),
+        Some(&ok),
+        Some("Need input.\n## Status: BLOCKED\nWebSearch was denied.\nMay I use cached data?"),
+        &none,
+        "",
+    );
+    assert_eq!(s, NodeStatus::Blocked);
+    assert_eq!(
+        r.as_deref(),
+        Some("WebSearch was denied. May I use cached data?")
+    );
+    let (s, r) = evaluate(Some(0), Some(&ok), Some("## Status: BLOCKED"), &none, "");
+    assert_eq!(
+        (s, r.as_deref()),
+        (NodeStatus::Blocked, Some(BLOCKED_NO_REASON))
+    );
+    // A non-zero exit or an error result is a failure even with a BLOCKED line.
+    let (s, _) = evaluate(Some(1), Some(&ok), Some("## Status: BLOCKED\nx"), &none, "");
     assert_eq!(s, NodeStatus::Failed);
-    assert!(r.unwrap().contains("BLOCKED: why"));
 
     let (_, r) = evaluate(Some(0), Some(&ok), Some("hello"), &none, "");
     assert!(r.unwrap().contains("no '## Status: DONE'"));
@@ -237,6 +287,7 @@ async fn kill_flag_cancels_a_running_turn() {
         cwd: tmp.path().to_path_buf(),
         out_dir: tmp.path().join("out"),
         required: Vec::new(),
+        fresh_since: None,
     };
     let recorder = Arc::new(Recorder::default());
     let (tx, rx) = watch::channel(false);
@@ -269,6 +320,7 @@ async fn missing_working_dir_fails_without_spawning() {
         cwd: tmp.path().join("nope"),
         out_dir: tmp.path().join("out"),
         required: Vec::new(),
+        fresh_since: None,
     };
     let (_tx, rx) = watch::channel(false);
     let outcome = run_turn(spec, Arc::new(Recorder::default()), rx).await;
@@ -286,6 +338,7 @@ fn spec_with(claude: ClaudeCommand, dir: &Path, stdin: &str, required: Vec<PathB
         cwd: dir.to_path_buf(),
         out_dir: dir.join("out"),
         required,
+        fresh_since: None,
     }
 }
 
@@ -438,6 +491,7 @@ async fn batch_shim_with_hostile_paths_never_executes_commands() {
             cwd: graph.clone(),
             out_dir: graph.join("out"),
             required: Vec::new(),
+            fresh_since: None,
         };
         println!("spawn: {}", display_command(&spec));
         let (_tx, rx) = watch::channel(false);

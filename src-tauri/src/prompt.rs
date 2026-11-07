@@ -224,11 +224,28 @@ End your final message with exactly:\n\
 ## Status: DONE\n\
 (or `## Status: BLOCKED` followed by one paragraph on why.)\n";
 
+/// Line added right under `## Task` when the prompt starts with `/`.
+pub const SLASH_COMMAND_LINE: &str =
+    "The task starts with a slash command: load that skill first (Skill tool) and follow it.";
+
+/// `## Task` with the prompt (plus [`SLASH_COMMAND_LINE`] for a `/command`
+/// prompt); `None` for an empty prompt.
+fn render_task(prompt: &str) -> Option<String> {
+    let body = prompt.trim_end();
+    if body.trim().is_empty() {
+        None
+    } else if body.trim_start().starts_with('/') {
+        Some(format!("## Task\n{SLASH_COMMAND_LINE}\n{body}\n"))
+    } else {
+        Some(format!("## Task\n{body}\n"))
+    }
+}
+
 /// The brief for `node`. `graph_dir` is in display form (see [`display_dir`]).
 ///
-/// Structured node: header, inputs, optional `## Task` (the prompt), then the
-/// template sections. Simple node: header, inputs, `## Task`, optional extra
-/// context, finish. Without required deliverables the finish section only asks
+/// Structured node: header, optional `## Task` (the prompt), then the template
+/// sections (inputs among them). Simple (prompt-mode) node: header, `## Task`,
+/// inputs, optional extra context, finish. Without required deliverables the finish section only asks
 /// for the status line.
 pub fn render_brief(
     graph_dir: &str,
@@ -257,8 +274,7 @@ Working directory: {working_dir}\n",
         "## Inputs from upstream nodes\n{}\n",
         render_upstream(upstream)
     );
-    let task =
-        (!node.prompt.trim().is_empty()).then(|| format!("## Task\n{}\n", node.prompt.trim_end()));
+    let task = render_task(&node.prompt);
     let deliverable_items: Vec<String> = node
         .deliverables
         .iter()
@@ -276,8 +292,8 @@ Working directory: {working_dir}\n",
             .then(|| format!("## Extra context\n{}\n", node.extra_context.trim_end()));
         [
             Some(header),
-            Some(inputs),
             task.or(Some("## Task\nNone.\n".into())),
+            Some(inputs),
             extra,
         ]
         .into_iter()
@@ -390,6 +406,46 @@ mod tests {
         let brief = render_brief("/work/g", &g, &simple, &upstream);
         let expected = include_str!("../tests/fixtures/brief_simple.md");
         assert_eq!(brief, expected.replace("\r\n", "\n"));
+    }
+
+    #[test]
+    fn prompt_mode_brief_order_and_slash_command_line() {
+        let g = example();
+        let survey = g.nodes.iter().find(|n| n.id == "survey").unwrap();
+        let node = Node {
+            id: "s".into(),
+            prompt: "/model-tiering\nSurvey graph engineering.".into(),
+            extra_context: "Use English.".into(),
+            ..serde_json::from_value(serde_json::json!({ "id": "s" })).unwrap()
+        };
+        assert!(is_simple(&node));
+        let upstream = [upstream_input("/work/g", survey, "succeeded", Some("ok"))];
+        let brief = render_brief("/work/g", &g, &node, &upstream);
+        let at = |needle: &str| {
+            brief
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} in {brief}"))
+        };
+        assert!(at("Working directory: /work/g\n") < at("## Task\n"));
+        assert!(at("## Task\n") < at("## Inputs from upstream nodes\n"));
+        assert!(at("## Inputs from upstream nodes\n") < at("## Extra context\n"));
+        assert!(at("## Extra context\n") < at("## How to finish\n"));
+        assert!(brief.contains(&format!(
+            "## Task\n{SLASH_COMMAND_LINE}\n/model-tiering\nSurvey graph engineering.\n\n"
+        )));
+        // No slash, no line.
+        let plain = Node {
+            prompt: "Survey graph engineering.".into(),
+            ..node.clone()
+        };
+        let brief = render_brief("/work/g", &g, &plain, &[]);
+        assert!(!brief.contains(SLASH_COMMAND_LINE));
+        assert!(brief.contains("## Task\nSurvey graph engineering.\n\n## Inputs"));
+        // Structured briefs keep their order; the slash line applies there too.
+        let mut design = g.nodes.iter().find(|n| n.id == "design").unwrap().clone();
+        design.prompt = "/tdd".into();
+        let brief = render_brief("/work/g", &g, &design, &[]);
+        assert!(brief.contains(&format!("## Task\n{SLASH_COMMAND_LINE}\n/tdd\n\n## Goal\n")));
     }
 
     #[test]

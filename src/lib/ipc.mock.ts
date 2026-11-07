@@ -4,7 +4,8 @@
  * timers that emit the same `run:state` / `node:event` sequence the real
  * scheduler would (pending -> queued -> running -> succeeded|failed, failure
  * skips dependents, max_parallel respected). A node whose extra_context
- * contains FAKE_FAIL fails, like scripts/fake-claude.mjs.
+ * contains FAKE_FAIL fails, like scripts/fake-claude.mjs; a prompt with
+ * FAKE_BLOCKED ends blocked and one with FAKE_DENY reports a denied tool call.
  */
 import example from '../../examples/hello-pipeline/graph.json';
 import type {

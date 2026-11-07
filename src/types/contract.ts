@@ -22,14 +22,19 @@ export const MODELS = ['sonnet', 'opus', 'haiku', 'inherit'] as const;
 export type Model = (typeof MODELS)[number];
 
 export const PERMISSION_MODES = [
+  'claude_settings',
   'acceptEdits',
   'default',
   'plan',
-  'bypassPermissions',
   'dontAsk',
+  'bypassPermissions',
   'inherit',
 ] as const;
-/** `inherit` on a node means `settings.default_permission_mode`. */
+/**
+ * `inherit` on a node means `settings.default_permission_mode`.
+ * `claude_settings` passes no `--permission-mode` flag: the user's own Claude
+ * Code settings decide (the default of new graphs).
+ */
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
 export interface Settings {
@@ -111,6 +116,8 @@ export const NODE_STATUSES = [
   'running',
   'succeeded',
   'failed',
+  /** The agent ended with `## Status: BLOCKED` (asked the user something); scheduled like failed. */
+  'blocked',
   'skipped',
   'cancelled',
 ] as const;
@@ -126,8 +133,13 @@ export interface NodeRunState {
   session_id: string | null;
   cost_usd: number | null;
   num_turns: number | null;
-  /** Why a node failed / was skipped / was cancelled. */
+  /** Why a node failed / was blocked / was skipped / was cancelled. */
   reason: string | null;
+  /**
+   * Tool names the CLI denied, deduplicated, first-seen order. Rust fills it
+   * with serde default; treat a missing value as [] (see `deniedTools`).
+   */
+  permission_denials?: string[];
 }
 
 /** Content of runs/<run-id>/run.json and payload of `run:state`. */
@@ -162,6 +174,8 @@ export interface NodeSummary {
   num_turns: number | null;
   is_error: boolean;
   status: NodeStatus;
+  /** Same as NodeRunState.permission_denials; missing = []. */
+  permission_denials?: string[];
 }
 
 /** Return value of `read_node_result`. */
@@ -181,6 +195,8 @@ export const NODE_EVENT_KINDS = [
   'stderr',
   'parse_error',
   'user_message',
+  /** A tool call the CLI denied; text = tool name plus a short input summary. */
+  'permission_denied',
 ] as const;
 export type NodeEventKind = (typeof NODE_EVENT_KINDS)[number];
 
@@ -272,6 +288,14 @@ export function isAppError(value: unknown): value is AppError {
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isNullableString = (v: unknown): boolean => v === null || typeof v === 'string';
+const isOptionalStringArray = (v: unknown): boolean =>
+  v === undefined || (Array.isArray(v) && v.every((x) => typeof x === 'string'));
+
+/** Denied tool names of a node state or summary; [] when missing or malformed. */
+export function deniedTools(n: { permission_denials?: unknown } | null | undefined): string[] {
+  const v = n?.permission_denials;
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
 
 /** Shape check of a RunState payload (event or command reply) before it enters the store. */
 export function isRunState(value: unknown): value is RunState {
@@ -280,7 +304,11 @@ export function isRunState(value: unknown): value is RunState {
   if (typeof run_id !== 'string' || typeof graph_dir !== 'string' || typeof started_at !== 'string') return false;
   if (!isNullableString(finished_at) || !(RUN_STATUSES as readonly unknown[]).includes(status) || !isObject(nodes)) return false;
   return Object.values(nodes).every(
-    (n) => isObject(n) && (NODE_STATUSES as readonly unknown[]).includes(n.status) && isNullableString(n.reason ?? null),
+    (n) =>
+      isObject(n) &&
+      (NODE_STATUSES as readonly unknown[]).includes(n.status) &&
+      isNullableString(n.reason ?? null) &&
+      isOptionalStringArray(n.permission_denials),
   );
 }
 

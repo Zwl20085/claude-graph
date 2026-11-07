@@ -7,8 +7,11 @@
 // (system init, assistant text, assistant tool_use Write, user tool_result,
 // assistant final text, result), and writes a stub for every deliverable listed
 // under "## Deliverables (required)" into the deliverables folder named in the
-// prompt. If the prompt contains FAKE_FAIL the final text ends with
-// "## Status: BLOCKED" (exit code still 0).
+// prompt. Prompt markers (node mode): FAKE_BLOCKED ends the final text with
+// "## Status: BLOCKED" and a question line (exit code 0); FAKE_FAIL ends with an
+// error result and exit code 1 (a real failure); FAKE_DENY adds a WebSearch
+// tool_use, the CLI's `system`/`permission_denied` event for it, and a
+// `permission_denials` entry in the result.
 //
 // `--version` prints a version line and exits. Optional env FAKE_CLAUDE_DELAY_MS
 // (or arg `--fake-delay-ms N`) adds a pause between lines (useful to watch or
@@ -87,7 +90,7 @@ function safeJoin(root, rel) {
 async function main() {
   if (process.argv.includes('--version')) {
     process.stdout.write(`${VERSION}\n`);
-    return;
+    return 0;
   }
   const started = Date.now();
   const prompt = await readStdin();
@@ -103,11 +106,13 @@ async function main() {
   }
   if ((argValue('-p') ?? '').startsWith(SCHEDULER_PREFIX)) {
     await scheduler(prompt, sessionId, started);
-    return;
+    return 0;
   }
   const model = argValue('--model') ?? 'sonnet';
   const cwd = process.cwd();
   const fail = prompt.includes('FAKE_FAIL');
+  const blocked = prompt.includes('FAKE_BLOCKED');
+  const deny = prompt.includes('FAKE_DENY');
   const dir = findDeliverablesDir(prompt);
   const deliverables = findDeliverables(prompt);
   const base = { session_id: sessionId, parent_tool_use_id: null };
@@ -132,6 +137,7 @@ async function main() {
     },
   });
 
+  const denials = deny ? await deniedSearch(base, sessionId) : [];
   const written = [];
   for (const d of deliverables) {
     const target = dir ? safeJoin(dir, d.path) : null;
@@ -163,10 +169,25 @@ async function main() {
 
   const list = written.map((d) => `- ${d.path} — ${d.description || 'stub'}`).join('\n');
   const noStatus = prompt.includes('FAKE_NO_STATUS');
+  if (fail) {
+    const duration = Date.now() - started;
+    await emit({
+      type: 'result',
+      subtype: 'error_during_execution',
+      session_id: sessionId,
+      is_error: true,
+      errors: ['FAKE_FAIL was present in the prompt'],
+      num_turns: 1 + written.length,
+      duration_ms: duration,
+      total_cost_usd: 0.0123,
+      permission_denials: denials,
+    });
+    return 1;
+  }
   const finalText = noStatus
     ? 'Answered the message without a status line.'
-    : fail
-    ? `Could not finish.\n\n## Deliverables\n${list}\n## Status: BLOCKED\nFAKE_FAIL was present in the prompt, so this fake run reports BLOCKED.`
+    : blocked
+    ? `Could not finish.\n\n## Deliverables\n${list}\n## Status: BLOCKED\nFAKE_BLOCKED was present in the prompt.\nMay I continue without web access? (yes / no)`
     : `All deliverables written.\n\n## Deliverables\n${list}\n## Status: DONE`;
   await emit({
     type: 'assistant',
@@ -188,8 +209,29 @@ async function main() {
     total_cost_usd: 0.0123,
     usage: {},
     modelUsage: {},
-    permission_denials: [],
+    permission_denials: denials,
   });
+  return 0;
+}
+
+/** FAKE_DENY: a WebSearch call the CLI refuses, streamed as the real CLI does. */
+async function deniedSearch(base, sessionId) {
+  const id = 'toolu_fake_denied_search';
+  const input = { query: 'fake denied search', mode: 'standard' };
+  const message = "Claude requested permissions to use WebSearch, but you haven't granted it yet.";
+  await emit({
+    type: 'assistant',
+    ...base,
+    message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'WebSearch', input }], stop_reason: 'tool_use' },
+  });
+  await emit({ type: 'system', subtype: 'permission_denied', tool_name: 'WebSearch', tool_use_id: id, message, session_id: sessionId });
+  await emit({
+    type: 'user',
+    session_id: sessionId,
+    parent_tool_use_id: null,
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: message, is_error: true }] },
+  });
+  return [{ tool_name: 'WebSearch', tool_use_id: id, tool_input: input }];
 }
 
 /** Scheduler mode: see the header comment. */
@@ -273,8 +315,8 @@ async function scheduler(prompt, sessionId, started) {
 }
 
 main().then(
-  () => {
-    process.exitCode = 0;
+  (code) => {
+    process.exitCode = code ?? 0;
   },
   (err) => {
     process.stderr.write(`fake-claude: ${err?.stack ?? err}\n`);

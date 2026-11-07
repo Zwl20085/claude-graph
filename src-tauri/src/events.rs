@@ -6,6 +6,8 @@
 //! the final assistant text. Unknown types are ignored; malformed lines become
 //! `parse_error` events and never fail the run.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use crate::contract::{
@@ -16,6 +18,10 @@ use crate::contract::{
 const TOOL_INPUT_MAX: usize = 200;
 const TOOL_RESULT_MAX: usize = 500;
 const BAD_LINE_MAX: usize = 200;
+/// Input summary of a denied tool call is cut to this many chars.
+const DENIED_INPUT_MAX: usize = 120;
+/// Input fields summarised for a denied tool call, first present wins.
+const DENIED_INPUT_FIELDS: [&str; 3] = ["command", "query", "file_path"];
 
 /// Sink for backend → frontend events. Tauri implements it in the app; tests
 /// use a recorder.
@@ -63,8 +69,17 @@ pub struct ResultInfo {
     pub cost_usd: Option<f64>,
     pub num_turns: Option<u32>,
     pub duration_ms: Option<u64>,
-    /// Tool names from `permission_denials` (tools the CLI refused without asking).
+    /// Tool names from `permission_denials` (tools the CLI refused without
+    /// asking), deduplicated, in first-seen order.
     pub permission_denials: Vec<String>,
+}
+
+/// A `tool_use` block remembered by id, so a later `permission_denied` event
+/// can name the tool and summarise its input.
+#[derive(Debug, Clone, Default)]
+struct ToolCall {
+    name: String,
+    input_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -74,6 +89,9 @@ pub struct StreamAccumulator {
     model: Option<String>,
     last_assistant_text: Option<String>,
     result: Option<ResultInfo>,
+    tool_calls: HashMap<String, ToolCall>,
+    /// Tools named by live `permission_denied` events, deduplicated.
+    denied: Vec<String>,
 }
 
 impl StreamAccumulator {
@@ -101,12 +119,14 @@ impl StreamAccumulator {
             self.session_id = Some(sid);
         }
         match value.get("type").and_then(Value::as_str) {
-            Some("system") => {
-                if value.get("subtype").and_then(Value::as_str) == Some("init") {
+            Some("system") => match value.get("subtype").and_then(Value::as_str) {
+                Some("permission_denied") => vec![self.permission_denied(&value)],
+                Some("init") => {
                     self.model = str_field(&value, "model").or(self.model.take());
+                    system_event(&value).into_iter().collect()
                 }
-                system_event(&value).into_iter().collect()
-            }
+                _ => system_event(&value).into_iter().collect(),
+            },
             Some("assistant") => self.assistant_events(&value),
             Some("user") => user_events(&value),
             Some("result") => {
@@ -135,6 +155,53 @@ impl StreamAccumulator {
         self.model.as_deref()
     }
 
+    /// Denied tool names: the result's `permission_denials` then any tool seen
+    /// only in a live `permission_denied` event; deduplicated, first-seen order.
+    pub fn denied_tools(&self) -> Vec<String> {
+        let from_result = self
+            .result
+            .iter()
+            .flat_map(|r| r.permission_denials.iter().cloned());
+        dedup(from_result.chain(self.denied.iter().cloned()))
+    }
+
+    /// `{"type":"system","subtype":"permission_denied","tool_name","tool_use_id",…}`
+    /// becomes `Tool: "input summary…"`. The name and input come from the event
+    /// when present, else from the `tool_use` with the same id.
+    fn permission_denied(&mut self, value: &Value) -> (NodeEventKind, String) {
+        let call = value
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .and_then(|id| self.tool_calls.get(id));
+        let name = str_field(value, "tool_name")
+            .filter(|n| !n.trim().is_empty())
+            .or_else(|| call.map(|c| c.name.clone()))
+            .unwrap_or_else(|| "?".to_string());
+        let summary = value
+            .get("tool_input")
+            .and_then(input_summary)
+            .or_else(|| call.and_then(|c| c.input_summary.clone()));
+        if name != "?" && !self.denied.contains(&name) {
+            self.denied.push(name.clone());
+        }
+        let text = match summary {
+            Some(s) => format!("{name}: \"{s}\""),
+            None => name,
+        };
+        (NodeEventKind::PermissionDenied, text)
+    }
+
+    fn remember_tool_call(&mut self, block: &Value) {
+        let Some(id) = block.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let call = ToolCall {
+            name: str_field(block, "name").unwrap_or_default(),
+            input_summary: block.get("input").and_then(input_summary),
+        };
+        self.tool_calls.insert(id.to_string(), call);
+    }
+
     /// Text blocks of the last top-level assistant message; falls back to `result.result`.
     pub fn final_text(&self) -> Option<String> {
         self.last_assistant_text
@@ -146,6 +213,10 @@ impl StreamAccumulator {
     fn assistant_events(&mut self, value: &Value) -> Vec<(NodeEventKind, String)> {
         let blocks = content_blocks(value);
         let top_level = value.get("parent_tool_use_id").map_or(true, Value::is_null);
+        blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .for_each(|b| self.remember_tool_call(b));
         if top_level {
             let text: Vec<&str> = blocks
                 .iter()
@@ -171,6 +242,26 @@ impl StreamAccumulator {
             })
             .collect()
     }
+}
+
+/// First [`DENIED_INPUT_MAX`] chars of the command / query / file_path field.
+fn input_summary(input: &Value) -> Option<String> {
+    DENIED_INPUT_FIELDS
+        .iter()
+        .find_map(|k| input.get(*k).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| truncate_chars(s, DENIED_INPUT_MAX))
+}
+
+/// Drop repeats, keeping the first occurrence of each item.
+pub fn dedup<I: IntoIterator<Item = String>>(items: I) -> Vec<String> {
+    items.into_iter().fold(Vec::new(), |mut acc, item| {
+        if !acc.contains(&item) {
+            acc.push(item);
+        }
+        acc
+    })
 }
 
 fn content_blocks(value: &Value) -> Vec<Value> {
@@ -268,21 +359,20 @@ fn parse_result(value: &Value) -> ResultInfo {
     }
 }
 
-/// Tool names of `permission_denials` entries (`{tool_name, …}` objects, or plain strings).
+/// Tool names of `permission_denials` entries (`{tool_name, …}` objects, or
+/// plain strings), deduplicated in first-seen order.
 fn permission_denials(value: &Value) -> Vec<String> {
-    value
+    let names = value
         .get("permission_denials")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|d| match d {
-                    Value::String(s) => Some(s.clone()),
-                    other => str_field(other, "tool_name"),
-                })
-                .filter(|t| !t.trim().is_empty())
-                .collect()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| match d {
+            Value::String(s) => Some(s.clone()),
+            other => str_field(other, "tool_name"),
         })
-        .unwrap_or_default()
+        .filter(|t| !t.trim().is_empty());
+    dedup(names)
 }
 
 fn result_text(info: &ResultInfo) -> String {
@@ -451,6 +541,57 @@ mod tests {
             ev,
             vec![(NodeEventKind::ToolResult, "error: denied".into())]
         );
+    }
+
+    /// Two real lines from a CLI run (claude-graph-try, run 20261107T174802Z):
+    /// the WebSearch `tool_use` and the `permission_denied` that followed it.
+    const REAL_DENIAL: &str = include_str!("../tests/fixtures/permission_denied.jsonl");
+
+    #[test]
+    fn real_permission_denied_line_becomes_a_denied_event() {
+        let mut lines = REAL_DENIAL.lines();
+        let (tool_use, denied) = (lines.next().unwrap(), lines.next().unwrap());
+        assert!(denied.contains(r#""subtype":"permission_denied""#));
+        let mut acc = StreamAccumulator::new();
+        let ev = acc.feed(tool_use);
+        assert_eq!(ev[0].0, NodeEventKind::ToolUse);
+        let ev = acc.feed(denied);
+        assert_eq!(
+            ev,
+            vec![(
+                NodeEventKind::PermissionDenied,
+                "WebSearch: \"graph engineering LLM agent workflows graph-based orchestration LangGraph state of the art 2026\""
+                    .to_string()
+            )]
+        );
+        assert_eq!(acc.denied_tools(), vec!["WebSearch"]);
+        // Without the preceding tool_use: tool name only.
+        let mut fresh = StreamAccumulator::new();
+        assert_eq!(
+            fresh.feed(denied),
+            vec![(NodeEventKind::PermissionDenied, "WebSearch".to_string())]
+        );
+    }
+
+    #[test]
+    fn denied_event_without_tool_name_uses_the_tool_use_and_cuts_long_input() {
+        let mut acc = StreamAccumulator::new();
+        let long = "x".repeat(300);
+        acc.feed(&format!(
+            r#"{{"type":"assistant","parent_tool_use_id":null,"message":{{"content":[{{"type":"tool_use","id":"t9","name":"Bash","input":{{"command":"{long}"}}}}]}}}}"#
+        ));
+        let ev = acc.feed(r#"{"type":"system","subtype":"permission_denied","tool_use_id":"t9"}"#);
+        assert_eq!(ev[0].0, NodeEventKind::PermissionDenied);
+        assert_eq!(ev[0].1, format!("Bash: \"{}…\"", "x".repeat(120)));
+        let ev =
+            acc.feed(r#"{"type":"system","subtype":"permission_denied","tool_use_id":"nope"}"#);
+        assert_eq!(ev[0].1, "?");
+        acc.feed(r#"{"type":"result","subtype":"success","is_error":false,"permission_denials":[{"tool_name":"Write"},{"tool_name":"Bash"},{"tool_name":"Write"}]}"#);
+        assert_eq!(
+            acc.result().unwrap().permission_denials,
+            vec!["Write", "Bash"]
+        );
+        assert_eq!(acc.denied_tools(), vec!["Write", "Bash"]);
     }
 
     #[test]

@@ -2,7 +2,9 @@
 import { useEffect, useState } from 'react';
 import { Eye } from 'lucide-react';
 import type { Node } from '../types/contract';
+import { STATUS_COLORS } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
+import { idIsEditable } from '../store/runHelpers';
 import { BriefForm } from './BriefForm';
 import { MessagesTab } from './MessagesTab';
 import { PreviewModal } from './PreviewModal';
@@ -13,9 +15,26 @@ import { btnCls, inputCls } from './ui';
 const TABS = ['Prompt', 'Brief (recommended)', 'Messages', 'Results'] as const;
 type Tab = (typeof TABS)[number];
 
+export const ID_HINT = 'Follows the title until you edit it, or until the node has run.';
+export const BLOCKED_TEXT =
+  'This node stopped and asked you something. Read its reply and answer in the Messages tab; a DONE reply will mark it succeeded.';
+
+/** Shown while the selected node is blocked in the shown run. */
+function BlockedBanner({ onOpenMessages }: { onOpenMessages: () => void }) {
+  const color = STATUS_COLORS.blocked;
+  return (
+    <div role="status" aria-label="node blocked" className="space-y-1 rounded border px-2 py-1.5 text-[12px]" style={{ borderColor: color, color }}>
+      <p>{BLOCKED_TEXT}</p>
+      <button className={`${btnCls} border`} style={{ borderColor: color }} onClick={onOpenMessages} aria-label="open Messages">
+        Open Messages
+      </button>
+    </div>
+  );
+}
+
 /** Id editor: the typed text and its error stay visible until fixed (Escape reverts). */
 function IdField({ node }: { node: Node }) {
-  const fresh = useGraphStore((s) => s.freshNodeIds.includes(node.id));
+  const fresh = useGraphStore((s) => idIsEditable(s, node.id));
   const rename = useGraphStore((s) => s.renameNodeId);
   const [draft, setDraft] = useState(node.id);
   const [error, setError] = useState<string | null>(null);
@@ -48,6 +67,7 @@ function IdField({ node }: { node: Node }) {
           }
         }}
       />
+      {fresh && <p className="mt-0.5 text-[11px] text-[#8a8a8a]">{ID_HINT}</p>}
       {error && <p role="alert" className="mt-0.5 text-[11px] text-[#ef4444]">{error}</p>}
     </div>
   );
@@ -55,7 +75,8 @@ function IdField({ node }: { node: Node }) {
 
 export function Inspector() {
   const node = useGraphStore((s) => s.graph?.nodes.find((n) => n.id === s.selectedNodeId) ?? null);
-  const update = useGraphStore((s) => s.updateNode);
+  const setTitle = useGraphStore((s) => s.setTitle);
+  const blocked = useGraphStore((s) => node !== null && s.runState?.nodes[node.id]?.status === 'blocked');
   const [tab, setTab] = useState<Tab>('Prompt');
   const [previewOpen, setPreviewOpen] = useState(false);
 
@@ -71,9 +92,10 @@ export function Inspector() {
           value={node.title}
           placeholder="Title"
           aria-label="Node title"
-          onChange={(e) => update(node.id, { title: e.target.value })}
+          onChange={(e) => setTitle(node.id, e.target.value)}
         />
         <IdField key={node.id} node={node} />
+        {blocked && <BlockedBanner onOpenMessages={() => setTab('Messages')} />}
       </div>
       <div className="flex border-b border-[#3c3c3c] text-[12px]" role="tablist" aria-label="Node editor">
         {TABS.map((t) => (

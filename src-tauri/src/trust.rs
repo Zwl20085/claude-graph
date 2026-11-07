@@ -49,6 +49,7 @@ fn mode_item(node_id: Option<&str>, mode: PermissionMode) -> Option<TrustItem> {
         PermissionMode::AcceptEdits
         | PermissionMode::Default
         | PermissionMode::Plan
+        | PermissionMode::ClaudeSettings
         | PermissionMode::Inherit => return None,
     };
     let detail = match node_id {

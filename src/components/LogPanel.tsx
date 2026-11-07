@@ -22,8 +22,13 @@ const KIND_COLORS: Record<NodeEventKind | 'raw', string> = {
   result: '#22c55e',
   parse_error: '#ef4444',
   user_message: '#60a5fa',
+  permission_denied: '#f59e0b',
   raw: '#6b7280',
 };
+/** Column label of a line kind (default: the kind itself). */
+export function kindLabel(kind: NodeEventKind): string {
+  return kind === 'permission_denied' ? 'DENIED' : kind;
+}
 const STICK_PX = 24;
 const EMPTY: readonly LogLine[] = [];
 
@@ -109,9 +114,14 @@ export function LogPanel({ scheduler = false }: LogPanelProps) {
         {lines.map((l) => (
           <div key={l.seq} className="flex gap-2">
             <span className="w-[84px] shrink-0 text-right text-[10px] uppercase" style={{ color: KIND_COLORS[l.kind] }}>
-              {l.kind}
+              {kindLabel(l.kind)}
             </span>
-            <span className="whitespace-pre-wrap break-all">{l.text}</span>
+            <span
+              className="whitespace-pre-wrap break-all"
+              style={l.kind === 'permission_denied' ? { color: KIND_COLORS.permission_denied } : undefined}
+            >
+              {l.text}
+            </span>
           </div>
         ))}
         {lines.length === 0 &&

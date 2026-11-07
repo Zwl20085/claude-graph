@@ -3,7 +3,7 @@ import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { BriefFlowNode } from '../lib/flow';
 import { isEmptyNode } from '../lib/graphOps';
-import { MODEL_COLORS, ringStyle } from '../lib/status';
+import { MODEL_COLORS, ringStyle, statusLabel } from '../lib/status';
 
 export const NODE_WIDTH = 260;
 
@@ -22,7 +22,7 @@ export function cardSummary(goal: string, prompt: string): string {
 }
 
 function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
-  const { node, status, reason } = data;
+  const { node, status, reason, denied } = data;
   const ring = ringStyle(status);
   const color = MODEL_COLORS[node.model];
   const empty = isEmptyNode(node);
@@ -46,7 +46,7 @@ function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
       <div className="space-y-1.5 px-2 py-2 text-[12px]">
         <div className="flex items-center gap-1 text-[10px] text-[#8a8a8a]">
           <span className="font-mono">{node.id}</span>
-          {status && <span className="ml-auto" style={{ color: ring.borderColor }}>{status}</span>}
+          {status && <span className="ml-auto" style={{ color: ring.borderColor }}>{statusLabel(status)}</span>}
           {empty && <span className="ml-auto rounded bg-[#f59e0b] px-1 font-semibold text-black">empty</span>}
         </div>
         <p className="line-clamp-2 whitespace-pre-line text-[#c8c8c8]">
@@ -58,8 +58,17 @@ function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
               {r}
             </span>
           ))}
+          {denied && (
+            <span
+              className="ml-auto rounded bg-[#f59e0b]/20 px-1 text-[10px] text-[#f59e0b]"
+              title="A tool call of this node was denied in the shown run. See the Results tab."
+              aria-label="tool call denied"
+            >
+              denied
+            </span>
+          )}
           {node.deliverables.length > 0 && (
-            <span className="ml-auto text-[10px] text-[#9a9a9a]">
+            <span className={`${denied ? '' : 'ml-auto '}text-[10px] text-[#9a9a9a]`}>
               {node.deliverables.length} deliverable{node.deliverables.length === 1 ? '' : 's'}
             </span>
           )}

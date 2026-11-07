@@ -81,7 +81,7 @@ Scaffold pins (2026-11-07): React 18.3, Tailwind 3.4 (PostCSS), Vite 6.4,
   "do_nots": ["Do not install packages", "Do not touch tests"],
   "model": "sonnet" | "opus" | "haiku" | "inherit",
   "resources": ["cpu"],                   // any of cpu, memory, gpu, exclusive, or free text tags
-  "permission_mode": "acceptEdits" | "default" | "plan" | "bypassPermissions" | "inherit",
+  "permission_mode": "claude_settings" | "acceptEdits" | "default" | "plan" | "dontAsk" | "bypassPermissions" | "inherit",
   "allowed_tools": ["Read", "Write", "Bash(python:*)"],   // optional
   "max_turns": 50,                        // optional
   "working_dir": null,                    // null = graph dir
@@ -148,8 +148,10 @@ Write every deliverable listed above. Then end your final message with exactly:
 ````
 
 The backend parses the final assistant text for `## Status: DONE|BLOCKED`, and
-checks that each required deliverable file exists. Missing files or BLOCKED mark
-the node `failed` (with reason) even if the CLI exit code is 0.
+checks that each required deliverable file exists. Missing files mark the node
+`failed` (with reason) even if the CLI exit code is 0. `## Status: BLOCKED` marks it
+`blocked` (fix pass 2), with the paragraph after the marker as the reason; it is
+scheduled exactly like `failed`.
 
 ## 4. Scheduler (Rust, pure, fully unit-tested)
 
@@ -160,7 +162,11 @@ the node `failed` (with reason) even if the CLI exit code is 0.
 - Tie-break among ready nodes: longest downstream path first, then id ascending. Deterministic.
 - Failure: failed node → every transitive dependent becomes `skipped` (reason: upstream failed). Independent branches continue unless `stop_on_failure`, in which case nothing new starts and running nodes finish.
 - Cancel run: nothing new starts, running children are killed, their nodes become `cancelled`.
-- States: `pending → queued → running → succeeded | failed | skipped | cancelled`.
+- States: `pending → queued → running → succeeded | failed | blocked | skipped | cancelled`.
+- Blocked (fix pass 2) = failed for scheduling: dependents are skipped with reason
+  `upstream <id> blocked`, `stop_on_failure` applies, "only failed of run R" includes
+  blocked nodes, and the run ends `failed` when any node is failed or blocked.
+  GRAPH_LOG.md writes `blocked`; a resumed run keeps blocked slots as they are.
 
 ## 5. Claude runner (Rust)
 
@@ -168,7 +174,7 @@ One `claude` process per node:
 
 ```
 claude -p --output-format stream-json --verbose
-       --model <m> --permission-mode <pm> --add-dir <graph-dir>
+       --model <m> [--permission-mode <pm>] --add-dir <graph-dir>
        [--allowedTools ...] [--max-turns N] [--resume <session-id>]
 ```
 
@@ -176,6 +182,12 @@ claude -p --output-format stream-json --verbose
 - Windows: see "Spawn strategy" below (never `cmd /C`). The CLI location comes from the app settings, then the env override `CLAUDE_GRAPH_CLAUDE_BIN` (used by tests to point at `scripts/fake-claude.mjs`), then `~/.local/bin`, then PATH; never from graph.json.
 - stdout read line by line (tokio). Every line is appended to `events.jsonl` unchanged, parsed as JSON, and summarised into a `NodeEvent` emitted to the frontend (`assistant text delta`, `tool use <name>`, `tool result`, `result`). Malformed lines are kept and reported, never crash.
 - The `result` event supplies session_id, cost, duration, num_turns, is_error → `summary.json`.
+- Permission mode (fix pass 2): `claude_settings` (default of new graphs) and
+  inherit-of-inherit pass **no** `--permission-mode` flag, so the user's Claude Code
+  settings decide; an explicit mode overrides them. `system`/`permission_denied` lines
+  become `permission_denied` node events (`Tool: "input summary"`), and the denied tool
+  names (deduplicated, first-seen order, accumulated over follow-ups) are stored as
+  `permission_denials` in run.json's node state and in summary.json.
 - Kill = process tree kill (Windows `taskkill /T /F /PID`, Unix kill group).
 - A `check_claude` command reports found/not found, path, and version string; the UI shows a clear banner if missing.
 
@@ -238,11 +250,13 @@ The brief left these open; the scaffold fixed them in both contract files.
   is the app settings' `claude_bin`, read by the backend itself. Folders are opened only
   through `reveal_graph_dir` / `reveal_node_dir`.
 - **`RunSummary`** (not defined in the brief):
-  `{ run_id, started_at, finished_at, status: RunStatus, counts: { pending, queued, running, succeeded, failed, skipped, cancelled }, total_cost_usd: number|null }`.
+  `{ run_id, started_at, finished_at, status: RunStatus, counts: { pending, queued, running, succeeded, failed, blocked, skipped, cancelled }, total_cost_usd: number|null }`
+  (`blocked` added in fix pass 2; serde default 0).
 - **`read_node_result`** returns `NodeResult { result_md: string|null, summary: NodeSummary|null, events_tail: string[] }`;
   `null` means the file does not exist yet. `NodeSummary` is the content of
-  `summary.json`: `{ session_id, cost_usd, duration_ms, num_turns, is_error, status: NodeStatus }`
-  (all nullable except `is_error` and `status`).
+  `summary.json`: `{ session_id, cost_usd, duration_ms, num_turns, is_error, status: NodeStatus, permission_denials: string[] }`
+  (all nullable except `is_error`, `status` and `permission_denials`; the last is `[]`
+  when missing in older files, as is `NodeRunState.permission_denials`).
 - **Timestamps** (`started_at`, `finished_at`, `ts`) are RFC 3339 UTC strings
   (`chrono::DateTime<Utc>` in Rust, `string` in TS).
 - **Optional node fields** are `null` when unset, never omitted, when the app
@@ -281,7 +295,10 @@ Deviations from, or decisions left open by, §2-§6:
   `<!-- Claude Graph run <id>, started <ts> -->` + blank line + brief. Empty template
   fields render as `None.`. Without required deliverables the "How to finish" section
   only asks for the status line. Simple nodes (all structured fields empty) get header,
-  upstream inputs, `## Task` (the prompt), `## Extra context` if non-empty, finish.
+  `## Task` (the prompt), upstream inputs, `## Extra context` if non-empty, finish
+  (task first since fix pass 2). A prompt starting with `/` gets the line
+  `The task starts with a slash command: load that skill first (Skill tool) and follow it.`
+  right under `## Task`, in prompt-mode and structured briefs alike.
 - **Command line.** `-p <instruction>` comes first; `--allowedTools` is variadic, so it is
   the last flag, one argument per tool. `inherit` everywhere means the flag is omitted.
 - **Targets.** `from X` where an upstream outside the target never succeeded: the
@@ -305,7 +322,9 @@ Deviations from, or decisions left open by, §2-§6:
 - **Fake CLI.** `--fake-delay-ms N` overrides `FAKE_CLAUDE_DELAY_MS`; `--resume <id>`
   reuses that session id (a new one with `--fork-session`); `--hold-stdout-ms N` leaves
   a child holding stdout open for N ms after exit; a prompt containing `FAKE_NO_STATUS`
-  ends without a status line.
+  ends without a status line, `FAKE_BLOCKED` ends with `## Status: BLOCKED` and a
+  question line, `FAKE_DENY` adds a WebSearch call refused with a `permission_denied`
+  event and a `permission_denials` entry.
 
 ## 7. Frontend (blueprint look)
 
@@ -326,8 +345,9 @@ stream-json sequence (system init, two assistant messages with one tool use, a
 result with a session id), writes each required deliverable it finds in the
 prompt as a stub file, and exits 0. `CLAUDE_GRAPH_CLAUDE_BIN=node scripts/fake-claude.mjs`
 lets `cargo test` run an end-to-end graph without the real CLI. If the prompt
-contains the text `FAKE_FAIL` (put it in a node's `extra_context`) it ends with
-`## Status: BLOCKED` and still exits 0, to test failure propagation. `--version`
+contains the text `FAKE_FAIL` (put it in a node's `extra_context`) it ends with an
+error result and exit code 1, to test failure propagation (fix pass 2; before, it
+ended `## Status: BLOCKED`, which is now `FAKE_BLOCKED`). `--version`
 prints `2.1.0 (fake-claude)`; env `FAKE_CLAUDE_DELAY_MS` slows the stream for cancel tests.
 
 ## 9. Out of scope for v0.1
@@ -488,6 +508,10 @@ contains `## Status: BLOCKED` (exit errors and a missing status line leave it
 succeeded, and its dependents are not skipped). A cancelled follow-up cancels the node.
 A node that had not succeeded takes the follow-up's own evaluation (so a follow-up that
 ends with `## Status: DONE` and writes the deliverables fixes a failed node).
+Fix pass 2: a follow-up counts required deliverables written since the node's first
+start in the run (not only during the follow-up turn), so answering a blocked node
+whose files are already there, with a reply ending `## Status: DONE`, promotes it to
+`succeeded`; a reply ending BLOCKED keeps it `blocked`.
 summary.json's `status` is this combined status.
 
 **Deliverable freshness.** A required deliverable counts only if its mtime is no earlier

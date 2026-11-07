@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { api, MOCK_MODE } from '../lib/api';
 import { errorMessage } from '../store/runHelpers';
-import { isRunActive, runHasFailures } from '../lib/status';
+import { isRunActive, RERUN_FAILED_TITLE, runHasFailures } from '../lib/status';
 import { graphStore, useGraphStore, type ClaudeState } from '../store/graphStore';
 import { GRID } from './Canvas';
 import { SettingsPopover } from './SettingsPopover';
@@ -129,6 +129,7 @@ export function TopBar({ logVisible, onToggleLog, onOpenAssistant }: TopBarProps
       <button
         className={btnCls}
         disabled={active || !runHasFailures(runState)}
+        title={RERUN_FAILED_TITLE}
         onClick={() => runState && void store().startRun({ failed_of: runState.run_id })}
       >
         <RotateCcw size={14} />Rerun failed

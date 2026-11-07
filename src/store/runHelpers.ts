@@ -1,5 +1,6 @@
 /** Pure helpers for run/log state in the graph store. */
 import type { NodeEvent, NodeEventKind, RunState, RunSummary } from '../types/contract';
+import { DENIED_HINT } from '../lib/status';
 
 export const LOG_CAP = 2000;
 
@@ -43,7 +44,7 @@ export function acceptsRunState(rs: RunState, dir: string | null, current: RunSt
   return rs.run_id === current?.run_id || samePath(rs.graph_dir, dir);
 }
 
-const TERMINAL = new Set(['succeeded', 'failed', 'skipped', 'cancelled']);
+const TERMINAL = new Set(['succeeded', 'failed', 'blocked', 'skipped', 'cancelled']);
 
 /** Number of nodes in a terminal status, plus one when the run itself has finished. */
 export function progressOf(rs: RunState): number {
@@ -64,6 +65,48 @@ export function preferFetched(current: RunState | null, fetched: RunState): RunS
 /** Newest run first (run ids are UTC timestamps, started_at as tie-break). */
 export function newestFirst(runs: readonly RunSummary[]): RunSummary[] {
   return [...runs].sort((a, b) => b.started_at.localeCompare(a.started_at) || b.run_id.localeCompare(a.run_id));
+}
+
+/** Denied tools seen live per node of the shown run (permission_denied events). */
+export type DenialsByNode = Readonly<Record<string, readonly string[]>>;
+
+/** Tool name of a permission_denied event text (`WebSearch: "query…"` -> `WebSearch`). */
+export function deniedToolName(text: string): string {
+  const name = text.split(':')[0]?.trim() ?? '';
+  return name === '' ? 'a tool' : name;
+}
+
+/** Record one denial; returns the new map and whether it was the node's first in this run. */
+export function addDenial(denials: DenialsByNode, nodeId: string, tool: string): { denials: DenialsByNode; first: boolean } {
+  const seen = denials[nodeId] ?? [];
+  const first = seen.length === 0;
+  if (seen.includes(tool)) return { denials, first };
+  return { denials: { ...denials, [nodeId]: [...seen, tool] }, first };
+}
+
+export function deniedToast(nodeId: string, tool: string): string {
+  return `Node ${nodeId}: ${tool} was denied. ${DENIED_HINT}`;
+}
+
+/**
+ * Whether a node id may still change (by hand or by following its title):
+ * created this session and not run, or absent from every loaded run.
+ * `ranNodeIds` null = the run list is not loaded yet (only fresh nodes qualify).
+ */
+export function idIsEditable(
+  s: { freshNodeIds: readonly string[]; ranNodeIds: readonly string[] | null; runState: RunState | null },
+  id: string,
+): boolean {
+  if (s.freshNodeIds.includes(id)) return true;
+  if (s.ranNodeIds === null || s.ranNodeIds.includes(id)) return false;
+  return !(s.runState !== null && id in s.runState.nodes);
+}
+
+/** Union of node ids, keeping order, without duplicates. */
+export function unionIds(a: readonly string[], b: Iterable<string>): string[] {
+  const out = [...a];
+  for (const id of b) if (!out.includes(id)) out.push(id);
+  return out;
 }
 
 export function errorMessage(err: unknown): string {

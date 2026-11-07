@@ -211,6 +211,10 @@ pub fn summarize_run(state: &RunState) -> RunSummary {
                 failed: c.failed + 1,
                 ..c
             },
+            NodeStatus::Blocked => StatusCounts {
+                blocked: c.blocked + 1,
+                ..c
+            },
             NodeStatus::Skipped => StatusCounts {
                 skipped: c.skipped + 1,
                 ..c
@@ -370,6 +374,7 @@ mod tests {
             ("a", NodeStatus::Succeeded, Some(0.5)),
             ("b", NodeStatus::Failed, Some(0.25)),
             ("c", NodeStatus::Skipped, None),
+            ("d", NodeStatus::Blocked, None),
         ]
         .into_iter()
         .map(|(id, status, cost_usd)| {
@@ -417,6 +422,7 @@ mod tests {
         assert_eq!(summary.counts.succeeded, 1);
         assert_eq!(summary.counts.failed, 1);
         assert_eq!(summary.counts.skipped, 1);
+        assert_eq!(summary.counts.blocked, 1);
         assert_eq!(summary.total_cost_usd, Some(0.75));
 
         let node = node_run_dir(dir, &r1, "a");
@@ -431,6 +437,7 @@ mod tests {
             num_turns: Some(2),
             is_error: false,
             status: NodeStatus::Succeeded,
+            permission_denials: vec!["WebSearch".into(), "Bash".into()],
         };
         write_summary(dir, &r1, "a", &s).unwrap();
         let res = read_node_result(dir, &r1, "a").unwrap();
@@ -445,6 +452,39 @@ mod tests {
             read_node_result(dir, "nope", "a").unwrap_err().code,
             "not_found"
         );
+    }
+
+    #[test]
+    fn files_without_permission_denials_still_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let node = serde_json::json!({
+            "status": "blocked", "started_at": null, "finished_at": null,
+            "session_id": null, "cost_usd": null, "num_turns": null, "reason": "May I?"
+        });
+        let run = serde_json::json!({
+            "run_id": "R1", "graph_dir": "/g", "started_at": "2026-11-07T10:00:00Z",
+            "finished_at": null, "status": "failed", "nodes": { "a": node }
+        });
+        fs::create_dir_all(node_run_dir(dir, "R1", "a")).unwrap();
+        write_json(&run_dir(dir, "R1").join(RUN_FILE), &run).unwrap();
+        let read = read_run_state(dir, "R1").unwrap();
+        assert_eq!(read.nodes["a"].status, NodeStatus::Blocked);
+        assert!(read.nodes["a"].permission_denials.is_empty());
+        let summary = serde_json::json!({
+            "session_id": null, "cost_usd": null, "duration_ms": null,
+            "num_turns": null, "is_error": false, "status": "failed"
+        });
+        write_json(&node_run_dir(dir, "R1", "a").join(SUMMARY_FILE), &summary).unwrap();
+        let s = read_summary(dir, "R1", "a").unwrap().unwrap();
+        assert!(s.permission_denials.is_empty());
+        // And the field is written back under its contract name.
+        let v = serde_json::to_value(NodeSummary {
+            permission_denials: vec!["Bash".into()],
+            ..s
+        })
+        .unwrap();
+        assert_eq!(v["permission_denials"], serde_json::json!(["Bash"]));
     }
 
     #[test]

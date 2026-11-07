@@ -14,15 +14,15 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::contract::{
-    AppError, AppResult, MessageRole, NodeEvent, NodeEventKind, NodeRunState, NodeStatus, RunState,
-    RunStatus,
+    AppError, AppResult, MessageRole, NodeEvent, NodeEventKind, NodeRunState, NodeStatus,
+    NodeSummary, RunState, RunStatus,
 };
 use crate::run_store::{append_log, write_run_state};
 use crate::runner::{run_turn, TurnOutcome, TurnSpec};
 use crate::scheduler::{CancelEffect, Scheduler};
 use crate::turns::{
-    followup_status, followup_turn, initial_turn, record_followup, record_initial, save_message,
-    RunCtx,
+    followup_status, followup_turn, initial_turn, merge_denials, record_followup, record_initial,
+    save_message, RunCtx,
 };
 
 /// Attempts for the final run.json write.
@@ -60,13 +60,6 @@ pub struct RunLoop {
     tx: mpsc::UnboundedSender<LoopMsg>,
     rx: mpsc::UnboundedReceiver<LoopMsg>,
     persisted: Option<RunState>,
-}
-
-fn is_terminal(s: NodeStatus) -> bool {
-    matches!(
-        s,
-        NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Skipped | NodeStatus::Cancelled
-    )
 }
 
 /// Run blocking file I/O on tokio's blocking pool.
@@ -112,7 +105,7 @@ impl RunLoop {
         let initially_terminal = state
             .nodes
             .iter()
-            .filter(|(_, s)| is_terminal(s.status))
+            .filter(|(_, s)| s.status.is_terminal())
             .map(|(id, _)| id.clone())
             .collect();
         Self {
@@ -252,7 +245,8 @@ impl RunLoop {
         });
     }
 
-    /// Write result.md / summary.json / messages for a finished turn.
+    /// Write result.md / summary.json / messages for a finished turn; returns
+    /// the node's summary.json content (accumulated over follow-ups).
     async fn record(
         &self,
         id: &str,
@@ -260,13 +254,13 @@ impl RunLoop {
         outcome: &TurnOutcome,
         status: NodeStatus,
         now: DateTime<Utc>,
-    ) -> AppResult<(Option<f64>, Option<u32>)> {
+    ) -> AppResult<NodeSummary> {
         let (ctx, id, outcome) = (self.ctx.clone(), id.to_string(), outcome.clone());
         blocking(move || {
             if followup {
-                record_followup(&ctx, &id, &outcome, status, now).map(|s| (s.cost_usd, s.num_turns))
+                record_followup(&ctx, &id, &outcome, status, now)
             } else {
-                record_initial(&ctx, &id, &outcome).map(|_| (outcome.cost_usd, outcome.num_turns))
+                record_initial(&ctx, &id, &outcome)
             }
         })
         .await
@@ -296,16 +290,23 @@ impl RunLoop {
         }
         if let Some(node) = self.state.nodes.get_mut(id) {
             node.session_id = outcome.session_id.clone().or(node.session_id.take());
-            if let Ok((cost, turns)) = recorded {
-                node.cost_usd = cost;
-                node.num_turns = turns;
+            match recorded {
+                Ok(summary) => {
+                    node.cost_usd = summary.cost_usd;
+                    node.num_turns = summary.num_turns;
+                    node.permission_denials = summary.permission_denials;
+                }
+                Err(_) => {
+                    node.permission_denials =
+                        merge_denials(&node.permission_denials, &outcome.permission_denials);
+                }
             }
             node.finished_at = Some(now);
         }
         let log_status = if followup {
             "followup".to_string()
         } else {
-            status_text(status)
+            status.as_str().to_string()
         };
         let (dir, run_id, node_id) = (
             self.ctx.graph_dir.clone(),
@@ -327,6 +328,7 @@ impl RunLoop {
     /// Start the next queued follow-up of `id`, or drop the queue if impossible.
     fn next_followup(&mut self, id: &str, outcome: &TurnOutcome) {
         let session = self.state.nodes.get(id).and_then(|n| n.session_id.clone());
+        let started = self.state.nodes.get(id).and_then(|n| n.started_at);
         let Some(queue) = self.queues.get_mut(id) else {
             return;
         };
@@ -335,7 +337,7 @@ impl RunLoop {
         };
         let spec = match (outcome.status, session) {
             (NodeStatus::Cancelled, _) => None,
-            (_, Some(sid)) => match followup_turn(&self.ctx, id, &sid, &text) {
+            (_, Some(sid)) => match followup_turn(&self.ctx, id, &sid, &text, started) {
                 Ok(spec) => Some(spec),
                 Err(e) => {
                     log::warn!("follow-up for node {id} not started: {e}");
@@ -374,6 +376,7 @@ impl RunLoop {
             .status(id)
             .ok_or_else(|| AppError::new("not_found", format!("node {id} is not in this run")))?;
         let session = self.state.nodes.get(id).and_then(|n| n.session_id.clone());
+        let started = self.state.nodes.get(id).and_then(|n| n.started_at);
         match status {
             NodeStatus::Running => {
                 // Persist first: a failed write leaves the queue untouched.
@@ -386,11 +389,14 @@ impl RunLoop {
                 self.emit_event(id, NodeEventKind::UserMessage, text);
                 Ok(())
             }
-            NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Cancelled
+            NodeStatus::Succeeded
+            | NodeStatus::Failed
+            | NodeStatus::Blocked
+            | NodeStatus::Cancelled
                 if session.is_some() =>
             {
                 let sid = session.unwrap_or_default();
-                let spec = followup_turn(&self.ctx, id, &sid, &text)?;
+                let spec = followup_turn(&self.ctx, id, &sid, &text, started)?;
                 self.save(id, &text).await?;
                 let reason = self.sched.reason(id).map(str::to_string);
                 self.effective.insert(id.to_string(), (status, reason));
@@ -403,7 +409,13 @@ impl RunLoop {
                 self.spawn_turn(spec, true);
                 Ok(())
             }
-            _ => Err(AppError::new("not_found", "node has not run yet")),
+            NodeStatus::Succeeded
+            | NodeStatus::Failed
+            | NodeStatus::Blocked
+            | NodeStatus::Cancelled
+            | NodeStatus::Pending
+            | NodeStatus::Queued
+            | NodeStatus::Skipped => Err(AppError::new("not_found", "node has not run yet")),
         }
     }
 
@@ -448,13 +460,13 @@ impl RunLoop {
             .filter(|(id, n)| {
                 n.started_at.is_none()
                     && !self.initially_terminal.contains(*id)
-                    && is_terminal(n.status)
+                    && n.status.is_terminal()
             })
             .map(|(id, n)| (id.clone(), n.status))
             .collect();
         for (id, status) in never_ran {
             let (dir, run_id) = (self.ctx.graph_dir.clone(), self.ctx.run_id.clone());
-            let text = status_text(status);
+            let text = status.as_str().to_string();
             let logged = blocking(move || append_log(&dir, &run_id, &id, &text, None, None)).await;
             if let Err(e) = logged {
                 log::warn!("GRAPH_LOG append failed: {e}");
@@ -485,11 +497,4 @@ impl RunLoop {
         self.ctx.emitter.run_state(&self.state);
         self.state
     }
-}
-
-fn status_text(status: NodeStatus) -> String {
-    serde_json::to_value(status)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_default()
 }

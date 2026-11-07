@@ -37,7 +37,7 @@ Standalone reference extracted from [ARCHITECTURE.md](ARCHITECTURE.md) §2. Type
   "do_nots": ["Do not install packages", "Do not touch tests"],
   "model": "sonnet" | "opus" | "haiku" | "inherit",
   "resources": ["cpu"],                   // any of cpu, memory, gpu, exclusive, or free text tags
-  "permission_mode": "acceptEdits" | "default" | "plan" | "bypassPermissions" | "inherit",
+  "permission_mode": "claude_settings" | "acceptEdits" | "default" | "plan" | "dontAsk" | "bypassPermissions" | "inherit",
   "allowed_tools": ["Read", "Write", "Bash(python:*)"],   // optional
   "max_turns": 50,                        // optional
   "working_dir": null,                    // null = graph dir
@@ -60,6 +60,10 @@ Deliverable paths are relative to `nodes/<id>/deliverables/`.
   is rejected on load with a clear error.
 - `model: "inherit"` means `settings.default_model`; `permission_mode: "inherit"`
   means `settings.default_permission_mode`.
+- `"claude_settings"` passes no `--permission-mode` flag: the user's own Claude Code
+  settings decide. `create_graph` writes it as `settings.default_permission_mode` of new
+  graphs; a graph without that setting still loads with `"acceptEdits"`. Any other
+  explicit mode overrides the user's settings.
 - Resource tags: capacity comes from `settings.resources`; unknown tags have
   capacity 1; `exclusive` means nothing else runs alongside the node.
 

@@ -18,6 +18,7 @@ import type {
 } from '../types/contract';
 import type { Timers } from './debounce';
 import { targetSet } from './graphOps';
+import { assertNever } from './status';
 
 export { targetSet };
 
@@ -41,8 +42,52 @@ export interface RunnerDeps {
   emitEvent: (dir: string, runId: string, nodeId: string, kind: NodeEventKind, text: string) => void;
 }
 
-const TERMINAL: ReadonlySet<NodeStatus> = new Set(['succeeded', 'failed', 'skipped', 'cancelled']);
-const BAD: ReadonlySet<NodeStatus> = new Set(['failed', 'skipped', 'cancelled']);
+const TERMINAL: ReadonlySet<NodeStatus> = new Set(['succeeded', 'failed', 'blocked', 'skipped', 'cancelled']);
+const BAD: ReadonlySet<NodeStatus> = new Set(['failed', 'blocked', 'skipped', 'cancelled']);
+/** Statuses that make the run `failed` and trigger stop_on_failure. */
+const FAILING: ReadonlySet<NodeStatus> = new Set(['failed', 'blocked']);
+
+/** Prompt / extra_context markers, like scripts/fake-claude.mjs. */
+export const FAKE_BLOCKED = 'FAKE_BLOCKED';
+export const FAKE_DENY = 'FAKE_DENY';
+export const MOCK_DENIED_TOOL = 'WebSearch';
+export const MOCK_BLOCKED_QUESTION = 'Which dataset should I use? (mock)';
+const hasMarker = (node: Node, marker: string): boolean =>
+  node.prompt.includes(marker) || node.extra_context.includes(marker);
+
+type Outcome = 'succeeded' | 'failed' | 'blocked';
+
+function outcomeOf(node: Node): Outcome {
+  if (hasMarker(node, 'FAKE_FAIL')) return 'failed';
+  return hasMarker(node, FAKE_BLOCKED) ? 'blocked' : 'succeeded';
+}
+
+/** result.md text; null for a failed node (the fake CLI exits 1 with an error result, no reply). */
+function resultMdFor(node: Node, outcome: Outcome): string | null {
+  switch (outcome) {
+    case 'failed':
+      return null;
+    case 'blocked':
+      return `I could not finish without your input.\n\n## Status: BLOCKED\n${MOCK_BLOCKED_QUESTION}`;
+    case 'succeeded':
+      return `## Deliverables\n${node.deliverables.map((d) => `- ${d.path} — stub`).join('\n')}\n## Status: DONE`;
+    default:
+      return assertNever(outcome);
+  }
+}
+
+function reasonFor(outcome: Outcome): string | null {
+  switch (outcome) {
+    case 'failed':
+      return 'claude exited with code 1 (mock FAKE_FAIL)';
+    case 'blocked':
+      return MOCK_BLOCKED_QUESTION;
+    case 'succeeded':
+      return null;
+    default:
+      return assertNever(outcome);
+  }
+}
 
 /** Run id = UTC timestamp, e.g. 20261107T101500Z. */
 export function runIdFor(date: Date): string {
@@ -57,13 +102,21 @@ const blankNode = (): NodeRunState => ({
   cost_usd: null,
   num_turns: null,
   reason: null,
+  permission_denials: [],
 });
 
 function script(node: Node): Array<[NodeEventKind, string]> {
   const first = node.deliverables[0]?.path ?? 'notes.md';
+  const denied: Array<[NodeEventKind, string]> = hasMarker(node, FAKE_DENY)
+    ? [
+        ['tool_use', `${MOCK_DENIED_TOOL} "mock query"`],
+        ['permission_denied', `${MOCK_DENIED_TOOL}: "mock query"`],
+      ]
+    : [];
   return [
     ['system', `init session (mock) model=${node.model}`],
     ['text', `Reading the brief for "${node.title || node.id}".`],
+    ...denied,
     ['tool_use', `Write ${first}`],
     ['tool_result', `wrote ${first}`],
     ['text', 'All deliverables written.'],
@@ -94,13 +147,12 @@ export function createMockRunner(deps: RunnerDeps) {
 
   const finishNode = (run: MockRun, node: Node): void => {
     clearTimers(run.state.run_id, node.id);
-    const failed = node.extra_context.includes('FAKE_FAIL');
+    const status = outcomeOf(node);
+    const failed = status === 'failed';
+    const denials = hasMarker(node, FAKE_DENY) ? [MOCK_DENIED_TOOL] : [];
     const cost = Number((0.01 + node.deliverables.length * 0.005).toFixed(4));
-    const status: NodeStatus = failed ? 'failed' : 'succeeded';
     const sessionId = `mock-${run.state.run_id}-${node.id}`;
-    const resultMd = failed
-      ? '## Status: BLOCKED\nFAKE_FAIL found in the brief (mock).'
-      : `## Deliverables\n${node.deliverables.map((d) => `- ${d.path} — stub`).join('\n')}\n## Status: DONE`;
+    const resultMd = resultMdFor(node, status);
     deps.emitEvent(run.state.graph_dir, run.state.run_id, node.id, 'result', `${status} · $${cost} · 3 turns`);
     setNode(run, node.id, {
       status,
@@ -108,21 +160,30 @@ export function createMockRunner(deps: RunnerDeps) {
       session_id: sessionId,
       cost_usd: cost,
       num_turns: 3,
-      reason: failed ? 'agent reported BLOCKED' : null,
+      reason: reasonFor(status),
+      permission_denials: denials,
     });
     run.messages = {
       ...run.messages,
       [node.id]: [
         ...(run.messages[node.id] ?? []),
         { role: 'user', text: node.prompt || node.goal || node.title, ts: run.state.nodes[node.id]?.started_at ?? stamp() },
-        { role: 'assistant', text: resultMd, ts: stamp() },
+        ...(resultMd === null ? [] : [{ role: 'assistant' as const, text: resultMd, ts: stamp() }]),
       ],
     };
     run.results = {
       ...run.results,
       [node.id]: {
         result_md: resultMd,
-        summary: { session_id: sessionId, cost_usd: cost, duration_ms: deps.stepMs * 6, num_turns: 3, is_error: failed, status },
+        summary: {
+          session_id: sessionId,
+          cost_usd: cost,
+          duration_ms: deps.stepMs * 6,
+          num_turns: 3,
+          is_error: failed,
+          status,
+          permission_denials: denials,
+        },
         events_tail: [`{"type":"result","subtype":"${failed ? 'error' : 'success'}"}`],
       },
     };
@@ -144,7 +205,7 @@ export function createMockRunner(deps: RunnerDeps) {
     if (run.state.status !== 'running') return;
     const inRun = (id: string): boolean => id in run.state.nodes;
     const status = (id: string): NodeStatus => run.state.nodes[id]?.status ?? 'pending';
-    const anyFailed = Object.values(run.state.nodes).some((n) => n.status === 'failed');
+    const anyFailed = Object.values(run.state.nodes).some((n) => FAILING.has(n.status));
     const halt = anyFailed && run.graph.settings.stop_on_failure;
 
     let settled = false;
@@ -181,7 +242,7 @@ export function createMockRunner(deps: RunnerDeps) {
 
     const nodes = Object.values(run.state.nodes);
     if (nodes.every((n) => TERMINAL.has(n.status))) {
-      const final = nodes.some((n) => n.status === 'failed')
+      const final = nodes.some((n) => FAILING.has(n.status))
         ? 'failed'
         : nodes.some((n) => n.status === 'cancelled')
           ? 'cancelled'
@@ -251,7 +312,8 @@ export function createMockRunner(deps: RunnerDeps) {
         deps.emitState(run.state);
       }
       later(run, nodeId, MOCK_REPLY_MS, () => {
-        const reply = `(mock) Received: ${text}`;
+        // Like followup_status: a blocked node's DONE reply promotes it to succeeded.
+        const reply = before === 'blocked' ? `(mock) Received: ${text}\n\n## Status: DONE` : `(mock) Received: ${text}`;
         // Like the backend: `result` comes from the stream, the reply is
         // recorded after the process exits, then run:state follows.
         deps.emitEvent(run.state.graph_dir, runId, nodeId, 'result', reply);
@@ -259,7 +321,9 @@ export function createMockRunner(deps: RunnerDeps) {
           add({ role: 'assistant', text: reply, ts: stamp() });
           const turns = (run.state.nodes[nodeId]?.num_turns ?? 0) + 1;
           if (resumed) {
-            setNode(run, nodeId, { status: before === 'cancelled' ? 'succeeded' : before, finished_at: stamp(), num_turns: turns });
+            const after: NodeStatus = before === 'cancelled' || before === 'blocked' ? 'succeeded' : before;
+            const reason = after === 'succeeded' ? null : (run.state.nodes[nodeId]?.reason ?? null);
+            setNode(run, nodeId, { status: after, finished_at: stamp(), num_turns: turns, reason });
             advance(run);
           } else {
             setNode(run, nodeId, { num_turns: turns });

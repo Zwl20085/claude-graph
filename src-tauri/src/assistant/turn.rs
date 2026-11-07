@@ -132,6 +132,7 @@ pub fn prepare(
             cwd: graph_dir.to_path_buf(),
             out_dir,
             required: Vec::new(),
+            fresh_since: None,
         },
         session: AssistantSession {
             status: AssistantStatus::Working,

@@ -1,5 +1,6 @@
 /** Simple mode: one prompt box plus model / permission / resources. */
 import { MODELS, PERMISSION_MODES, type Node } from '../types/contract';
+import { permissionLabel } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
 import { ChipsInput, Field, inputCls, Select } from './ui';
 
@@ -23,7 +24,12 @@ export function PromptTab({ node }: { node: Node }) {
           <Select value={node.model} options={MODELS} onChange={(model) => update(node.id, { model })} />
         </Field>
         <Field label="Permission">
-          <Select value={node.permission_mode} options={PERMISSION_MODES} onChange={(permission_mode) => update(node.id, { permission_mode })} />
+          <Select
+            value={node.permission_mode}
+            options={PERMISSION_MODES}
+            label={permissionLabel}
+            onChange={(permission_mode) => update(node.id, { permission_mode })}
+          />
         </Field>
       </div>
       {node.permission_mode === 'bypassPermissions' && (

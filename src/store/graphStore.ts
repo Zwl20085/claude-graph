@@ -37,11 +37,17 @@ import * as ops from '../lib/graphOps';
 import { isRunActive } from '../lib/status';
 import {
   acceptsRunState,
+  addDenial,
   addEvent,
+  deniedToast,
+  deniedToolName,
   errorMessage,
+  idIsEditable,
   LOG_CAP,
   newestFirst,
   preferFetched,
+  unionIds,
+  type DenialsByNode,
   type EventsByNode,
 } from './runHelpers';
 
@@ -51,7 +57,7 @@ export const NEW_NODE_TITLE = 'New node';
 export const MAX_SAVE_ROUNDS = 10;
 export const IGNORED_CLAUDE_BIN_TEXT = 'ignored: claude path is a per-machine setting';
 
-export type ToastKind = 'info' | 'success' | 'error';
+export type ToastKind = 'info' | 'success' | 'warning' | 'error';
 export interface Toast {
   id: number;
   kind: ToastKind;
@@ -77,6 +83,10 @@ export interface GraphState {
   startingRun: boolean;
   events: EventsByNode;
   eventsRunId: string | null;
+  /** Tools denied live (permission_denied events) per node of `eventsRunId`. */
+  liveDenials: DenialsByNode;
+  /** Node ids that appear in any run of the open folder; null until loaded. */
+  ranNodeIds: readonly string[] | null;
   claude: ClaudeState;
   appSettings: AppSettings | null;
   /** Shown as the trust dialog while non-null. */
@@ -103,6 +113,8 @@ export interface GraphActions {
   updateSettings: (patch: Partial<Settings>) => void;
   addNodeAt: (position: Position) => string | null;
   updateNode: (id: string, patch: ops.NodePatch) => void;
+  /** Set the title; a never-run node whose id follows its title gets the new slug as id. */
+  setTitle: (id: string, title: string) => void;
   renameNodeId: (oldId: string, newId: string) => string | null;
   removeElements: (nodeIds: readonly string[], edgeIds: readonly string[]) => void;
   connect: (from: string, to: string) => boolean;
@@ -125,7 +137,17 @@ export type GraphStore = GraphState & GraphActions;
 
 const CLOSED: Pick<
   GraphState,
-  'graph' | 'dir' | 'dirty' | 'saveError' | 'freshNodeIds' | 'selectedNodeId' | 'runState' | 'events' | 'eventsRunId'
+  | 'graph'
+  | 'dir'
+  | 'dirty'
+  | 'saveError'
+  | 'freshNodeIds'
+  | 'selectedNodeId'
+  | 'runState'
+  | 'events'
+  | 'eventsRunId'
+  | 'liveDenials'
+  | 'ranNodeIds'
 > = {
   graph: null,
   dir: null,
@@ -136,6 +158,8 @@ const CLOSED: Pick<
   runState: null,
   events: {},
   eventsRunId: null,
+  liveDenials: {},
+  ranNodeIds: null,
 };
 
 /** Empty nodes the target would run; unknown targets check the whole graph. */
@@ -222,14 +246,25 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
 
     const addLine = (ev: NodeEvent): void => {
       lineSeq += 1;
-      const { eventsRunId, events } = get();
-      const base = ev.run_id === eventsRunId ? events : {};
-      set({ events: addEvent(base, ev, lineSeq), eventsRunId: ev.run_id });
+      const { eventsRunId, events, liveDenials } = get();
+      const sameRun = ev.run_id === eventsRunId;
+      const base = sameRun ? events : {};
+      const denialsBase = sameRun ? liveDenials : {};
+      if (ev.kind !== 'permission_denied') {
+        set({ events: addEvent(base, ev, lineSeq), eventsRunId: ev.run_id, liveDenials: denialsBase });
+        return;
+      }
+      const tool = deniedToolName(ev.text);
+      const { denials, first } = addDenial(denialsBase, ev.node_id, tool);
+      set({ events: addEvent(base, ev, lineSeq), eventsRunId: ev.run_id, liveDenials: denials });
+      // One toast per node per run, on its first denial.
+      if (first) pushToast('warning', deniedToast(ev.node_id, tool));
     };
 
     /** Show `rs`; buffered lines of that run are appended right away, in arrival order. */
     const showRun = (rs: RunState): void => {
-      set({ runState: rs });
+      const ran = get().ranNodeIds;
+      set({ runState: rs, ranNodeIds: ran === null ? null : unionIds(ran, Object.keys(rs.nodes)) });
       if (bufferedEvents.some((e) => e.run_id === rs.run_id)) {
         const mine = bufferedEvents.filter((e) => e.run_id === rs.run_id);
         bufferedEvents = bufferedEvents.filter((e) => e.run_id !== rs.run_id);
@@ -258,6 +293,31 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
       }
     };
 
+    /** Every node id of every run of `dir` (decides which ids may still follow their title). */
+    const loadRanNodeIds = async (dir: string, myEpoch: number): Promise<void> => {
+      try {
+        const runs = await api.listRuns(dir);
+        const states = await Promise.all(runs.map((r) => api.getRun(dir, r.run_id)));
+        if (epoch !== myEpoch || get().dir !== dir) return;
+        const ids = states.filter(isRunState).flatMap((rs) => Object.keys(rs.nodes));
+        const shown = Object.keys(get().runState?.nodes ?? {});
+        set({ ranNodeIds: unionIds(unionIds([], ids), shown) });
+      } catch (err) {
+        console.warn('could not load the node ids of past runs', err);
+      }
+    };
+
+    /** State patch after node `oldId` became `newId`. */
+    const renamedRefs = (oldId: string, newId: string): Partial<GraphState> => {
+      const swap = (id: string): string => (id === oldId ? newId : id);
+      const { freshNodeIds, selectedNodeId, events } = get();
+      return {
+        freshNodeIds: freshNodeIds.map(swap),
+        selectedNodeId: selectedNodeId === null ? null : swap(selectedNodeId),
+        events: Object.fromEntries(Object.entries(events).map(([k, v]) => [swap(k), v])),
+      };
+    };
+
     const dropTrustRequest = (): void => {
       const resolve = trustResolver;
       trustResolver = null;
@@ -275,6 +335,7 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
       epoch += 1;
       set({ ...CLOSED, graph, dir });
       entered = loadLatestRun(dir, epoch);
+      void loadRanNodeIds(dir, epoch);
       if (graph.settings.claude_bin !== null) pushToast('info', `graph.json sets claude_bin: ${IGNORED_CLAUDE_BIN_TEXT}.`);
       void get().refreshRecent();
     };
@@ -391,18 +452,18 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
         return id;
       },
       updateNode: (id, patch) => withGraph((g) => commit(ops.updateNode(g, id, patch))),
+      setTitle: (id, title) =>
+        withGraph((g) => {
+          const result = ops.retitleNode(g, id, title, idIsEditable(get(), id));
+          commit(result.graph, result.id === id ? {} : renamedRefs(id, result.id));
+        }),
       renameNodeId: (oldId, newId) => {
         const g = get().graph;
         if (!g) return 'No graph open.';
-        if (!get().freshNodeIds.includes(oldId)) return 'The id of a node that has been run cannot change.';
+        if (!idIsEditable(get(), oldId)) return 'The id of a node that has been run cannot change.';
         const result = ops.renameNode(g, oldId, newId);
         if (!result.ok) return result.error;
-        const swap = (id: string): string => (id === oldId ? newId : id);
-        commit(result.graph, {
-          freshNodeIds: get().freshNodeIds.map(swap),
-          selectedNodeId: get().selectedNodeId === null ? null : swap(get().selectedNodeId as string),
-          events: Object.fromEntries(Object.entries(get().events).map(([k, v]) => [swap(k), v])),
-        });
+        commit(result.graph, renamedRefs(oldId, newId));
         return null;
       },
       removeElements: (nodeIds, edgeIds) =>

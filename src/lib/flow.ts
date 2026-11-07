@@ -7,13 +7,15 @@
  * content always comes from the graph (RF never edits node content).
  */
 import type { Edge as FlowEdge, Node as FlowNode } from '@xyflow/react';
-import type { Graph, Node, NodeStatus, Position, RunState } from '../types/contract';
+import { deniedTools, type Graph, type Node, type NodeStatus, type Position, type RunState } from '../types/contract';
 import { applyPositions } from './graphOps';
 
 export interface BriefNodeData extends Record<string, unknown> {
   node: Node;
   status: NodeStatus | null;
   reason: string | null;
+  /** Some tool call of this node was denied in the shown run. */
+  denied: boolean;
 }
 export type BriefFlowNode = FlowNode<BriefNodeData, 'brief'>;
 
@@ -26,12 +28,21 @@ function statusOf(run: RunState | null, id: string): NodeStatus | null {
   return run?.nodes[id]?.status ?? null;
 }
 
-export function graphToFlowNodes(graph: Graph, run: RunState | null): BriefFlowNode[] {
+/**
+ * `liveDenied`: ids with a permission_denied event seen live in `run` (the
+ * persisted `permission_denials` only fill in when a turn ends).
+ */
+export function graphToFlowNodes(graph: Graph, run: RunState | null, liveDenied: ReadonlySet<string> = new Set()): BriefFlowNode[] {
   return graph.nodes.map((node) => ({
     id: node.id,
     type: 'brief',
     position: { x: node.position.x, y: node.position.y },
-    data: { node, status: statusOf(run, node.id), reason: run?.nodes[node.id]?.reason ?? null },
+    data: {
+      node,
+      status: statusOf(run, node.id),
+      reason: run?.nodes[node.id]?.reason ?? null,
+      denied: run !== null && (liveDenied.has(node.id) || deniedTools(run.nodes[node.id]).length > 0),
+    },
   }));
 }
 

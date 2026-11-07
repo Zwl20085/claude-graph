@@ -7,7 +7,7 @@ https://code.claude.com/docs/en/agent-sdk/typescript.md (event types).
 
 ```
 claude -p "<short instruction>" --output-format stream-json --verbose \
-       --model <sonnet|opus|haiku> --permission-mode <acceptEdits|default|plan|dontAsk|bypassPermissions> \
+       --model <sonnet|opus|haiku> [--permission-mode <acceptEdits|default|plan|dontAsk|bypassPermissions>] \
        --add-dir <graph-dir> [--allowedTools "Read Write Edit Bash(python:*)"] [--max-turns N] \
        [--max-budget-usd X] [--resume <session-id>]
 ```
@@ -20,6 +20,11 @@ claude -p "<short instruction>" --output-format stream-json --verbose \
   that would prompt. `acceptEdits` auto-approves file writes and common fs commands; other shell
   calls still need an allow rule (`--allowedTools`). `dontAsk` denies all prompts. `bypassPermissions`
   approves everything (expose in the UI with a warning). Never use `--bare` (it ignores login).
+  **The app's default (`claude_settings`, default of new graphs, fix pass 2) passes no
+  `--permission-mode` flag**, so the user's own Claude Code settings (`permissions.defaultMode`,
+  allow rules) decide. An explicit mode on a node or as the graph default overrides those
+  settings for that run. A trial run with `acceptEdits` had its WebSearch and `gh` Bash calls
+  denied headlessly; the node then ended `## Status: BLOCKED`.
 - `--add-dir` paths must exist. `--model` accepts aliases sonnet/opus/haiku.
 - Resume: `--resume <session_id>` works from any cwd. `--session-id <uuid>` sets one up front.
 - Exit code 0 on success, non-zero on failure. SIGTERM → 143, no result. Auth failures are printed
@@ -30,6 +35,7 @@ claude -p "<short instruction>" --output-format stream-json --verbose \
 - `{"type":"system","subtype":"init","session_id":"…","cwd":"…","model":"…","tools":[…],"permissionMode":"…","claude_code_version":"2.1.x", …}` — first line normally. Optional `plugin_errors`, `mcp_server_errors`.
 - `{"type":"assistant","session_id":"…","parent_tool_use_id":null,"message":{"role":"assistant","content":[{"type":"text","text":"…"},{"type":"tool_use","id":"toolu_…","name":"Read","input":{…}}],"stop_reason":"tool_use"}}` — `parent_tool_use_id` non-null for subagent messages.
 - `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"…","content":"…","is_error":false}]}}`
+- `{"type":"system","subtype":"permission_denied","tool_name":"WebSearch","tool_use_id":"toolu_…","message":"Claude requested permissions to use WebSearch, but you haven't granted it yet.","uuid":"…","session_id":"…"}` — one per refused tool call, right after the `tool_use` with that id (seen with 2.1.x, 2026-11-07). A Bash refusal adds `"decision_reason_type":"subcommandResults"` and a message naming the part that needs approval. The event carries no tool input; the app takes it from the matching `tool_use` and shows `Tool: "<first 120 chars of command/query/file_path>"` as a `permission_denied` node event. The final result repeats every refusal in `permission_denials: [{tool_name, tool_use_id, tool_input}]` (one entry per call, so a tool can repeat).
 - `{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":…,"error_status":429,"error":"rate_limit"}` — error ∈ authentication_failed, oauth_org_not_allowed, account_on_hold, billing_error, rate_limit, overloaded, invalid_request, model_not_found, server_error, max_output_tokens, cloud_credential_error, unknown.
 - Final success: `{"type":"result","subtype":"success","session_id":"…","is_error":false,"result":"<final text>","stop_reason":"end_turn","num_turns":3,"duration_ms":12345,"duration_api_ms":11000,"total_cost_usd":0.04,"usage":{},"modelUsage":{},"permission_denials":[]}`
 - Final error: `{"type":"result","subtype":"error_max_turns"|"error_during_execution"|"error_max_budget_usd"|"error_max_structured_output_retries","is_error":true,"errors":["…"],"session_id":"…","num_turns":…,"total_cost_usd":…}` — no `result` field.

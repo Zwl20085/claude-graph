@@ -6,7 +6,7 @@
  */
 import type { AppError, Edge, Graph, Node, Position, RunState, RunTarget, Settings } from '../types/contract';
 import { findCycle } from './graph';
-import { uniqueSlug } from './slug';
+import { slugify, uniqueSlug } from './slug';
 import { nodeIdError, toolEntryError } from './validate';
 
 export type NodePatch = Partial<Omit<Node, 'id'>>;
@@ -151,6 +151,37 @@ export function renameNode(graph: Graph, oldId: string, newId: string): RenameRe
   };
 }
 
+const NEW_NODE_ID = /^new-node(-\d+)?$/;
+
+/**
+ * Whether `id` still follows `title`: it is `slug(title)` (with a uniqueness
+ * suffix -2, -3, … that `uniqueSlug` may have added) or a `new-node` id.
+ * A hand-typed id that differs from the slug never follows again.
+ */
+export function followsTitle(id: string, title: string): boolean {
+  if (NEW_NODE_ID.test(id)) return true;
+  const base = slugify(title);
+  return id === base || new RegExp(`^${base}-\\d+$`).test(id);
+}
+
+/**
+ * Sets a node's title; when `mayRename` (the node has never run) and its id
+ * still follows the old title, the id is re-derived from the new title, made
+ * unique against the other ids (case-insensitive), and every reference
+ * (edges, continue_session_of) is rewritten. Returns the graph and the
+ * node's (possibly new) id. An id the rename rules refuse is kept.
+ */
+export function retitleNode(graph: Graph, id: string, title: string, mayRename: boolean): { graph: Graph; id: string } {
+  const node = graph.nodes.find((n) => n.id === id);
+  if (!node) return { graph, id };
+  const titled = updateNode(graph, id, { title });
+  if (!mayRename || !followsTitle(node.id, node.title)) return { graph: titled, id };
+  const nextId = uniqueSlug(title, graph.nodes.filter((n) => n.id !== id).map((n) => n.id.toLowerCase()));
+  if (nextId === id) return { graph: titled, id };
+  const renamed = renameNode(titled, id, nextId);
+  return renamed.ok ? { graph: renamed.graph, id: nextId } : { graph: titled, id };
+}
+
 /** Empty graph as `create_graph` would write it (used by the mock). */
 export function emptyGraph(name: string): Graph {
   return {
@@ -161,7 +192,7 @@ export function emptyGraph(name: string): Graph {
       resources: { cpu: 1, memory: 1, gpu: 1 },
       stop_on_failure: false,
       default_model: 'sonnet',
-      default_permission_mode: 'acceptEdits',
+      default_permission_mode: 'claude_settings',
       claude_bin: null,
     },
     nodes: [],
@@ -195,12 +226,12 @@ export function targetSet(graph: Graph, target: RunTarget, previous: (runId: str
   const prev = previous(target.failed_of);
   if (!prev) throw { code: 'not_found', message: `run ${target.failed_of} not found` } as AppError;
   // Same rule as the backend scheduler: every node of that run that did not
-  // succeed (failed, skipped, cancelled) is rerun, with its dependents.
+  // succeed (failed, blocked, skipped, cancelled) is rerun, with its dependents.
   const seeds = Object.entries(prev.nodes)
     .filter(([id, n]) => n.status !== 'succeeded' && ids.includes(id))
     .map(([id]) => id);
   if (seeds.length === 0) {
-    throw { code: 'not_found', message: `run ${target.failed_of} has no failed, skipped or cancelled nodes` } as AppError;
+    throw { code: 'not_found', message: `run ${target.failed_of} has no failed, blocked, skipped or cancelled nodes` } as AppError;
   }
   const set = descendants(seeds);
   return ids.filter((id) => set.has(id));

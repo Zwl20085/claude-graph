@@ -396,3 +396,74 @@ fn resume_maps_unfinished_slots_to_interrupted() {
     assert!(s.ready().is_empty());
     assert!(s.is_done());
 }
+
+#[test]
+fn blocked_is_scheduled_like_failed() {
+    let g = graph(
+        &[("a", &[]), ("b", &[]), ("c", &[]), ("z", &[])],
+        &[("a", "b"), ("b", "c")],
+        json!({ "max_parallel": 1 }),
+    );
+    let mut s = Scheduler::new(&g, &RunTarget::All, &[]).unwrap();
+    assert_eq!(s.ready(), vec!["a"]);
+    s.on_finished("a", NodeStatus::Blocked, Some("May I use the web?".into()));
+    assert_eq!(s.status("a"), Some(NodeStatus::Blocked));
+    assert_eq!(s.reason("a"), Some("May I use the web?"));
+    for id in ["b", "c"] {
+        assert_eq!(s.status(id), Some(NodeStatus::Skipped));
+        assert_eq!(s.reason(id), Some("upstream a blocked"));
+    }
+    assert_eq!(s.ready(), vec!["z"]);
+    ok(&mut s, "z");
+    assert!(s.is_done());
+    assert!(!s.run_succeeded(), "a blocked node fails the run");
+
+    // stop_on_failure applies to blocked nodes too.
+    let g2 = graph(
+        &[("a", &[]), ("b", &[]), ("c", &[])],
+        &[],
+        json!({ "max_parallel": 2, "stop_on_failure": true }),
+    );
+    let mut s = Scheduler::new(&g2, &RunTarget::All, &[]).unwrap();
+    assert_eq!(s.ready(), vec!["a", "b"]);
+    s.on_finished("a", NodeStatus::Blocked, None);
+    assert!(s.ready().is_empty());
+    ok(&mut s, "b");
+    assert!(s.is_done());
+    s.finalize();
+    assert_eq!(s.status("c"), Some(NodeStatus::Skipped));
+
+    // FailedOf targets blocked nodes and their dependents.
+    let prior = [run(
+        "R1",
+        &[
+            ("a", NodeStatus::Blocked),
+            ("b", NodeStatus::Skipped),
+            ("c", NodeStatus::Skipped),
+            ("z", NodeStatus::Succeeded),
+        ],
+    )];
+    let s = Scheduler::new(&g, &RunTarget::FailedOf("R1".into()), &prior).unwrap();
+    assert_eq!(
+        s.target().iter().cloned().collect::<Vec<_>>(),
+        vec!["a", "b", "c"]
+    );
+}
+
+#[test]
+fn resume_keeps_blocked_and_a_follow_up_can_promote_it() {
+    let g = graph(&[("a", &[]), ("b", &[])], &[("a", "b")], json!({}));
+    let prior = run(
+        "R1",
+        &[("a", NodeStatus::Blocked), ("b", NodeStatus::Skipped)],
+    );
+    let mut s = Scheduler::resume(&g, &prior).unwrap();
+    assert_eq!(s.status("a"), Some(NodeStatus::Blocked));
+    assert!(s.is_done());
+    assert!(s.reopen("a"), "a blocked node takes follow-ups");
+    assert_eq!(s.status("a"), Some(NodeStatus::Running));
+    s.release("a");
+    ok(&mut s, "a");
+    assert_eq!(s.status("a"), Some(NodeStatus::Succeeded));
+    assert_eq!(s.status("b"), Some(NodeStatus::Skipped), "skips stay");
+}

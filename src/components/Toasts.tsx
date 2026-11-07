@@ -1,10 +1,10 @@
 /** In-app toasts, auto-dismissed after a few seconds (errors stay longer). */
 import { useEffect } from 'react';
 import { X } from 'lucide-react';
-import { useGraphStore, type Toast } from '../store/graphStore';
+import { useGraphStore, type Toast, type ToastKind } from '../store/graphStore';
 
-const LIFETIME_MS = { info: 3500, success: 3500, error: 7000 } as const;
-const COLORS = { info: '#3b82f6', success: '#22c55e', error: '#ef4444' } as const;
+const LIFETIME_MS: Record<ToastKind, number> = { info: 3500, success: 3500, warning: 9000, error: 7000 };
+const COLORS: Record<ToastKind, string> = { info: '#3b82f6', success: '#22c55e', warning: '#f59e0b', error: '#ef4444' };
 
 function ToastItem({ toast }: { toast: Toast }) {
   const dismiss = useGraphStore((s) => s.dismissToast);

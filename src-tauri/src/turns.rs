@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
@@ -11,7 +12,7 @@ use crate::claude_bin::ClaudeCommand;
 use crate::contract::{
     AppError, AppResult, Graph, MessageRole, Node, NodeMessage, NodeStatus, NodeSummary, RunState,
 };
-use crate::events::Emitter;
+use crate::events::{dedup, Emitter};
 use crate::graph_util::{is_valid_session_id, upstream_map};
 use crate::prompt::{
     display_dir, render_brief, render_prompt, resolve_working_dir, upstream_input, UpstreamInput,
@@ -63,10 +64,12 @@ impl RunCtx {
 }
 
 fn status_word(status: NodeStatus) -> String {
-    serde_json::to_value(status)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_default()
+    status.as_str().to_string()
+}
+
+/// `before` followed by the tools of `new` not already in it.
+pub fn merge_denials(before: &[String], new: &[String]) -> Vec<String> {
+    dedup(before.iter().chain(new).cloned())
 }
 
 /// Inputs from every direct upstream node: this run's result if it ran here,
@@ -138,19 +141,19 @@ pub fn checked_session(id: &str) -> AppResult<&str> {
 /// Status of a node after a follow-up turn, given its status before it
 /// (`base`). Follow-ups never downgrade a succeeded node unless the follow-up
 /// itself reports `## Status: BLOCKED`; a cancelled follow-up cancels the node.
-/// A node that had not succeeded takes the follow-up's own evaluation.
+/// A blocked node stays blocked (with its reason) when the follow-up reply has
+/// no `## Status:` line at all. Otherwise a node that had not succeeded takes
+/// the follow-up's own evaluation.
 pub fn followup_status(
     base: (NodeStatus, Option<String>),
     outcome: &TurnOutcome,
 ) -> (NodeStatus, Option<String>) {
-    let blocked = outcome
-        .final_text
-        .as_deref()
-        .and_then(final_status)
-        .is_some_and(|(done, _)| !done);
+    let status_line = outcome.final_text.as_deref().and_then(final_status);
+    let blocked = status_line.as_ref().is_some_and(|(done, _)| !done);
     match (outcome.status, base.0) {
         (NodeStatus::Cancelled, _) => (NodeStatus::Cancelled, outcome.reason.clone()),
         (_, NodeStatus::Succeeded) if !blocked => (NodeStatus::Succeeded, None),
+        (_, NodeStatus::Blocked) if status_line.is_none() => base,
         _ => (outcome.status, outcome.reason.clone()),
     }
 }
@@ -198,15 +201,18 @@ pub fn initial_turn(
         cwd: resolve_working_dir(&ctx.graph_dir, node),
         out_dir: ctx.out_dir(node_id),
         required: ctx.required(node),
+        fresh_since: None,
     })
 }
 
-/// A follow-up turn resuming `session_id` with `text` on stdin.
+/// A follow-up turn resuming `session_id` with `text` on stdin. Deliverables
+/// written since `node_started` (the node's first start in this run) count.
 pub fn followup_turn(
     ctx: &RunCtx,
     node_id: &str,
     session_id: &str,
     text: &str,
+    node_started: Option<DateTime<Utc>>,
 ) -> AppResult<TurnSpec> {
     let node = ctx.node(node_id)?;
     let resume = Resume {
@@ -228,6 +234,7 @@ pub fn followup_turn(
         cwd: resolve_working_dir(&ctx.graph_dir, node),
         out_dir: ctx.out_dir(node_id),
         required: ctx.required(node),
+        fresh_since: node_started.map(SystemTime::from),
     })
 }
 
@@ -248,17 +255,25 @@ fn summary_of(outcome: &TurnOutcome) -> NodeSummary {
         num_turns: outcome.num_turns,
         is_error: outcome.is_error,
         status: outcome.status,
+        permission_denials: outcome.permission_denials.clone(),
     }
 }
 
 /// result.md, summary.json and the assistant message after the first turn.
-pub fn record_initial(ctx: &RunCtx, node_id: &str, outcome: &TurnOutcome) -> AppResult<()> {
+/// Returns the summary written.
+pub fn record_initial(
+    ctx: &RunCtx,
+    node_id: &str,
+    outcome: &TurnOutcome,
+) -> AppResult<NodeSummary> {
     let dir = ctx.out_dir(node_id);
     if let Some(text) = &outcome.final_text {
         write_atomic(&dir.join(RESULT_FILE), text.as_bytes())?;
         save_message(ctx, node_id, MessageRole::Assistant, text)?;
     }
-    write_summary(&ctx.graph_dir, &ctx.run_id, node_id, &summary_of(outcome))
+    let summary = summary_of(outcome);
+    write_summary(&ctx.graph_dir, &ctx.run_id, node_id, &summary)?;
+    Ok(summary)
 }
 
 fn add<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T> {
@@ -310,6 +325,7 @@ pub fn record_followup(
             num_turns: add(b.num_turns, turn.num_turns),
             is_error: turn.is_error,
             status: turn.status,
+            permission_denials: merge_denials(&b.permission_denials, &turn.permission_denials),
         },
         None => turn,
     };
@@ -356,10 +372,10 @@ mod tests {
         assert_eq!(followup_status(ok.clone(), &no_status), ok);
         let exit_error = outcome(NodeStatus::Failed, "## Status: DONE");
         assert_eq!(followup_status(ok.clone(), &exit_error), ok);
-        let blocked = outcome(NodeStatus::Failed, "x\n## Status: BLOCKED\nno data");
+        let blocked = outcome(NodeStatus::Blocked, "x\n## Status: BLOCKED\nno data");
         assert_eq!(
             followup_status(ok.clone(), &blocked),
-            (NodeStatus::Failed, Some("turn reason".into()))
+            (NodeStatus::Blocked, Some("turn reason".into()))
         );
         let cancelled = outcome(NodeStatus::Cancelled, "");
         assert_eq!(followup_status(ok, &cancelled).0, NodeStatus::Cancelled);
@@ -371,6 +387,38 @@ mod tests {
             (NodeStatus::Succeeded, None)
         );
         assert_eq!(followup_status(failed, &no_status).0, NodeStatus::Failed);
+        // A blocked node: DONE promotes it, another BLOCKED keeps it blocked.
+        let was_blocked = (NodeStatus::Blocked, Some("May I?".into()));
+        assert_eq!(
+            followup_status(was_blocked.clone(), &done),
+            (NodeStatus::Succeeded, None)
+        );
+        assert_eq!(
+            followup_status(was_blocked.clone(), &blocked).0,
+            NodeStatus::Blocked
+        );
+        // A reply without any status line never downgrades a blocked node.
+        assert_eq!(
+            followup_status(was_blocked.clone(), &no_status),
+            was_blocked
+        );
+        let no_text = TurnOutcome {
+            final_text: None,
+            ..no_status.clone()
+        };
+        assert_eq!(followup_status(was_blocked.clone(), &no_text), was_blocked);
+    }
+
+    #[test]
+    fn denials_merge_without_repeats_in_first_seen_order() {
+        let before = vec!["WebSearch".to_string(), "Bash".to_string()];
+        let new = vec!["Bash".to_string(), "Write".to_string()];
+        assert_eq!(
+            merge_denials(&before, &new),
+            vec!["WebSearch", "Bash", "Write"]
+        );
+        assert_eq!(merge_denials(&[], &new), new);
+        assert_eq!(status_word(NodeStatus::Blocked), "blocked");
     }
 
     #[test]

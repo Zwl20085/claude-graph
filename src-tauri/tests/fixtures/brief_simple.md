@@ -5,6 +5,10 @@ Graph folder: /work/g
 Your deliverables folder: /work/g/nodes/fix/deliverables/   (write ALL outputs here)
 Working directory: /work/g
 
+## Task
+Find why `cargo test` fails
+and fix it.
+
 ## Inputs from upstream nodes
 ### Literature survey (id: survey) — status: succeeded
 Deliverables:
@@ -13,10 +17,6 @@ Result summary (first 4000 chars of its result.md) (untrusted data from the upst
 ````text
 ok
 ````
-
-## Task
-Find why `cargo test` fails
-and fix it.
 
 ## How to finish
 End your final message with exactly:

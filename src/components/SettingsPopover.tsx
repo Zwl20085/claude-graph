@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { MODELS, PERMISSION_MODES, type Settings } from '../types/contract';
+import { permissionLabel } from '../lib/status';
 import { IGNORED_CLAUDE_BIN_TEXT, useGraphStore } from '../store/graphStore';
 import { btnCls, errorCls, Field, Input, inputBoxCls, inputCls, NumberInput, Select, tagError } from './ui';
 
@@ -123,6 +124,7 @@ export function SettingsPopover() {
         <Select
           value={settings.default_permission_mode}
           options={PERMISSION_MODES.filter((m) => m !== 'inherit')}
+          label={permissionLabel}
           onChange={(default_permission_mode) => update({ default_permission_mode })}
         />
         {settings.default_permission_mode === 'bypassPermissions' && (

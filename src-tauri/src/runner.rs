@@ -42,6 +42,8 @@ pub const LINE_CAP: usize = 1024 * 1024;
 const FRESHNESS_SLACK: Duration = Duration::from_secs(2);
 const STDERR_TAIL_LINES: usize = 5;
 const REASON_MAX: usize = 400;
+/// Reason of a blocked node whose `## Status: BLOCKED` line has no paragraph after it.
+pub const BLOCKED_NO_REASON: &str = "the agent reported ## Status: BLOCKED without a reason";
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -59,6 +61,8 @@ pub fn model_flag(node: Model, default: Model) -> Option<&'static str> {
     }
 }
 
+/// `--permission-mode` value, or `None` for no flag: `claude_settings` (the
+/// user's own Claude Code settings decide) and inherit-of-inherit.
 pub fn permission_flag(node: PermissionMode, default: PermissionMode) -> Option<&'static str> {
     let mode = if node == PermissionMode::Inherit {
         default
@@ -71,7 +75,7 @@ pub fn permission_flag(node: PermissionMode, default: PermissionMode) -> Option<
         PermissionMode::Plan => Some("plan"),
         PermissionMode::BypassPermissions => Some("bypassPermissions"),
         PermissionMode::DontAsk => Some("dontAsk"),
-        PermissionMode::Inherit => None,
+        PermissionMode::ClaudeSettings | PermissionMode::Inherit => None,
     }
 }
 
@@ -145,6 +149,10 @@ pub struct TurnSpec {
     pub out_dir: PathBuf,
     /// Absolute paths that must exist, written during this turn, after it.
     pub required: Vec<PathBuf>,
+    /// Required deliverables count as fresh when written after this instant;
+    /// `None` = this turn's start. Follow-ups pass the node's first start in
+    /// the run, so deliverables written by an earlier turn still count.
+    pub fresh_since: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,7 +168,8 @@ pub struct TurnOutcome {
     pub final_text: Option<String>,
     /// Model named by the CLI's init event (display only).
     pub model: Option<String>,
-    /// Tools the CLI denied without asking (`permission_denials` of the result).
+    /// Tools the CLI denied without asking (`permission_denials` of the result
+    /// plus live `permission_denied` events), deduplicated, first-seen order.
     pub permission_denials: Vec<String>,
 }
 
@@ -335,7 +344,8 @@ pub async fn run_turn(
             ..evaluate_cancelled(started)
         };
     }
-    let (missing, stale) = check_deliverables(&spec.required, started_wall);
+    let (missing, stale) =
+        check_deliverables(&spec.required, spec.fresh_since.unwrap_or(started_wall));
     let final_text = acc.final_text();
     let code = exit.and_then(|s| s.code());
     let (status, reason) = evaluate(
@@ -361,9 +371,7 @@ pub async fn run_turn(
         is_error: result.map_or(true, |r| r.is_error),
         final_text,
         model: acc.model().map(str::to_string),
-        permission_denials: result
-            .map(|r| r.permission_denials.clone())
-            .unwrap_or_default(),
+        permission_denials: acc.denied_tools(),
     }
 }
 
@@ -655,7 +663,10 @@ pub fn evaluate(
         return failed(format!("claude exited with code {code_text}"));
     }
     match final_text.and_then(final_status) {
-        Some((false, why)) => failed(format!("agent reported ## Status: BLOCKED: {why}")),
+        Some((false, why)) if why.is_empty() => {
+            (NodeStatus::Blocked, Some(BLOCKED_NO_REASON.to_string()))
+        }
+        Some((false, why)) => (NodeStatus::Blocked, Some(truncate_chars(&why, REASON_MAX))),
         None => failed("final message has no '## Status: DONE' line".to_string()),
         Some((true, _)) if !deliverables.missing.is_empty() => failed(format!(
             "missing deliverables: {}",

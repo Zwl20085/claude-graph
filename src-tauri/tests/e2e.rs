@@ -164,7 +164,88 @@ async fn example_graph_runs_end_to_end_and_takes_a_follow_up() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn blocked_node_fails_and_its_dependent_is_skipped() {
+async fn blocked_node_skips_dependents_and_a_done_follow_up_promotes_it() {
+    use_fake_claude("");
+    let mut graph = example_graph();
+    let design = graph.nodes.iter_mut().find(|n| n.id == "design").unwrap();
+    design.extra_context = "FAKE_BLOCKED FAKE_DENY please".into();
+    let tmp = graph_dir(&graph);
+    let dir = tmp.path();
+    let app = trusted_app(dir);
+    let recorder = Arc::new(Recorder::default());
+
+    let (run_id, join) = app
+        .start_run(dir, RunTarget::All, recorder.clone())
+        .unwrap();
+    let state = finish(join).await;
+    assert_eq!(state.status, RunStatus::Failed, "blocked fails the run");
+    assert_eq!(state.nodes["survey"].status, NodeStatus::Succeeded);
+    let design = &state.nodes["design"];
+    assert_eq!(design.status, NodeStatus::Blocked, "{design:?}");
+    let reason = design.reason.as_deref().unwrap();
+    assert!(reason.starts_with("FAKE_BLOCKED was present"), "{reason}");
+    assert!(reason.contains("May I continue without web access?"));
+    assert!(!reason.contains("agent reported"));
+    assert_eq!(design.permission_denials, vec!["WebSearch".to_string()]);
+    let report = &state.nodes["report"];
+    assert_eq!(report.status, NodeStatus::Skipped);
+    assert_eq!(report.reason.as_deref(), Some("upstream design blocked"));
+    assert!(report.started_at.is_none());
+
+    // The live denial reached the emitter with the tool and its input.
+    assert_eq!(
+        recorder.events_of("design", NodeEventKind::PermissionDenied),
+        vec![r#"WebSearch: "fake denied search""#.to_string()]
+    );
+    let summary = run_store::read_summary(dir, &run_id, "design")
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.status, NodeStatus::Blocked);
+    assert_eq!(summary.permission_denials, vec!["WebSearch".to_string()]);
+    let log = fs::read_to_string(dir.join("GRAPH_LOG.md")).unwrap();
+    assert!(log.contains("\tdesign\tblocked\t"), "{log}");
+    assert!(log.contains("\treport\tskipped\t-\t-"));
+    let counts = run_store::summarize_run(&state).counts;
+    assert_eq!((counts.blocked, counts.failed), (1, 0));
+
+    // "Rerun failed" targets the blocked node and its dependents.
+    let (rerun, join) = app
+        .start_run(dir, RunTarget::FailedOf(run_id.clone()), recorder.clone())
+        .unwrap();
+    let again = finish(join).await;
+    assert_eq!(
+        again.nodes.keys().collect::<Vec<_>>(),
+        vec!["design", "report"]
+    );
+    assert_eq!(again.nodes["design"].status, NodeStatus::Blocked);
+    assert_ne!(rerun, run_id);
+
+    // Answering the blocked node in the first run: a DONE reply promotes it
+    // (its deliverables were written by the first turn); denials are kept.
+    let join = app
+        .send_message(dir, &run_id, "design", "Yes, go on.", recorder.clone())
+        .await
+        .unwrap()
+        .expect("a finished run is resumed for the follow-up");
+    let after = finish(join).await;
+    let design = &after.nodes["design"];
+    assert_eq!(design.status, NodeStatus::Succeeded, "{design:?}");
+    assert_eq!(design.reason, None);
+    assert_eq!(design.permission_denials, vec!["WebSearch".to_string()]);
+    assert_eq!(
+        after.nodes["report"].status,
+        NodeStatus::Skipped,
+        "skips stay"
+    );
+    let summary = run_store::read_summary(dir, &run_id, "design")
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.status, NodeStatus::Succeeded);
+    assert_eq!(summary.permission_denials, vec!["WebSearch".to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_node_fails_and_its_dependent_is_skipped() {
     use_fake_claude("");
     let mut graph = example_graph();
     let design = graph.nodes.iter_mut().find(|n| n.id == "design").unwrap();
@@ -183,7 +264,7 @@ async fn blocked_node_fails_and_its_dependent_is_skipped() {
     let design = &state.nodes["design"];
     assert_eq!(design.status, NodeStatus::Failed);
     assert!(
-        design.reason.as_deref().unwrap().contains("BLOCKED"),
+        design.reason.as_deref().unwrap().contains("FAKE_FAIL"),
         "{design:?}"
     );
     let report = &state.nodes["report"];
@@ -346,7 +427,7 @@ async fn stale_running_runs_are_swept_but_live_ones_are_not() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn follow_up_without_status_keeps_a_succeeded_node_but_blocked_fails_it() {
+async fn follow_up_without_status_keeps_a_succeeded_node_but_blocked_blocks_it() {
     use_fake_claude("");
     let tmp = graph_dir(&example_graph());
     let dir = tmp.path();
@@ -378,15 +459,16 @@ async fn follow_up_without_status_keeps_a_succeeded_node_but_blocked_fails_it() 
     assert_eq!(summary.status, NodeStatus::Succeeded);
 
     let join = app
-        .send_message(dir, &run_id, "survey", "FAKE_FAIL now", recorder.clone())
+        .send_message(dir, &run_id, "survey", "FAKE_BLOCKED now", recorder.clone())
         .await
         .unwrap()
         .unwrap();
     let after = finish(join).await;
-    assert_eq!(after.nodes["survey"].status, NodeStatus::Failed);
+    assert_eq!(after.nodes["survey"].status, NodeStatus::Blocked);
+    assert_eq!(after.status, RunStatus::Failed);
     assert!(after.nodes["survey"]
         .reason
         .as_deref()
         .unwrap()
-        .contains("BLOCKED"));
+        .contains("May I continue"));
 }

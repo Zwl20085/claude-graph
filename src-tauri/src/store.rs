@@ -9,7 +9,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::contract::{AppError, AppResult, Graph, Settings, GRAPH_VERSION};
+use crate::contract::{AppError, AppResult, Graph, PermissionMode, Settings, GRAPH_VERSION};
 use crate::graph_util::validate;
 use crate::prompt::{display_dir, render_brief, upstream_placeholders};
 
@@ -173,7 +173,12 @@ pub fn create_graph(dir: &Path, name: &str) -> AppResult<Graph> {
     let graph = Graph {
         version: GRAPH_VERSION,
         name: name.to_string(),
-        settings: Settings::default(),
+        // New graphs let the user's own Claude Code settings decide
+        // (no --permission-mode flag); older graphs keep what they say.
+        settings: Settings {
+            default_permission_mode: PermissionMode::ClaudeSettings,
+            ..Settings::default()
+        },
         nodes: Vec::new(),
         edges: Vec::new(),
     };
@@ -265,6 +270,10 @@ mod tests {
         let dir = tmp.path().join("new-graph");
         let g = create_graph(&dir, "  demo ").unwrap();
         assert_eq!(g.name, "demo");
+        assert_eq!(
+            g.settings.default_permission_mode,
+            PermissionMode::ClaudeSettings
+        );
         assert!(dir.join("README.md").is_file());
         assert_eq!(read_graph(&dir).unwrap(), g);
         assert_eq!(create_graph(&dir, "again").unwrap_err().code, "io");

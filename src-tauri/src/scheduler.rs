@@ -190,6 +190,7 @@ impl Scheduler {
                     },
                     NodeStatus::Succeeded
                     | NodeStatus::Failed
+                    | NodeStatus::Blocked
                     | NodeStatus::Skipped
                     | NodeStatus::Cancelled => Slot {
                         status: s.status,
@@ -218,12 +219,23 @@ impl Scheduler {
     /// Dependents already skipped stay skipped.
     pub fn reopen(&mut self, id: &str) -> bool {
         match self.status(id) {
-            Some(NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Cancelled) => {
+            Some(
+                NodeStatus::Succeeded
+                | NodeStatus::Failed
+                | NodeStatus::Blocked
+                | NodeStatus::Cancelled,
+            ) => {
                 self.set(id, NodeStatus::Running, None);
                 *self.holds.entry(id.to_string()).or_default() += 1;
                 true
             }
-            _ => false,
+            Some(
+                NodeStatus::Pending
+                | NodeStatus::Queued
+                | NodeStatus::Running
+                | NodeStatus::Skipped,
+            )
+            | None => false,
         }
     }
 
@@ -238,7 +250,7 @@ impl Scheduler {
         self.holds.get(id).copied().unwrap_or(0) > 0
     }
 
-    /// Record a node's end. `Failed`/`Cancelled`/`Skipped` skip every transitive
+    /// Record a node's end. `Failed`/`Blocked`/`Cancelled`/`Skipped` skip every transitive
     /// dependent. While the node is held (follow-ups pending) the end is ignored,
     /// except `Cancelled`, which also drops the holds.
     pub fn on_finished(&mut self, id: &str, status: NodeStatus, reason: Option<String>) {
@@ -252,8 +264,13 @@ impl Scheduler {
         }
         self.set(id, status, reason);
         match status {
-            NodeStatus::Failed => {
-                self.skip_dependents(id, &format!("upstream {id} failed"));
+            NodeStatus::Failed | NodeStatus::Blocked => {
+                let word = if status == NodeStatus::Blocked {
+                    "blocked"
+                } else {
+                    "failed"
+                };
+                self.skip_dependents(id, &format!("upstream {id} {word}"));
                 if self.stop_on_failure {
                     self.halted = true;
                 }
@@ -276,7 +293,14 @@ impl Scheduler {
                 self.on_finished(id, NodeStatus::Cancelled, Some("cancelled by user".into()));
                 CancelEffect::Cancelled
             }
-            _ => CancelEffect::Nothing,
+            Some(
+                NodeStatus::Succeeded
+                | NodeStatus::Failed
+                | NodeStatus::Blocked
+                | NodeStatus::Skipped
+                | NodeStatus::Cancelled,
+            )
+            | None => CancelEffect::Nothing,
         }
     }
 
@@ -451,7 +475,7 @@ fn target_set(
             if seeds.is_empty() {
                 return Err(AppError::new(
                     "not_found",
-                    format!("run {run_id} has no failed, skipped or cancelled nodes"),
+                    format!("run {run_id} has no failed, blocked, skipped or cancelled nodes"),
                 ));
             }
             Ok(with_dependents(seeds))

@@ -1,11 +1,11 @@
 /** Past runs of the graph and this node's result in each. */
 import { useEffect, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
-import type { NodeResult, RunSummary } from '../types/contract';
+import { deniedTools, type NodeResult, type RunSummary } from '../types/contract';
 import { api } from '../lib/api';
-import { formatCost, STATUS_COLORS } from '../lib/status';
+import { DENIED_HINT, formatCost, STATUS_COLORS } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
-import { errorMessage, newestFirst } from '../store/runHelpers';
+import { errorMessage, newestFirst, unionIds } from '../store/runHelpers';
 import { btnCls } from './ui';
 
 type Detail = { kind: 'none' } | { kind: 'loading' } | { kind: 'ok'; result: NodeResult } | { kind: 'error'; message: string };
@@ -24,6 +24,16 @@ function Counts({ run }: { run: RunSummary }) {
   );
 }
 
+/** "Denied tools" line: shown whenever the list is non-empty. */
+export function DeniedTools({ tools }: { tools: readonly string[] }) {
+  if (tools.length === 0) return null;
+  return (
+    <p role="note" aria-label="denied tools" className="rounded border border-[#f59e0b] px-2 py-1 text-[12px] text-[#f59e0b]">
+      Denied tools: {tools.join(', ')}. {DENIED_HINT}
+    </p>
+  );
+}
+
 export function ResultsTab({ nodeId }: { nodeId: string }) {
   const dir = useGraphStore((s) => s.dir);
   const runKey = useGraphStore((s) => `${s.runState?.run_id ?? ''}:${s.runState?.status ?? ''}`);
@@ -32,6 +42,8 @@ export function ResultsTab({ nodeId }: { nodeId: string }) {
   const [openRun, setOpenRun] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail>({ kind: 'none' });
   const pushToast = useGraphStore((s) => s.pushToast);
+  const shownRunId = useGraphStore((s) => s.runState?.run_id ?? null);
+  const shownDenials = useGraphStore((s) => s.runState?.nodes[nodeId]?.permission_denials);
   const reveal = (): void => {
     if (!dir) return;
     api.revealNodeDir(dir, nodeId).catch((err) => pushToast('error', `Could not open the folder: ${errorMessage(err)}`));
@@ -94,6 +106,12 @@ export function ResultsTab({ nodeId }: { nodeId: string }) {
       {detail.kind === 'error' && <p className="text-[12px] text-[#ef4444]">{detail.message}</p>}
       {detail.kind === 'ok' && (
         <div className="space-y-1 text-[12px]">
+          <DeniedTools
+            tools={unionIds(
+              deniedTools(detail.result.summary),
+              openRun === shownRunId ? deniedTools({ permission_denials: shownDenials }) : [],
+            )}
+          />
           {detail.result.summary ? (
             <div className="grid grid-cols-2 gap-x-2 text-[11px] text-[#9a9a9a]">
               <span>status: {detail.result.summary.status}</span>

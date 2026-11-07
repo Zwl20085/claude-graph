@@ -89,10 +89,19 @@ chat history in some app. Plain files next to the graph that produced them.
   ```
   claude -p "Follow the node brief given on stdin exactly. ..." \
          --output-format stream-json --verbose \
-         --model <haiku|sonnet|opus> --permission-mode <mode> \
+         --model <haiku|sonnet|opus> [--permission-mode <mode>] \
          --add-dir <graph-dir> [--max-turns N] [--resume <session-id>] \
          [--allowedTools <tool> ...]
   ```
+
+  By default no `--permission-mode` is passed: the node runs under the permissions in
+  your own Claude Code settings, exactly like your interactive sessions. Pick an explicit
+  mode on a node or in the graph settings only when you want to override that.
+- **Denied tools.** A headless run cannot ask you anything, so a tool your settings do
+  not allow is refused. The app shows a warning toast at the first refusal, lists the
+  denied tools in the node's Results tab, and marks the card. Fix it by switching the
+  node to "Claude Code settings", adding the tool to its allowed tools, or changing your
+  Claude Code settings.
 
 - **Run folder.** Every stdout line is appended untouched to `events.jsonl`. The final
   text goes to `result.md`, session id, cost and turns to `summary.json`. The agent
@@ -183,7 +192,10 @@ Capacities are set per graph in the settings popover.
 then by id. The critical path never waits behind a leaf. When an `exclusive` node is
 ready but must wait, nothing of lower priority starts in front of it.
 
-**Failure.** A failed node marks every node downstream of it `skipped`. Independent
+**Failure.** A failed node marks every node downstream of it `skipped`. A node that
+ends its reply with `## Status: BLOCKED` is `blocked` (amber): it stopped to ask you
+something. Its dependents are skipped too, the inspector shows what it asked, and a
+reply in the Messages tab that ends `## Status: DONE` turns it `succeeded`. Independent
 branches keep running, unless `stop_on_failure` is set; then nothing new starts and
 running nodes finish.
 
@@ -192,7 +204,7 @@ running nodes finish.
 - **Run all.** Every node, in dependency order.
 - **Run from node.** The selected node and everything downstream of it. Upstream nodes
   are not rerun; their latest successful results are used as inputs.
-- **Rerun failed.** The failed, skipped and cancelled nodes of the latest run, plus
+- **Rerun failed.** The failed, blocked, skipped and cancelled nodes of the latest run, plus
   their dependents.
 
 **Cancel** stops the run: nothing new starts and running processes are killed with

@@ -27,6 +27,7 @@ import {
 } from '../lib/flow';
 import { MODEL_COLORS } from '../lib/status';
 import { graphStore, useGraphStore } from '../store/graphStore';
+import type { DenialsByNode } from '../store/runHelpers';
 import { BriefNode } from './BriefNode';
 import { WireEdge } from './WireEdge';
 
@@ -34,20 +35,23 @@ export const GRID = 16;
 const nodeTypes = { brief: BriefNode };
 const edgeTypes = { wire: WireEdge };
 const snap = (v: number): number => Math.round(v / GRID) * GRID;
+const NO_DENIALS: DenialsByNode = {};
 
 export function Canvas() {
   const graph = useGraphStore((s) => s.graph);
   const runState = useGraphStore((s) => s.runState);
   const selectedNodeId = useGraphStore((s) => s.selectedNodeId);
+  const liveDenials = useGraphStore((s) => (s.eventsRunId !== null && s.eventsRunId === s.runState?.run_id ? s.liveDenials : NO_DENIALS));
   const { screenToFlowPosition } = useReactFlow();
   const [nodes, setNodes] = useState<BriefFlowNode[]>(() => (graph ? graphToFlowNodes(graph, runState) : []));
   const [edges, setEdges] = useState<WireFlowEdge[]>(() => (graph ? graphToFlowEdges(graph, runState) : []));
 
   useEffect(() => {
     if (!graph) return;
-    setNodes((prev) => mergeFlowNodes(graphToFlowNodes(graph, runState), prev));
+    const denied = new Set(Object.keys(liveDenials));
+    setNodes((prev) => mergeFlowNodes(graphToFlowNodes(graph, runState, denied), prev));
     setEdges((prev) => mergeFlowEdges(graphToFlowEdges(graph, runState), prev));
-  }, [graph, runState]);
+  }, [graph, runState, liveDenials]);
 
   // M2: RF selection follows the store; a programmatic selection deselects the others.
   useEffect(() => setNodes((ns) => selectOnly(ns, selectedNodeId)), [selectedNodeId, graph]);

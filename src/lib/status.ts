@@ -1,5 +1,5 @@
 /** Status and model -> visual style mapping (pure; consumed by BriefNode, WireEdge, panels). */
-import type { Model, NodeStatus, RunState, StatusCounts } from '../types/contract';
+import type { Model, NodeStatus, PermissionMode, RunState, StatusCounts } from '../types/contract';
 import { NODE_STATUSES } from '../types/contract';
 
 export const MODEL_COLORS: Record<Model, string> = {
@@ -15,6 +15,7 @@ export const STATUS_COLORS: Record<NodeStatus, string> = {
   running: '#3b82f6',
   succeeded: '#22c55e',
   failed: '#ef4444',
+  blocked: '#f59e0b',
   skipped: '#777777',
   cancelled: '#b45309',
 };
@@ -46,19 +47,69 @@ export interface EdgeVisual {
   glow: string | null;
 }
 
+/** Compile-time exhaustiveness check for switches over closed unions. */
+export function assertNever(value: never): never {
+  throw new Error(`unexpected value: ${String(value)}`);
+}
+
 /** Edge look depends only on the status of its source node. */
 export function edgeVisual(sourceStatus: NodeStatus | null): EdgeVisual {
+  if (sourceStatus === null) return { stroke: EDGE_IDLE, animated: false, glow: null };
   switch (sourceStatus) {
     case 'running':
       return { stroke: STATUS_COLORS.running, animated: true, glow: STATUS_COLORS.running };
     case 'succeeded':
-      return { stroke: STATUS_COLORS.succeeded, animated: false, glow: null };
     case 'failed':
-      return { stroke: STATUS_COLORS.failed, animated: false, glow: null };
-    default:
+    case 'blocked':
+      return { stroke: STATUS_COLORS[sourceStatus], animated: false, glow: null };
+    case 'pending':
+    case 'queued':
+    case 'skipped':
+    case 'cancelled':
       return { stroke: EDGE_IDLE, animated: false, glow: null };
+    default:
+      return assertNever(sourceStatus);
   }
 }
+
+/** Display label of a node status (the card, the inspector). */
+export function statusLabel(status: NodeStatus): string {
+  switch (status) {
+    case 'pending':
+    case 'queued':
+    case 'running':
+    case 'succeeded':
+    case 'failed':
+    case 'blocked':
+    case 'skipped':
+    case 'cancelled':
+      return status;
+    default:
+      return assertNever(status);
+  }
+}
+
+/** Label of a permission mode in the selects (graph default and per node). */
+export function permissionLabel(mode: PermissionMode): string {
+  switch (mode) {
+    case 'claude_settings':
+      return 'Claude Code settings (recommended)';
+    case 'acceptEdits':
+    case 'default':
+    case 'plan':
+    case 'dontAsk':
+    case 'bypassPermissions':
+      return mode;
+    case 'inherit':
+      return 'inherit';
+    default:
+      return assertNever(mode);
+  }
+}
+
+/** Hint shown with denied tools (toast, Results tab). */
+export const DENIED_HINT = 'Set its permission mode to "Claude Code settings" or add the tool to its allowed tools.';
+export const RERUN_FAILED_TITLE = 'Rerun the failed, blocked, skipped and cancelled nodes of the shown run, and their dependents';
 
 export function emptyCounts(): StatusCounts {
   return Object.fromEntries(NODE_STATUSES.map((s) => [s, 0])) as StatusCounts;
@@ -77,7 +128,7 @@ export function isRunActive(run: RunState | null): boolean {
 
 /**
  * "Rerun failed" is offered only for a finished run with at least one failed,
- * skipped or cancelled node (the backend reruns those and their dependents).
+ * blocked, skipped or cancelled node (the backend reruns those and their dependents).
  */
 export function runHasFailures(run: RunState | null): boolean {
   if (run === null || isRunActive(run)) return false;
