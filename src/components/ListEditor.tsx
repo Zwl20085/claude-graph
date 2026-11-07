@@ -3,7 +3,7 @@ import { Plus, Trash2 } from 'lucide-react';
 import type { Deliverable } from '../types/contract';
 import { deliverablePathError } from '../lib/validate';
 import { nextRowKey, useDraftRows, type Row } from '../hooks/useDraftRows';
-import { btnCls, errorCls, inputCls } from './ui';
+import { btnCls, errorCls, inputBoxCls, inputCls } from './ui';
 
 const replaceRow = <T,>(rows: readonly Row<T>[], key: string, value: T): Row<T>[] =>
   rows.map((r) => (r.key === key ? { ...r, value } : r));
@@ -60,7 +60,7 @@ export function DeliverablesEditor({ items, onChange }: DeliverablesProps) {
           <div key={row.key}>
             <div className="flex gap-1">
               <input
-                className={`${inputCls} w-[38%] font-mono ${error ? 'border-[#ef4444]' : ''}`}
+                className={`${inputBoxCls} w-[38%] shrink-0 font-mono ${error ? 'border-[#ef4444]' : ''}`}
                 value={d.path}
                 placeholder="path"
                 aria-label={`deliverable ${i + 1} path`}

@@ -15,15 +15,32 @@ import { useGraphStore } from '../store/graphStore';
 import { errorMessage } from '../store/runHelpers';
 import { btnCls, inputCls } from './ui';
 
-/** History from list_messages merged with live user_message events (M5); refetched on result events. */
+/**
+ * Changes whenever the node's run state changes. The backend emits `result`
+ * from the stream, before it writes the assistant reply to messages.jsonl, and
+ * only then emits run:state; refetching on this key picks the reply up.
+ */
+function useNodeStateKey(nodeId: string): string {
+  return useGraphStore((s) => {
+    const n = s.runState?.nodes[nodeId];
+    return n ? `${n.status}|${n.finished_at ?? ''}|${n.num_turns ?? ''}|${n.cost_usd ?? ''}` : '';
+  });
+}
+
+/**
+ * History from list_messages merged with live user_message events (M5);
+ * refetched on result events and on every change of the node's run state.
+ */
 function useHistory(dir: string | null, runId: string | null, nodeId: string) {
   const [history, setHistory] = useState<NodeMessage[]>([]);
   const lines = useGraphStore((s) => (s.eventsRunId === runId ? s.events[nodeId] : undefined));
   const controller = useRef<MessageHistory | null>(null);
   const seen = useRef(0);
+  const stateKey = useNodeStateKey(nodeId);
 
   useEffect(() => {
     setHistory([]);
+    seen.current = 0;
     if (!dir || !runId) {
       controller.current = null;
       return;
@@ -47,6 +64,14 @@ function useHistory(dir: string | null, runId: string | null, nodeId: string) {
     h.addLive(fresh.filter((l) => l.kind === 'user_message').map((l): NodeMessage => ({ role: 'user', text: l.text, ts: l.ts })));
     if (fresh.some((l) => l.kind === 'result')) void h.refresh();
   }, [lines]);
+
+  // Skip the first render: the setup effect above has just fetched.
+  const lastKey = useRef(stateKey);
+  useEffect(() => {
+    if (lastKey.current === stateKey) return;
+    lastKey.current = stateKey;
+    void controller.current?.refresh();
+  }, [stateKey]);
 
   return history;
 }

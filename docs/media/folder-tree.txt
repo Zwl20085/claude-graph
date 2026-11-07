@@ -1,0 +1,32 @@
+hello-pipeline/
+|   graph.json
+|   GRAPH_LOG.md
+|
++---nodes
+|   +---survey
+|   |   |   brief.md
+|   |   \---deliverables
+|   |           survey.md
+|   +---design
+|   |   |   brief.md
+|   |   \---deliverables
+|   |           check_rules.py
+|   |           rules.md
+|   \---report
+|       |   brief.md
+|       \---deliverables
+|               report.md
+\---runs
+    \---20261107T040952Z
+        |   run.json
+        +---survey
+        |       events.jsonl
+        |       messages.jsonl
+        |       prompt.md
+        |       result.md
+        |       stderr.log
+        |       summary.json
+        +---design
+        |       (same six files)
+        \---report
+                (same six files)

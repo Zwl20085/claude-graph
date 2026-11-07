@@ -13,8 +13,10 @@ import {
 } from 'react';
 import { X } from 'lucide-react';
 
-export const inputCls =
-  'w-full rounded border border-[#3c3c3c] bg-[#1e1e1e] px-2 py-1 text-[13px] text-[#d4d4d4] outline-none focus:border-[#3b82f6] disabled:opacity-60';
+/** Input look without a width: combine with an explicit width class (inputCls carries w-full, which would win). */
+export const inputBoxCls =
+  'rounded border border-[#3c3c3c] bg-[#1e1e1e] px-2 py-1 text-[13px] text-[#d4d4d4] outline-none focus:border-[#3b82f6] disabled:opacity-60';
+export const inputCls = `w-full ${inputBoxCls}`;
 export const btnCls =
   'inline-flex items-center gap-1 rounded px-2 py-1 text-[12px] text-[#d4d4d4] hover:bg-[#37373d] disabled:cursor-not-allowed disabled:opacity-40';
 export const errorCls = 'mt-0.5 block text-[11px] text-[#ef4444]';

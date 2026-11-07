@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { MODELS, PERMISSION_MODES, type Settings } from '../types/contract';
 import { IGNORED_CLAUDE_BIN_TEXT, useGraphStore } from '../store/graphStore';
-import { btnCls, errorCls, Field, Input, inputCls, NumberInput, Select, tagError } from './ui';
+import { btnCls, errorCls, Field, Input, inputBoxCls, inputCls, NumberInput, Select, tagError } from './ui';
 
 function ResourcesTable({ resources, onChange }: { resources: Settings['resources']; onChange: (r: Settings['resources']) => void }) {
   const [tag, setTag] = useState('');
@@ -21,9 +21,11 @@ function ResourcesTable({ resources, onChange }: { resources: Settings['resource
     <div className="space-y-1">
       {entries.map(([k, cap]) => (
         <div key={k} className="flex items-center gap-1">
-          <span className="flex-1 truncate font-mono text-[12px]">{k}</span>
+          <span className="min-w-[3rem] flex-1 truncate font-mono text-[12px]" title={k}>
+            {k}
+          </span>
           <NumberInput
-            className={`${inputCls} w-20`}
+            className={`${inputBoxCls} w-20 shrink-0`}
             value={cap}
             min={0}
             aria-label={`capacity of ${k}`}

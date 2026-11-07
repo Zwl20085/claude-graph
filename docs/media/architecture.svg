@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="480" viewBox="0 0 1000 480" role="img" aria-label="Architecture: the React Flow editor saves graph.json; on start_run the Rust scheduler reads it and admits ready nodes through resource pools (cpu 1, memory 1, exclusive); each admitted node becomes one claude -p process that gets its brief on stdin and streams JSON on stdout; every line lands in the run folder (events.jsonl, result.md, summary.json) and deliverables go to nodes/id/deliverables; the status check feeds the scheduler and parsed lines flow back to the editor as live run:state and node:event events.">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#a1a1aa"/>
+    </marker>
+    <marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#3b82f6"/>
+    </marker>
+    <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#22c55e"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="480" fill="#1e1e1e"/>
+
+  <g font-family="Segoe UI, -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" fill="#e5e5e5">
+    <!-- process boundaries -->
+    <text x="30" y="26" font-size="12" fill="#71717a" letter-spacing="1">WEBVIEW</text>
+    <text x="440" y="26" font-size="12" fill="#71717a" letter-spacing="1">RUST BACKEND (TAURI 2)</text>
+    <text x="760" y="26" font-size="12" fill="#71717a" letter-spacing="1">CHILD PROCESSES</text>
+
+    <!-- Editor -->
+    <rect x="30" y="50" width="175" height="130" rx="8" fill="#262626" stroke="#52525b"/>
+    <rect x="30" y="50" width="175" height="6" rx="3" fill="#3b82f6"/>
+    <text x="48" y="84" font-size="17" font-weight="700">Editor</text>
+    <text x="48" y="106" font-size="13" fill="#a1a1aa">React Flow canvas</text>
+    <text x="48" y="125" font-size="13" fill="#a1a1aa">inspector, log, messages</text>
+    <text x="48" y="158" font-size="12" fill="#71717a">autosave 800 ms</text>
+
+    <!-- graph.json -->
+    <path d="M245 70 h110 l20 20 v80 h-130 z" fill="#262626" stroke="#52525b"/>
+    <path d="M355 70 v20 h20" fill="none" stroke="#52525b"/>
+    <text x="260" y="104" font-size="15" font-weight="700" font-family="Consolas, Menlo, monospace">graph.json</text>
+    <text x="260" y="126" font-size="12" fill="#a1a1aa">nodes, edges,</text>
+    <text x="260" y="143" font-size="12" fill="#a1a1aa">settings, positions</text>
+    <text x="260" y="160" font-size="12" fill="#71717a">+ brief.md per node</text>
+
+    <line x1="205" y1="115" x2="241" y2="115" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+    <text x="223" y="105" font-size="11" fill="#a1a1aa" text-anchor="middle">save</text>
+
+    <!-- Scheduler -->
+    <rect x="440" y="40" width="270" height="210" rx="8" fill="#262626" stroke="#52525b"/>
+    <text x="458" y="70" font-size="17" font-weight="700">Scheduler</text>
+    <text x="458" y="91" font-size="12" fill="#a1a1aa">ready = all upstream succeeded</text>
+    <text x="458" y="108" font-size="12" fill="#a1a1aa">order: longest downstream path</text>
+
+    <text x="458" y="138" font-size="12" fill="#71717a" letter-spacing="1">RESOURCE POOLS</text>
+    <text x="458" y="161" font-size="13" font-family="Consolas, Menlo, monospace">cpu</text>
+    <rect x="560" y="149" width="18" height="16" rx="2" fill="#8b5cf6"/>
+    <text x="588" y="161" font-size="12" fill="#a1a1aa">1 of 1 in use</text>
+    <text x="458" y="185" font-size="13" font-family="Consolas, Menlo, monospace">memory</text>
+    <rect x="560" y="173" width="18" height="16" rx="2" fill="none" stroke="#71717a"/>
+    <text x="588" y="185" font-size="12" fill="#a1a1aa">0 of 1</text>
+    <text x="458" y="209" font-size="13" font-family="Consolas, Menlo, monospace">exclusive</text>
+    <rect x="560" y="197" width="18" height="16" rx="2" fill="none" stroke="#71717a"/>
+    <text x="588" y="209" font-size="12" fill="#a1a1aa">runs alone</text>
+    <text x="458" y="236" font-size="12" fill="#71717a">and max_parallel across all nodes</text>
+
+    <path d="M375 120 L436 120" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+    <text x="405" y="110" font-size="11" fill="#a1a1aa" text-anchor="middle">start_run</text>
+
+    <!-- claude processes -->
+    <rect x="760" y="40" width="210" height="62" rx="8" fill="#262626" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="776" y="64" font-size="14" font-weight="700" font-family="Consolas, Menlo, monospace">claude -p</text>
+    <text x="954" y="64" font-size="12" fill="#a78bfa" text-anchor="end">design · opus</text>
+    <text x="776" y="87" font-size="12" fill="#a1a1aa">stdin: brief · stdout: stream-json</text>
+
+    <rect x="760" y="114" width="210" height="62" rx="8" fill="#262626" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="776" y="138" font-size="14" font-weight="700" font-family="Consolas, Menlo, monospace">claude -p</text>
+    <text x="954" y="138" font-size="12" fill="#60a5fa" text-anchor="end">&lt;other&gt; · sonnet</text>
+    <text x="776" y="161" font-size="12" fill="#a1a1aa">stdin: brief · stdout: stream-json</text>
+
+    <rect x="760" y="188" width="210" height="50" rx="8" fill="none" stroke="#52525b" stroke-dasharray="5 4"/>
+    <text x="865" y="218" font-size="12" fill="#71717a" text-anchor="middle">up to max_parallel at once</text>
+
+    <path d="M710 90 C 735 90, 735 71, 756 71" fill="none" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+    <path d="M710 135 C 735 135, 735 145, 756 145" fill="none" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+    <text x="735" y="121" font-size="11" fill="#a1a1aa" text-anchor="middle">spawn</text>
+
+    <!-- run folder -->
+    <rect x="560" y="300" width="410" height="150" rx="8" fill="#262626" stroke="#52525b"/>
+    <text x="578" y="328" font-size="15" font-weight="700" font-family="Consolas, Menlo, monospace">runs/&lt;run-id&gt;/&lt;node-id&gt;/</text>
+    <text x="578" y="354" font-size="13" font-family="Consolas, Menlo, monospace">events.jsonl</text>
+    <text x="720" y="354" font-size="12" fill="#a1a1aa">every stdout line, untouched</text>
+    <text x="578" y="376" font-size="13" font-family="Consolas, Menlo, monospace">result.md</text>
+    <text x="720" y="376" font-size="12" fill="#a1a1aa">final assistant text</text>
+    <text x="578" y="398" font-size="13" font-family="Consolas, Menlo, monospace">summary.json</text>
+    <text x="720" y="398" font-size="12" fill="#a1a1aa">session, cost, turns, status</text>
+    <line x1="578" y1="412" x2="952" y2="412" stroke="#3f3f46"/>
+    <text x="578" y="434" font-size="13" font-family="Consolas, Menlo, monospace">nodes/&lt;id&gt;/deliverables/</text>
+    <text x="800" y="434" font-size="12" fill="#a1a1aa">what the agent writes</text>
+
+    <path d="M865 238 L865 296" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+    <text x="855" y="266" font-size="11" fill="#a1a1aa" text-anchor="end">append each line,</text><text x="855" y="281" font-size="11" fill="#a1a1aa" text-anchor="end">write files</text>
+
+    <!-- status check back to scheduler -->
+    <path d="M640 300 L640 254" stroke="#22c55e" stroke-width="1.5" marker-end="url(#ahg)"/>
+    <text x="630" y="274" font-size="11" fill="#22c55e" text-anchor="end">## Status: DONE + files exist</text>
+    <text x="630" y="289" font-size="11" fill="#22c55e" text-anchor="end">= succeeded, start dependents</text>
+
+    <!-- live events back to editor -->
+    <path d="M560 375 L125 375 L125 184" fill="none" stroke="#3b82f6" stroke-width="2" marker-end="url(#ahb)"/>
+    <text x="340" y="365" font-size="12" fill="#60a5fa" text-anchor="middle">live IPC events: run:state, node:event</text>
+    <text x="340" y="395" font-size="11" fill="#a1a1aa" text-anchor="middle">status rings, log lines, messages</text>
+  </g>
+</svg>

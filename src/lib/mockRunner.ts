@@ -30,6 +30,8 @@ export interface MockRun {
 
 /** Delay of the fake assistant reply to send_message. */
 export const MOCK_REPLY_MS = 1500;
+/** Delay between a follow-up's `result` event and its reply landing in the history. */
+export const MOCK_RECORD_MS = 200;
 
 export interface RunnerDeps {
   timers: Timers;
@@ -250,12 +252,20 @@ export function createMockRunner(deps: RunnerDeps) {
       }
       later(run, nodeId, MOCK_REPLY_MS, () => {
         const reply = `(mock) Received: ${text}`;
-        add({ role: 'assistant', text: reply, ts: stamp() });
+        // Like the backend: `result` comes from the stream, the reply is
+        // recorded after the process exits, then run:state follows.
         deps.emitEvent(run.state.graph_dir, runId, nodeId, 'result', reply);
-        if (resumed) {
-          setNode(run, nodeId, { status: before === 'cancelled' ? 'succeeded' : before, finished_at: stamp() });
-          advance(run);
-        }
+        later(run, nodeId, MOCK_RECORD_MS, () => {
+          add({ role: 'assistant', text: reply, ts: stamp() });
+          const turns = (run.state.nodes[nodeId]?.num_turns ?? 0) + 1;
+          if (resumed) {
+            setNode(run, nodeId, { status: before === 'cancelled' ? 'succeeded' : before, finished_at: stamp(), num_turns: turns });
+            advance(run);
+          } else {
+            setNode(run, nodeId, { num_turns: turns });
+            deps.emitState(run.state);
+          }
+        });
       });
     },
     cancelNode(runId: string, nodeId: string): void {

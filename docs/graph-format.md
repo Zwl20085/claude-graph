@@ -14,7 +14,7 @@ Standalone reference extracted from [ARCHITECTURE.md](ARCHITECTURE.md) §2. Type
     "stop_on_failure": false,
     "default_model": "sonnet",
     "default_permission_mode": "acceptEdits",
-    "claude_bin": null                    // null = find on PATH; else explicit path
+    "claude_bin": null                    // deprecated and ignored: the claude path is a per-machine app setting
   },
   "nodes": [ { ...Node } ],
   "edges": [ { "id": "e1", "from": "node-a", "to": "node-b" } ]

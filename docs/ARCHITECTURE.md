@@ -41,6 +41,8 @@ Scaffold pins (2026-11-07): React 18.3, Tailwind 3.4 (PostCSS), Vite 6.4,
       events.jsonl           # raw stream-json lines, untouched
       result.md              # final assistant text
       summary.json           # {session_id, cost_usd, duration_ms, num_turns, is_error, status}
+      messages.jsonl         # Messages-tab conversation (follow-ups)
+      stderr.log             # the CLI's stderr
   GRAPH_LOG.md               # append-only human log: one line per run per node (app-written)
 ```
 
