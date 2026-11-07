@@ -20,6 +20,8 @@ pub const GRAPH_VERSION: u32 = 1;
 pub const EVENT_RUN_STATE: &str = "run:state";
 /// Event name: one summarised stream-json line of a running node.
 pub const EVENT_NODE_EVENT: &str = "node:event";
+/// Event name: full `AssistantState` after every assistant-mode change.
+pub const EVENT_ASSISTANT_UPDATE: &str = "assistant_update";
 
 // ---------------------------------------------------------------------------
 // Graph (graph.json)
@@ -389,6 +391,108 @@ pub struct TrustStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Assistant mode (graph folder `assistant/`, docs/ARCHITECTURE.md "Assistant mode")
+// ---------------------------------------------------------------------------
+
+/// State of the scheduler session of one graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantStatus {
+    /// No turn running and the scheduler is not waiting on anything.
+    Idle,
+    /// A turn is running.
+    Working,
+    /// The last reply asked at least one `## Question`.
+    Waiting,
+    /// The last reply contained `## Final` and no question.
+    Done,
+    /// The last turn errored.
+    Failed,
+    /// The last turn was cancelled by the user.
+    Cancelled,
+}
+
+/// Content of `assistant/session.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantSession {
+    /// CLI session id, used for `--resume`.
+    pub session_id: Option<String>,
+    pub status: AssistantStatus,
+    /// Completed + running turns (turn folders are numbered from 1).
+    pub turns: u32,
+    /// As reported by the CLI init event; display only.
+    pub model: Option<String>,
+    /// sha256 hex of the rendered workflow last sent.
+    pub workflow_hash: Option<String>,
+    pub last_error: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl AssistantSession {
+    /// The state of a graph that has never talked to a scheduler.
+    pub fn empty(now: DateTime<Utc>) -> Self {
+        Self {
+            session_id: None,
+            status: AssistantStatus::Idle,
+            turns: 0,
+            model: None,
+            workflow_hash: None,
+            last_error: None,
+            updated_at: now,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantRole {
+    User,
+    Scheduler,
+    App,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantKind {
+    // role user
+    Instruction,
+    Answer,
+    // role scheduler
+    Stage,
+    Question,
+    Decision,
+    Note,
+    Final,
+    // role app
+    System,
+    Error,
+}
+
+/// One line of `assistant/journal.jsonl`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantMessage {
+    /// uuid v4.
+    pub id: String,
+    pub ts: DateTime<Utc>,
+    /// Turn the message belongs to (0 for app messages outside a turn).
+    pub turn: u32,
+    pub role: AssistantRole,
+    pub kind: AssistantKind,
+    /// Stage name or decision title; `None` otherwise.
+    pub title: Option<String>,
+    /// Body, trimmed.
+    pub text: String,
+}
+
+/// Return value of the assistant commands and payload of `assistant_update`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantState {
+    pub session: AssistantSession,
+    /// The whole journal, in order.
+    pub messages: Vec<AssistantMessage>,
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -396,7 +500,7 @@ pub struct TrustStatus {
 ///
 /// Codes in use: `not_implemented`, `io`, `json`, `invalid_graph`, `invalid_input`,
 /// `not_found`, `claude_not_found`, `spawn_failed`, `run_active`, `untrusted_graph`,
-/// `cancelled`, `internal`.
+/// `cancelled`, `internal`, `assistant_busy`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct AppError {
@@ -554,6 +658,87 @@ mod tests {
         assert_eq!(v["finished_at"], Value::Null);
         let back: RunState = serde_json::from_value(v).unwrap();
         assert_eq!(back, state);
+    }
+
+    #[test]
+    fn assistant_names_are_snake_case() {
+        assert_eq!(json!(AssistantStatus::Idle), json!("idle"));
+        assert_eq!(json!(AssistantStatus::Working), json!("working"));
+        assert_eq!(json!(AssistantStatus::Waiting), json!("waiting"));
+        assert_eq!(json!(AssistantStatus::Done), json!("done"));
+        assert_eq!(json!(AssistantStatus::Failed), json!("failed"));
+        assert_eq!(json!(AssistantStatus::Cancelled), json!("cancelled"));
+        assert_eq!(json!(AssistantRole::User), json!("user"));
+        assert_eq!(json!(AssistantRole::Scheduler), json!("scheduler"));
+        assert_eq!(json!(AssistantRole::App), json!("app"));
+        let kinds = [
+            (AssistantKind::Instruction, "instruction"),
+            (AssistantKind::Answer, "answer"),
+            (AssistantKind::Stage, "stage"),
+            (AssistantKind::Question, "question"),
+            (AssistantKind::Decision, "decision"),
+            (AssistantKind::Note, "note"),
+            (AssistantKind::Final, "final"),
+            (AssistantKind::System, "system"),
+            (AssistantKind::Error, "error"),
+        ];
+        for (kind, name) in kinds {
+            assert_eq!(json!(kind), json!(name));
+        }
+        assert_eq!(EVENT_ASSISTANT_UPDATE, "assistant_update");
+    }
+
+    #[test]
+    fn assistant_state_round_trips_with_contract_field_names() {
+        let state = AssistantState {
+            session: AssistantSession {
+                session_id: Some("0f8fad5b-d9cb-469f-a165-70867728950e".into()),
+                status: AssistantStatus::Waiting,
+                turns: 2,
+                model: Some("claude-sonnet".into()),
+                workflow_hash: Some("ab".into()),
+                last_error: None,
+                updated_at: "2026-11-07T10:15:00Z".parse().unwrap(),
+            },
+            messages: vec![AssistantMessage {
+                id: "m1".into(),
+                ts: "2026-11-07T10:15:01Z".parse().unwrap(),
+                turn: 1,
+                role: AssistantRole::Scheduler,
+                kind: AssistantKind::Stage,
+                title: Some("survey".into()),
+                text: "done".into(),
+            }],
+        };
+        let v = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "session": {
+                    "session_id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+                    "status": "waiting",
+                    "turns": 2,
+                    "model": "claude-sonnet",
+                    "workflow_hash": "ab",
+                    "last_error": null,
+                    "updated_at": "2026-11-07T10:15:00Z"
+                },
+                "messages": [{
+                    "id": "m1",
+                    "ts": "2026-11-07T10:15:01Z",
+                    "turn": 1,
+                    "role": "scheduler",
+                    "kind": "stage",
+                    "title": "survey",
+                    "text": "done"
+                }]
+            })
+        );
+        let back: AssistantState = serde_json::from_value(v).unwrap();
+        assert_eq!(back, state);
+        let empty = AssistantSession::empty(Utc::now());
+        assert_eq!(empty.status, AssistantStatus::Idle);
+        assert_eq!(empty.turns, 0);
     }
 
     #[test]

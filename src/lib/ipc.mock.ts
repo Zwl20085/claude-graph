@@ -10,6 +10,7 @@ import example from '../../examples/hello-pipeline/graph.json';
 import type {
   AppError,
   AppSettings,
+  AssistantState,
   ClaudeCheck,
   Graph,
   LaunchOptions,
@@ -24,6 +25,7 @@ import type { Api, Unlisten } from './api';
 import { renderBrief } from './brief';
 import { defaultTimers, type Timers } from './debounce';
 import { emptyGraph } from './graphOps';
+import { createMockAssistant, MOCK_ASSISTANT_REPLY_MS } from './mockAssistant';
 import { createMockRunner, type MockRun } from './mockRunner';
 import { countStatuses } from './status';
 import { trustFingerprint, trustItems } from './trust';
@@ -42,6 +44,8 @@ export interface MockOptions {
   pickFolder?: (title: string) => string | null;
   /** Treat every graph as trusted (skips the trust dialog; default false). */
   trustAll?: boolean;
+  /** Delay of the mock scheduler's reply in assistant mode. */
+  assistantReplyMs?: number;
 }
 
 const appError = (code: string, message: string): AppError => ({ code, message });
@@ -80,6 +84,7 @@ export function createMockIpc(options: MockOptions = {}): Api {
   let recent: string[] = [];
   const stateListeners = new Set<(s: RunState) => void>();
   const eventListeners = new Set<(e: NodeEvent) => void>();
+  const assistantListeners = new Set<(s: AssistantState) => void>();
   /** dir -> accepted fingerprint of the elevated fields (stand-in for trusted.json). */
   const trusted = new Map<string, string>();
   let appSettings: AppSettings = { claude_bin: null };
@@ -101,6 +106,18 @@ export function createMockIpc(options: MockOptions = {}): Api {
     emitState: (s) => stateListeners.forEach((h) => h(clone(s))),
     emitEvent: (dir, runId, nodeId, kind: NodeEventKind, text) => {
       void dir;
+      const ev: NodeEvent = { run_id: runId, node_id: nodeId, kind, text, ts: (options.now ?? (() => new Date()))().toISOString() };
+      eventListeners.forEach((h) => h(ev));
+    },
+  });
+
+  const assistant = createMockAssistant({
+    timers: options.timers ?? defaultTimers,
+    now: options.now ?? (() => new Date()),
+    replyMs: options.assistantReplyMs ?? MOCK_ASSISTANT_REPLY_MS,
+    graphOf: (dir) => requireGraph(dir),
+    emitUpdate: (s) => assistantListeners.forEach((h) => h(clone(s))),
+    emitEvent: (runId, nodeId, kind, text) => {
       const ev: NodeEvent = { run_id: runId, node_id: nodeId, kind, text, ts: (options.now ?? (() => new Date()))().toISOString() };
       eventListeners.forEach((h) => h(ev));
     },
@@ -214,6 +231,14 @@ export function createMockIpc(options: MockOptions = {}): Api {
     onNodeEvent: async (handler): Promise<Unlisten> => {
       eventListeners.add(handler);
       return () => eventListeners.delete(handler);
+    },
+    assistantState: async (dir) => assistant.state(dir),
+    assistantSend: async (dir, text) => assistant.send(dir, text),
+    assistantCancel: async (dir) => assistant.cancel(dir),
+    assistantReset: async (dir) => assistant.reset(dir),
+    onAssistantUpdate: async (handler): Promise<Unlisten> => {
+      assistantListeners.add(handler);
+      return () => assistantListeners.delete(handler);
     },
   };
 }

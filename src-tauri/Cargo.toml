@@ -1,6 +1,6 @@
 [package]
 name = "claude-graph"
-version = "0.1.0"
+version = "0.2.0"
 description = "Draw a graph of Claude Code tasks and run it through the local claude CLI."
 authors = ["Wentao Zhang"]
 license = "MIT"

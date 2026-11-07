@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::app_settings::{self, default_data_dir};
+use crate::assistant::AssistantTurns;
 use crate::claude_bin::{resolve, ClaudeCommand, Resolution, ResolveEnv};
 use crate::contract::{AppError, AppResult, AppSettings, RunState, RunTarget, TrustStatus};
 use crate::events::Emitter;
@@ -62,6 +63,8 @@ impl Registry {
 #[derive(Clone)]
 pub struct AppState {
     registry: Arc<Mutex<Registry>>,
+    /// Running assistant-mode scheduler turns (see [`crate::assistant::api`]).
+    assistant: AssistantTurns,
     data_dir: PathBuf,
 }
 
@@ -119,12 +122,17 @@ impl AppState {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             registry: Arc::new(Mutex::new(Registry::default())),
+            assistant: AssistantTurns::default(),
             data_dir,
         }
     }
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    pub(crate) fn assistant_turns(&self) -> &AssistantTurns {
+        &self.assistant
     }
 
     fn lock(&self) -> MutexGuard<'_, Registry> {
@@ -288,9 +296,9 @@ impl AppState {
         self.send(run_id, LoopMsg::CancelNode(node_id.to_string()))
     }
 
-    /// App exit: cancel every active run and wait up to `timeout` for the
-    /// loops to finish (they kill their process trees and write run.json).
-    /// Returns how many loops were still alive at the deadline.
+    /// App exit: cancel every active run and assistant turn and wait up to
+    /// `timeout` for them to finish (they kill their process trees and write
+    /// run.json / session.json). Returns how many were still alive at the deadline.
     pub async fn shutdown(&self, timeout: Duration) -> usize {
         let handles: Vec<(String, RunHandle)> = self
             .lock()
@@ -303,13 +311,20 @@ impl AppState {
                 log::warn!("shutdown: run {id} already finished");
             }
         }
+        let turns = self.assistant.kill_all();
+        if turns > 0 {
+            log::info!("shutdown: cancelling {turns} assistant turn(s)");
+        }
+        let alive = || self.active_count() + self.assistant.live_count();
         let deadline = Instant::now() + timeout;
-        while self.active_count() > 0 && Instant::now() < deadline {
+        while alive() > 0 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        let left = self.active_count();
+        let left = alive();
         if left > 0 {
-            log::warn!("shutdown: {left} run loop(s) still alive after {timeout:?}");
+            log::warn!(
+                "shutdown: {left} run loop(s) / assistant turn(s) still alive after {timeout:?}"
+            );
         }
         left
     }

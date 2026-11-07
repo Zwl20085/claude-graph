@@ -8,11 +8,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
+  EVENT_ASSISTANT_UPDATE,
   EVENT_NODE_EVENT,
   EVENT_RUN_STATE,
   isAppError,
   type AppError,
   type AppSettings,
+  type AssistantState,
   type ClaudeCheck,
   type Graph,
   type LaunchOptions,
@@ -119,3 +121,20 @@ export const onRunState = (handler: (state: RunState) => void): Promise<Unlisten
 /** Subscribe to `node:event`. Resolves to an unsubscribe function. */
 export const onNodeEvent = (handler: (event: NodeEvent) => void): Promise<UnlistenFn> =>
   listen<NodeEvent>(EVENT_NODE_EVENT, (e) => handler(e.payload));
+
+/** Assistant journal + session of the graph folder (empty idle state when assistant/ is missing). */
+export const assistantState = (dir: string): Promise<AssistantState> => call('assistant_state', { dir });
+
+/** Append a user message (instruction, or answer when waiting) and start a scheduler turn. */
+export const assistantSend = (dir: string, text: string): Promise<AssistantState> =>
+  call('assistant_send', { dir, text });
+
+/** Kill the running scheduler turn; rejects with not_found when nothing runs. */
+export const assistantCancel = (dir: string): Promise<void> => call('assistant_cancel', { dir });
+
+/** Forget the scheduler session (journal kept); rejects with assistant_busy while working. */
+export const assistantReset = (dir: string): Promise<AssistantState> => call('assistant_reset', { dir });
+
+/** Subscribe to `assistant_update`. The payload names no folder: callers reload their own. */
+export const onAssistantUpdate = (handler: (state: AssistantState) => void): Promise<UnlistenFn> =>
+  listen<AssistantState>(EVENT_ASSISTANT_UPDATE, (e) => handler(e.payload));

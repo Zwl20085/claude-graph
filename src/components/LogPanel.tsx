@@ -1,10 +1,15 @@
-/** Live stream of the selected node in the shown run ("watch Claude work"). */
+/**
+ * Live stream of the selected node in the shown run ("watch Claude work"),
+ * or of the assistant's scheduler turn while the Assistant tab is open.
+ */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Copy, Eraser } from 'lucide-react';
 import type { NodeEventKind } from '../types/contract';
 import { api } from '../lib/api';
 import { isRunActive } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
+import { useAssistantStore } from '../store/assistantStore';
+import { ASSISTANT_NODE_ID } from '../types/contract';
 import { errorMessage, type LogLine } from '../store/runHelpers';
 import { btnCls } from './ui';
 
@@ -46,14 +51,24 @@ function useHistoricTail(nodeId: string | null, live: number): { tail: string[];
   return { tail, error };
 }
 
-export function LogPanel() {
-  const nodeId = useGraphStore((s) => s.selectedNodeId);
-  const lines = useGraphStore((s) =>
-    nodeId !== null && s.eventsRunId !== null && s.eventsRunId === s.runState?.run_id ? (s.events[nodeId] ?? EMPTY) : EMPTY,
+interface LogPanelProps {
+  /** Show the assistant's scheduler stream instead of the selected node. */
+  scheduler?: boolean;
+}
+
+export function LogPanel({ scheduler = false }: LogPanelProps) {
+  const selected = useGraphStore((s) => s.selectedNodeId);
+  const nodeLines = useGraphStore((s) =>
+    selected !== null && s.eventsRunId !== null && s.eventsRunId === s.runState?.run_id ? (s.events[selected] ?? EMPTY) : EMPTY,
   );
-  const clear = useGraphStore((s) => s.clearEvents);
+  const schedulerLines = useAssistantStore((s) => s.log);
+  const clearNode = useGraphStore((s) => s.clearEvents);
+  const clearScheduler = useAssistantStore((s) => s.clearLog);
   const pushToast = useGraphStore((s) => s.pushToast);
-  const { tail, error: tailError } = useHistoricTail(nodeId, lines.length);
+  const nodeId = scheduler ? ASSISTANT_NODE_ID : selected;
+  const lines = scheduler ? schedulerLines : nodeLines;
+  const clear = (id: string): void => (scheduler ? clearScheduler() : clearNode(id));
+  const { tail, error: tailError } = useHistoricTail(scheduler ? null : selected, lines.length);
   const box = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
@@ -108,7 +123,7 @@ export function LogPanel() {
         {lines.length === 0 && tailError !== null && (
           <p className="text-[#ef4444]">could not read events tail: {tailError}</p>
         )}
-        {lines.length === 0 && tail.length === 0 && tailError === null && <p className="text-[#777]">No output for this node in the shown run.</p>}
+        {lines.length === 0 && tail.length === 0 && tailError === null && <p className="text-[#777]">{scheduler ? 'No scheduler output in this session yet.' : 'No output for this node in the shown run.'}</p>}
       </div>
     </div>
   );

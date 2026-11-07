@@ -200,6 +200,7 @@ impl Emitter for Recorder {
     fn node_event(&self, e: &NodeEvent) {
         self.0.lock().unwrap().push(e.clone());
     }
+    fn assistant_update(&self, _: &crate::contract::AssistantState) {}
 }
 
 fn fake_claude() -> ClaudeCommand {

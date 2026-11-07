@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use claude_graph_lib::claude_bin::ENV_CLAUDE_BIN;
-use claude_graph_lib::contract::{Graph, NodeEvent, NodeEventKind, RunState};
+use claude_graph_lib::contract::{AssistantState, Graph, NodeEvent, NodeEventKind, RunState};
 use claude_graph_lib::events::Emitter;
 use claude_graph_lib::run_api::{abs, AppState};
 use claude_graph_lib::store;
@@ -52,6 +52,7 @@ pub fn graph_dir(graph: &Graph) -> tempfile::TempDir {
 pub struct Recorder {
     pub states: Mutex<Vec<RunState>>,
     pub events: Mutex<Vec<NodeEvent>>,
+    pub assistant: Mutex<Vec<AssistantState>>,
 }
 
 impl Emitter for Recorder {
@@ -60,6 +61,9 @@ impl Emitter for Recorder {
     }
     fn node_event(&self, event: &NodeEvent) {
         self.events.lock().unwrap().push(event.clone());
+    }
+    fn assistant_update(&self, state: &AssistantState) {
+        self.assistant.lock().unwrap().push(state.clone());
     }
 }
 

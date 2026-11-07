@@ -252,7 +252,8 @@ export interface TrustStatus {
  * invalid_graph, not_found, claude_not_found, run_active, internal, spawn_failed,
  * invalid_input, untrusted_graph (start_run on a graph whose elevated settings
  * were not accepted via trust_graph). send_message: a node that never ran ->
- * not_found; empty text -> invalid_input. `interrupted` appears as a node
+ * not_found; empty text -> invalid_input. assistant_send / assistant_reset while a
+ * scheduler turn runs -> assistant_busy. `interrupted` appears as a node
  * `reason` for runs found stale at startup.
  */
 export interface AppError {
@@ -281,4 +282,93 @@ export function isRunState(value: unknown): value is RunState {
   return Object.values(nodes).every(
     (n) => isObject(n) && (NODE_STATUSES as readonly unknown[]).includes(n.status) && isNullableString(n.reason ?? null),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Assistant mode (one long-lived scheduler session per graph folder)
+// ---------------------------------------------------------------------------
+
+/** Event: full AssistantState after every change (no dir in the payload: reload). */
+export const EVENT_ASSISTANT_UPDATE = 'assistant_update';
+/** `run_id` / `node_id` of the scheduler turn's lines on the `node:event` channel. */
+export const ASSISTANT_RUN_ID = 'assistant';
+export const ASSISTANT_NODE_ID = 'scheduler';
+
+export const ASSISTANT_STATUSES = ['idle', 'working', 'waiting', 'done', 'failed', 'cancelled'] as const;
+/**
+ * idle: no turn running and nothing pending; working: a turn is running;
+ * waiting: the last reply asked a `## Question`; done: the last reply had `## Final`;
+ * failed: the last turn errored; cancelled: the last turn was cancelled.
+ */
+export type AssistantStatus = (typeof ASSISTANT_STATUSES)[number];
+
+/** Content of assistant/session.json. */
+export interface AssistantSession {
+  /** CLI session id, used for --resume. */
+  session_id: string | null;
+  status: AssistantStatus;
+  /** Completed + running turns (turn folder numbers start at 1). */
+  turns: number;
+  /** As reported by the CLI init event; display only. */
+  model: string | null;
+  /** sha256 hex of the rendered workflow last sent. */
+  workflow_hash: string | null;
+  last_error: string | null;
+  updated_at: string;
+}
+
+export const ASSISTANT_ROLES = ['user', 'scheduler', 'app'] as const;
+export type AssistantRole = (typeof ASSISTANT_ROLES)[number];
+
+export const ASSISTANT_KINDS = [
+  'instruction',
+  'answer',
+  'stage',
+  'question',
+  'decision',
+  'note',
+  'final',
+  'system',
+  'error',
+] as const;
+/** user: instruction | answer; scheduler: stage | question | decision | note | final; app: system | error. */
+export type AssistantKind = (typeof ASSISTANT_KINDS)[number];
+
+/** One line of assistant/journal.jsonl. */
+export interface AssistantMessage {
+  id: string;
+  ts: string;
+  /** Turn this message belongs to (0 for app messages outside a turn). */
+  turn: number;
+  role: AssistantRole;
+  kind: AssistantKind;
+  /** Stage name or decision title; null otherwise. */
+  title: string | null;
+  text: string;
+}
+
+/** Return value of assistant_state / assistant_send / assistant_reset and payload of `assistant_update`. */
+export interface AssistantState {
+  session: AssistantSession;
+  /** Whole journal, in order. */
+  messages: AssistantMessage[];
+}
+
+const isAssistantMessage = (m: unknown): boolean =>
+  isObject(m) &&
+  typeof m.id === 'string' &&
+  typeof m.ts === 'string' &&
+  typeof m.turn === 'number' &&
+  (ASSISTANT_ROLES as readonly unknown[]).includes(m.role) &&
+  (ASSISTANT_KINDS as readonly unknown[]).includes(m.kind) &&
+  isNullableString(m.title) &&
+  typeof m.text === 'string';
+
+/** Shape check of an AssistantState reply before it enters the store. */
+export function isAssistantState(value: unknown): value is AssistantState {
+  if (!isObject(value) || !isObject(value.session) || !Array.isArray(value.messages)) return false;
+  const s = value.session;
+  if (!(ASSISTANT_STATUSES as readonly unknown[]).includes(s.status) || typeof s.turns !== 'number') return false;
+  if (!isNullableString(s.session_id) || !isNullableString(s.model) || !isNullableString(s.last_error)) return false;
+  return value.messages.every(isAssistantMessage);
 }

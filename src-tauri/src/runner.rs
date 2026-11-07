@@ -158,6 +158,10 @@ pub struct TurnOutcome {
     pub duration_ms: u64,
     pub is_error: bool,
     pub final_text: Option<String>,
+    /// Model named by the CLI's init event (display only).
+    pub model: Option<String>,
+    /// Tools the CLI denied without asking (`permission_denials` of the result).
+    pub permission_denials: Vec<String>,
 }
 
 impl TurnOutcome {
@@ -171,6 +175,8 @@ impl TurnOutcome {
             duration_ms: elapsed_ms(started),
             is_error: true,
             final_text: None,
+            model: None,
+            permission_denials: Vec::new(),
         }
     }
 }
@@ -325,6 +331,7 @@ pub async fn run_turn(
     if cancelled {
         return TurnOutcome {
             session_id: acc.session_id().map(str::to_string),
+            model: acc.model().map(str::to_string),
             ..evaluate_cancelled(started)
         };
     }
@@ -353,6 +360,10 @@ pub async fn run_turn(
             .unwrap_or_else(|| elapsed_ms(started)),
         is_error: result.map_or(true, |r| r.is_error),
         final_text,
+        model: acc.model().map(str::to_string),
+        permission_denials: result
+            .map(|r| r.permission_denials.clone())
+            .unwrap_or_default(),
     }
 }
 

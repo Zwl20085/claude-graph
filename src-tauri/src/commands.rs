@@ -16,8 +16,8 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::claude_bin;
 use crate::contract::{
-    AppError, AppResult, AppSettings, ClaudeCheck, Graph, LaunchOptions, NodeMessage, NodeResult,
-    RunState, RunSummary, RunTarget, TrustStatus,
+    AppError, AppResult, AppSettings, AssistantState, ClaudeCheck, Graph, LaunchOptions,
+    NodeMessage, NodeResult, RunState, RunSummary, RunTarget, TrustStatus,
 };
 use crate::events::{Emitter, TauriEmitter};
 use crate::paths::{canonical, dir_for_create, existing_dir};
@@ -288,6 +288,47 @@ pub async fn list_messages(
 #[tauri::command(rename_all = "snake_case")]
 pub async fn launch_options() -> AppResult<LaunchOptions> {
     Ok(launch::from_process())
+}
+
+/// Assistant mode: session and journal of the graph (empty idle state when
+/// `assistant/` is missing); sweeps a session left `working` by a crash.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn assistant_state(state: State<'_, AppState>, dir: String) -> AppResult<AssistantState> {
+    let st = state.inner().clone();
+    blocking(move || st.assistant_state(&existing_dir(&dir)?)).await
+}
+
+/// `invalid_input` for blank text, `assistant_busy` while a turn runs. The
+/// workflow is read from graph.json on disk (the frontend saves first).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn assistant_send(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    dir: String,
+    text: String,
+) -> AppResult<AssistantState> {
+    let st = state.inner().clone();
+    let em = emitter(&app);
+    blocking(move || st.assistant_send(&existing_dir(&dir)?, &text, em)).await
+}
+
+/// `not_found` when no turn runs.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn assistant_cancel(state: State<'_, AppState>, dir: String) -> AppResult<()> {
+    let st = state.inner().clone();
+    blocking(move || st.assistant_cancel(&existing_dir(&dir)?)).await
+}
+
+/// `assistant_busy` while a turn runs.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn assistant_reset(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    dir: String,
+) -> AppResult<AssistantState> {
+    let st = state.inner().clone();
+    let em = emitter(&app);
+    blocking(move || st.assistant_reset(&existing_dir(&dir)?, em)).await
 }
 
 #[cfg(test)]

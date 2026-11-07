@@ -5,6 +5,7 @@
  */
 import type {
   AppSettings,
+  AssistantState,
   ClaudeCheck,
   Graph,
   LaunchOptions,
@@ -46,6 +47,11 @@ export interface Api {
   launchOptions: () => Promise<LaunchOptions>;
   onRunState: (handler: (state: RunState) => void) => Promise<Unlisten>;
   onNodeEvent: (handler: (event: NodeEvent) => void) => Promise<Unlisten>;
+  assistantState: (dir: string) => Promise<AssistantState>;
+  assistantSend: (dir: string, text: string) => Promise<AssistantState>;
+  assistantCancel: (dir: string) => Promise<void>;
+  assistantReset: (dir: string) => Promise<AssistantState>;
+  onAssistantUpdate: (handler: (state: AssistantState) => void) => Promise<Unlisten>;
 }
 
 /** True when running inside a Tauri WebView. */

@@ -8,7 +8,10 @@
 
 use serde_json::Value;
 
-use crate::contract::{NodeEvent, NodeEventKind, RunState, EVENT_NODE_EVENT, EVENT_RUN_STATE};
+use crate::contract::{
+    AssistantState, NodeEvent, NodeEventKind, RunState, EVENT_ASSISTANT_UPDATE, EVENT_NODE_EVENT,
+    EVENT_RUN_STATE,
+};
 
 const TOOL_INPUT_MAX: usize = 200;
 const TOOL_RESULT_MAX: usize = 500;
@@ -19,6 +22,8 @@ const BAD_LINE_MAX: usize = 200;
 pub trait Emitter: Send + Sync {
     fn run_state(&self, state: &RunState);
     fn node_event(&self, event: &NodeEvent);
+    /// Assistant mode: the whole assistant state of one graph after a change.
+    fn assistant_update(&self, state: &AssistantState);
 }
 
 /// Emitter that sends through a Tauri app handle.
@@ -38,6 +43,13 @@ impl Emitter for TauriEmitter {
             log::warn!("emit {EVENT_NODE_EVENT} failed: {e}");
         }
     }
+
+    fn assistant_update(&self, state: &AssistantState) {
+        use tauri::Emitter as _;
+        if let Err(e) = self.0.emit(EVENT_ASSISTANT_UPDATE, state) {
+            log::warn!("emit {EVENT_ASSISTANT_UPDATE} failed: {e}");
+        }
+    }
 }
 
 /// Fields of the final `result` line.
@@ -51,11 +63,15 @@ pub struct ResultInfo {
     pub cost_usd: Option<f64>,
     pub num_turns: Option<u32>,
     pub duration_ms: Option<u64>,
+    /// Tool names from `permission_denials` (tools the CLI refused without asking).
+    pub permission_denials: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct StreamAccumulator {
     session_id: Option<String>,
+    /// Model named by the `system`/`init` event.
+    model: Option<String>,
     last_assistant_text: Option<String>,
     result: Option<ResultInfo>,
 }
@@ -85,7 +101,12 @@ impl StreamAccumulator {
             self.session_id = Some(sid);
         }
         match value.get("type").and_then(Value::as_str) {
-            Some("system") => system_event(&value).into_iter().collect(),
+            Some("system") => {
+                if value.get("subtype").and_then(Value::as_str) == Some("init") {
+                    self.model = str_field(&value, "model").or(self.model.take());
+                }
+                system_event(&value).into_iter().collect()
+            }
             Some("assistant") => self.assistant_events(&value),
             Some("user") => user_events(&value),
             Some("result") => {
@@ -107,6 +128,11 @@ impl StreamAccumulator {
 
     pub fn result(&self) -> Option<&ResultInfo> {
         self.result.as_ref()
+    }
+
+    /// Model reported by the init event, if any.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
     }
 
     /// Text blocks of the last top-level assistant message; falls back to `result.result`.
@@ -238,7 +264,25 @@ fn parse_result(value: &Value) -> ResultInfo {
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok()),
         duration_ms: value.get("duration_ms").and_then(Value::as_u64),
+        permission_denials: permission_denials(value),
     }
+}
+
+/// Tool names of `permission_denials` entries (`{tool_name, …}` objects, or plain strings).
+fn permission_denials(value: &Value) -> Vec<String> {
+    value
+        .get("permission_denials")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| match d {
+                    Value::String(s) => Some(s.clone()),
+                    other => str_field(other, "tool_name"),
+                })
+                .filter(|t| !t.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn result_text(info: &ResultInfo) -> String {
@@ -313,6 +357,8 @@ mod tests {
         assert_eq!(info.num_turns, Some(3));
         assert_eq!(info.duration_ms, Some(12345));
         assert_eq!(info.cost_usd, Some(0.04));
+        assert!(info.permission_denials.is_empty());
+        assert_eq!(acc.model(), Some("claude-sonnet"));
         assert_eq!(acc.session_id(), Some("s-1"));
         assert_eq!(
             acc.final_text().as_deref(),
@@ -335,6 +381,17 @@ mod tests {
         assert_eq!(info.errors, vec!["Reached max turns (5)"]);
         assert_eq!(acc.session_id(), Some("s-2"));
         assert_eq!(acc.final_text(), None);
+    }
+
+    #[test]
+    fn permission_denials_give_tool_names() {
+        let mut acc = StreamAccumulator::new();
+        acc.feed(r#"{"type":"result","subtype":"success","is_error":false,"result":"x","permission_denials":[{"tool_name":"Write","tool_use_id":"t1","tool_input":{}},"Bash",{"tool_use_id":"t3"}]}"#);
+        assert_eq!(
+            acc.result().unwrap().permission_denials,
+            vec!["Write", "Bash"]
+        );
+        assert_eq!(acc.model(), None);
     }
 
     #[test]

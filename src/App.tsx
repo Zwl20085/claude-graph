@@ -1,18 +1,19 @@
-/** App shell: start screen, or top bar + canvas + inspector + log panel. */
-import { useEffect } from 'react';
+/** App shell: start screen, or top bar + canvas + side panel (Assistant | Node) + log panel. */
+import { useCallback, useEffect, useRef } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { isTauri } from './lib/api';
 import { graphStore, useGraphStore } from './store/graphStore';
 import { useStoredFlag } from './hooks/useStoredFlag';
 import { Canvas } from './components/Canvas';
-import { Inspector } from './components/Inspector';
 import { LogPanel } from './components/LogPanel';
+import { SidePanel } from './components/SidePanel';
 import { StartScreen } from './components/StartScreen';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
 import { TrustDialog } from './components/TrustDialog';
 import { errorMessage } from './store/runHelpers';
+import { assistantStore } from './store/assistantStore';
 
 const APP_NAME = 'Claude Graph';
 
@@ -81,12 +82,40 @@ function useSaveOnClose(): void {
   }, []);
 }
 
+/** Bind the assistant store to the open graph folder (unbinds on change and unmount). */
+function useAssistantBinding(dir: string | null): void {
+  useEffect(() => {
+    const store = assistantStore().getState();
+    if (dir === null) store.close();
+    else void store.load(dir);
+    return () => assistantStore().getState().close();
+  }, [dir]);
+}
+
+/** Selecting a node on the canvas switches the side panel to the Node tab. */
+function useNodeTabOnSelect(onSelect: () => void): void {
+  const selected = useGraphStore((s) => s.selectedNodeId);
+  const last = useRef(selected);
+  useEffect(() => {
+    if (selected !== null && selected !== last.current) onSelect();
+    last.current = selected;
+  }, [selected, onSelect]);
+}
+
 export default function App() {
   const dir = useGraphStore((s) => s.dir);
   const name = useGraphStore((s) => s.graph?.name ?? null);
   const dirty = useGraphStore((s) => s.dirty);
   const [logVisible, setLogVisible] = useStoredFlag('cg.logVisible', true);
   const [inspectorOpen, setInspectorOpen] = useStoredFlag('cg.inspectorOpen', true);
+  const [assistantTab, setAssistantTab] = useStoredFlag('cg.sideTab.assistant', true);
+  const showNodeTab = useCallback(() => setAssistantTab(false), [setAssistantTab]);
+  const openAssistant = (): void => {
+    setInspectorOpen(true);
+    setAssistantTab(true);
+  };
+  useAssistantBinding(dir);
+  useNodeTabOnSelect(showNodeTab);
   useWindowTitle(name, dirty);
   useSaveShortcut();
   useSaveOnClose();
@@ -97,7 +126,7 @@ export default function App() {
         <StartScreen />
       ) : (
         <ReactFlowProvider key={dir}>
-          <TopBar logVisible={logVisible} onToggleLog={() => setLogVisible(!logVisible)} />
+          <TopBar logVisible={logVisible} onToggleLog={() => setLogVisible(!logVisible)} onOpenAssistant={openAssistant} />
           <div className="flex min-h-0 flex-1">
             <div className="flex min-w-0 flex-1 flex-col">
               <main className="min-h-0 flex-1">
@@ -105,22 +134,22 @@ export default function App() {
               </main>
               {logVisible && (
                 <section className="h-[220px] shrink-0 border-t border-[#3c3c3c] bg-[#252526]">
-                  <LogPanel />
+                  <LogPanel scheduler={inspectorOpen && assistantTab} />
                 </section>
               )}
             </div>
             <button
               className="w-4 shrink-0 border-l border-[#3c3c3c] bg-[#252526] text-[#9a9a9a] hover:text-white"
               onClick={() => setInspectorOpen(!inspectorOpen)}
-              title={inspectorOpen ? 'Collapse inspector' : 'Expand inspector'}
-              aria-label={inspectorOpen ? 'collapse inspector' : 'expand inspector'}
+              title={inspectorOpen ? 'Collapse side panel' : 'Expand side panel'}
+              aria-label={inspectorOpen ? 'collapse side panel' : 'expand side panel'}
               aria-expanded={inspectorOpen}
             >
               {inspectorOpen ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
             </button>
             {inspectorOpen && (
-              <aside className="w-[360px] shrink-0 bg-[#252526]">
-                <Inspector />
+              <aside className="w-[400px] shrink-0 bg-[#252526]">
+                <SidePanel assistant={assistantTab} onSelectTab={setAssistantTab} />
               </aside>
             )}
           </div>

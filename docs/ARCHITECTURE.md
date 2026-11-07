@@ -513,3 +513,82 @@ claude-graph <graph-dir> [--run]
   a missing claude shows "Autorun skipped" and leaves the graph open.
 - Parsing is `launch::parse_launch` (pure, unit-tested). In mock mode `launch_options`
   returns `window.__CG_LAUNCH__` (`{ open_dir, autorun }`) if present, else nulls.
+
+## Assistant mode (frontend)
+
+- **Layout.** The right aside (400 px) has a tab strip `Assistant | Node` (`SidePanel.tsx`); the choice is
+  remembered with `useStoredFlag('cg.sideTab.assistant', true)`. Selecting a node on the canvas switches to
+  `Node` (the old Inspector); sending from the assistant keeps `Assistant`. While the scheduler is working or
+  waiting, the top bar shows a status pill that opens the Assistant tab (and expands the aside). The canvas and
+  run controls are unchanged. The log panel shows the scheduler's live lines (`node:event` with
+  `run_id: "assistant"`, `node_id: "scheduler"`) while the Assistant tab is open, and the selected node otherwise.
+- **Panel.** `AssistantPanel.tsx` = `AssistantHeader` (status pill, turn, model, Cancel while working, Reset
+  session with an inline confirm, Open folder) + a timeline of `AssistantCard`s (one per journal message, colour
+  bar and icon per kind, plain `whitespace-pre-wrap` text, auto-scroll; question cards have an "Answer" button
+  that focuses the composer) + `AssistantComposer` (Ctrl+Enter or Send, disabled while working). The empty
+  state explains the mode and offers "Run the workflow" (`Execute the workflow from the start.`). Labels and
+  colours live in `src/lib/assistantView.ts`.
+- **Store.** `src/store/assistantStore.ts` (zustand, separate from the graph store): `{ dir, state, busy, error,
+  log }`, actions `load(dir)` / `close()` / `send` / `cancel` / `reset` / `clearLog`. `App` binds it to the open
+  folder (`load` on open, `close` on change or unmount, which unsubscribes). `assistant_update` carries no folder,
+  so any update schedules a reload of `assistant_state(dir)` (100 ms debounce, `createDebouncer`); replies are
+  applied only for the bound folder and in request order, after an `isAssistantState` shape check. `send` saves
+  the graph first (the scheduler reads graph.json) and a failed save blocks it with a toast; every failure goes
+  to the graph store's toasts.
+- **Mock.** `src/lib/mockAssistant.ts` (wired into `ipc.mock.ts`): first instruction of a session -> `stage`
+  (first root node, or "plan") + `question` (waiting); answer -> `stage` + `final` (done); later instruction ->
+  `note` + `final`; text with `FAKE_FAIL` fails the turn. Replies land ~600 ms after the send, with scheduler
+  `node:event` lines in between. Cancel, reset and `assistant_busy` / `invalid_input` / `not_found` follow the
+  contract.
+
+## Assistant mode (backend)
+
+The graph stays the workflow definition; one long-lived Claude Code session, the **work
+scheduler**, executes it. Module `src-tauri/src/assistant/` (`charter`, `render`, `parse`,
+`journal`, `turn`, `api`); types in `contract.rs` (`AssistantSession`, `AssistantMessage`,
+`AssistantState`, …); commands `assistant_state`, `assistant_send`, `assistant_cancel`,
+`assistant_reset`; event `assistant_update` (payload `AssistantState`).
+
+- **Folder.** `<graph>/assistant/`: `session.json` (rewritten atomically), `journal.jsonl`
+  (append only, one message per line), `CHARTER.md` (bundled charter, written on the first
+  fresh turn; an edited non-blank file replaces the bundled text), `turns/NNNN/` with
+  `prompt.md`, `events.jsonl`, `stderr.log`, `reply.md`. `PLAN.md` / `DECISIONS.md` are written
+  by the scheduler itself. Node deliverables stay in `nodes/<id>/deliverables/`.
+- **Turn command line.** `claude -p "<INSTRUCTION>" --output-format stream-json --verbose
+  --add-dir <graph dir> [--resume <session id>]`, cwd = graph dir, prompt on stdin (closed
+  after writing). **No `--model`, `--permission-mode`, `--allowedTools` or `--max-turns`,
+  ever**: the user's Claude Code settings decide model and permissions, so there is no trust
+  check. `runner::build_args` is not used; the process goes through `runner::run_turn`
+  (`run_id: "assistant"`, `node_id: "scheduler"`, no required deliverables), so the log
+  panel, Job Object / tree kill and drain handling are the node runner's. The session id is
+  checked with `turns::checked_session` before `--resume`.
+- **Prompt.** Fresh session (no session id, also after a reset): charter, `## Workflow`,
+  rendered workflow, `## Instruction`, text. Resumed: `## Workflow (updated)` + workflow only
+  when its sha256 differs from `session.workflow_hash`, then `## Message from the assistant`.
+  The workflow (`render_workflow`) is a limits line, then nodes in Kahn order (graph order and a
+  warning line on a cycle) with depends / resources / working dir / deliverables lines and the
+  prompt (prompt mode, plus extra context) or the brief body (no header, no upstream inputs, no
+  finish protocol; `##` headings demoted to `####`).
+- **Parsing** (`parse_reply`): sections start at lines matching `^##\s+(.+?)\s*$` (never
+  `###`). Heads (case-insensitive, before an optional `:`): `stage` / `decision` (title = text
+  after `:`), `question`, `note`, `final` (text after their `:` opens the body); any other `##`
+  heading is a note titled with the heading; text before the first heading is an untitled note;
+  blank sections are dropped; no headings = one note. Status: any question → `waiting`, else
+  any final → `done`, else `idle`.
+- **Outcome.** The node-mode evaluation (`## Status:` line) is not used. Cancelled →
+  `cancelled` + app message "Turn N cancelled". `is_error` (no result, error result, spawn
+  failure) → `failed`, `last_error` = the runner's reason (+ "Reset the session to start
+  again" when a resumed turn fails over its session) and an app `error` message. A successful
+  turn with an empty reply is also `failed` ("the scheduler returned an empty reply"). A
+  non-empty `permission_denials` in the result adds an app `error` naming the tools and the
+  hint to set `permissions.defaultMode` (or allow rules). `model` comes from the init event.
+- **Concurrency.** `AppState` keeps a registry graph dir → live turn (kill flag + join handle).
+  All assistant state changes happen under its lock: a second send (or a reset) while a turn
+  runs is `assistant_busy`; a session left `working` with no live turn (app crash) is swept by
+  the next `assistant_state` / `send` / `reset` to `failed` / "interrupted" with an app error
+  message. The registry entry is dropped only after the outcome is recorded, then
+  `assistant_update` is emitted. Graph runs and assistant turns never share the per-graph run
+  reservation. `AppState::shutdown` (app exit) kills assistant turns too.
+- **Fake CLI.** `scripts/fake-claude.mjs` switches to scheduler mode when the `-p` instruction
+  starts with "You are the work scheduler" (markers `FAKE_FINAL`, `FAKE_SLEEP_MS=<n>`,
+  `FAKE_ERROR`, `FAKE_DENY`); `tests/e2e_assistant.rs` drives it.

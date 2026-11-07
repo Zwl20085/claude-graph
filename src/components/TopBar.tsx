@@ -20,6 +20,9 @@ import { isRunActive, runHasFailures } from '../lib/status';
 import { graphStore, useGraphStore, type ClaudeState } from '../store/graphStore';
 import { GRID } from './Canvas';
 import { SettingsPopover } from './SettingsPopover';
+import { StatusPill } from './AssistantHeader';
+import { showsPill } from '../lib/assistantView';
+import { useAssistantStore } from '../store/assistantStore';
 import { btnCls } from './ui';
 import { newGraphFlow, openFolderFlow } from './StartScreen';
 
@@ -62,12 +65,24 @@ function useDismissable(): [boolean, Dispatch<SetStateAction<boolean>>, RefObjec
   return [open, setOpen, ref];
 }
 
+/** Assistant status while it works or waits for an answer; a click opens the Assistant tab. */
+function AssistantChip({ onOpen }: { onOpen: () => void }) {
+  const status = useAssistantStore((s) => s.state?.session.status ?? null);
+  if (status === null || !showsPill(status)) return null;
+  return (
+    <button onClick={onOpen} title="Open the Assistant tab" aria-label="open the assistant tab">
+      <StatusPill status={status} />
+    </button>
+  );
+}
+
 interface TopBarProps {
   logVisible: boolean;
   onToggleLog: () => void;
+  onOpenAssistant: () => void;
 }
 
-export function TopBar({ logVisible, onToggleLog }: TopBarProps) {
+export function TopBar({ logVisible, onToggleLog, onOpenAssistant }: TopBarProps) {
   const name = useGraphStore((s) => s.graph?.name ?? '');
   const dirty = useGraphStore((s) => s.dirty);
   const runState = useGraphStore((s) => s.runState);
@@ -123,6 +138,7 @@ export function TopBar({ logVisible, onToggleLog }: TopBarProps) {
       )}
       <div className="ml-auto flex items-center gap-2">
         {MOCK_MODE && <span className="rounded bg-[#f59e0b]/15 px-1.5 text-[11px] text-[#f59e0b]" title="No Tauri backend: in-memory mock">mock</span>}
+        <AssistantChip onOpen={onOpenAssistant} />
         <ClaudeChip state={claude} />
         <button className={`${btnCls} ${logVisible ? 'bg-[#37373d]' : ''}`} onClick={onToggleLog} title="Show/hide the log panel" aria-label="show or hide the log panel" aria-pressed={logVisible}>
           <PanelBottom size={14} />

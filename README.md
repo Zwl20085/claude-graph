@@ -217,6 +217,43 @@ dependents stay skipped; press **Rerun failed** to run them.
 Messages go to nodes of the run shown in the top bar. A node that has not run there
 says "Run the node first".
 
+## Assistant mode: let one Claude Code session run the whole workflow
+
+The node runner above is precise: the app starts one process per node with the model,
+permission mode and tools you chose. Sometimes you want the opposite: draw the workflow,
+then hand it to Claude Code as a whole and just talk to it. That is the **Assistant** tab.
+
+<p align="center">
+  <img src="docs/media/assistant-tab.png" alt="The Assistant tab beside the canvas: the user's instruction, then the scheduler's note, a Stage: survey card, a Decision: Order card, a Question card with an Answer button, the user's answer, a Stage: plan card and a Final card; the status pill reads Done, turn 2" width="100%">
+</p>
+
+- **One session, your settings.** The app starts a single Claude Code session, the
+  *work scheduler*, and sends it the whole graph: every node's prompt or brief, the
+  dependencies, the resource tags and the deliverables. It passes **no** `--model`, no
+  `--permission-mode`, no tool list and no turn limit. Whatever your own Claude Code
+  settings say applies. For an unattended run put
+  `"permissions": { "defaultMode": "acceptEdits" }` (or allow rules) in
+  `~/.claude/settings.json`; the app does not handle that for you.
+- **The scheduler does the orchestration.** It runs nodes in dependency order, keeps
+  nodes that share a resource tag from overlapping, uses its own subagents, and writes
+  deliverables to the same `nodes/<id>/deliverables/` folders the node runner uses.
+- **You see only what matters.** The scheduler's reply is parsed into cards:
+  `Stage: <node>` when a node finishes, `Question` when it needs you (the composer
+  switches to "Answer the question…"), `Decision` when it chose something itself,
+  `Note` for mid-run information, `Final` when the whole instruction is done. Tool calls
+  and subagent chatter stay in the log panel.
+- **Talk at any time.** "Skip the survey, the papers are already in `inputs/`", "redo the
+  report in half the length", "stop after design". Each message is a new turn of the
+  same session (`--resume`), so the scheduler remembers everything. **Reset session**
+  starts over; the journal stays.
+- **Everything is on disk.** `assistant/journal.jsonl` holds every card,
+  `assistant/turns/<n>/` every prompt and raw stream, `assistant/CHARTER.md` the
+  instructions the scheduler receives (edit it to change how it reports), and the
+  scheduler keeps its own `assistant/PLAN.md` and `assistant/DECISIONS.md`.
+
+Both modes read and write the same graph folder and can be used on the same graph, one
+after the other. They never share a process.
+
 ## Everything stays in the graph folder
 
 ```
@@ -238,6 +275,18 @@ hello-pipeline/
 |       |   brief.md
 |       \---deliverables
 |               report.md
++---assistant                (Assistant mode)
+|   |   session.json
+|   |   journal.jsonl
+|   |   CHARTER.md
+|   |   PLAN.md
+|   |   DECISIONS.md
+|   \---turns
+|       \---0001
+|               prompt.md
+|               events.jsonl
+|               reply.md
+|               stderr.log
 \---runs
     \---20261107T040952Z
         |   run.json
@@ -258,6 +307,7 @@ hello-pipeline/
 |---|---|
 | `graph.json` | Nodes, edges, positions, settings. Written by the app. |
 | `GRAPH_LOG.md` | Append-only log: one line per node per run, and one per follow-up, with status, cost and duration. |
+| `assistant/journal.jsonl` | Assistant mode: every card (instruction, stage, question, decision, note, final) as one JSON line; `assistant/turns/<n>/` keeps each turn's prompt and raw stream. |
 | `nodes/<id>/brief.md` | The node's brief as last saved. |
 | `nodes/<id>/deliverables/` | What the agent wrote. Downstream nodes read from here. |
 | `runs/<run-id>/run.json` | Status, timings, session id and cost of every node in that run, updated live. |
@@ -350,7 +400,9 @@ A graph folder can come from someone else. The app treats it as data.
 
 ## Status and limits
 
-v0.1. Verified on Windows 11 with Claude Code 2.1.x. CI builds and tests the backend
+v0.2. Two ways to run a graph: the node runner (one process per node, explicit
+settings) and Assistant mode (one scheduler session, your Claude Code settings).
+Verified on Windows 11 with Claude Code 2.1.x. CI builds and tests the backend
 on Linux too, but the macOS and Linux apps have not been tried by hand.
 
 Not in v0.1, on the roadmap:

@@ -5,6 +5,7 @@ use std::time::Duration;
 use tauri::{Manager, RunEvent};
 
 pub mod app_settings;
+pub mod assistant;
 pub mod claude_bin;
 pub mod commands;
 pub mod contract;
@@ -28,14 +29,18 @@ pub mod turns;
 const EXIT_WAIT: Duration = Duration::from_secs(5);
 
 /// App exit (last window closed, or exit requested): cancel every active run
-/// and wait up to [`EXIT_WAIT`]. Whatever is left is caught by the Job Objects
+/// and assistant turn and wait up to [`EXIT_WAIT`]. Whatever is left is caught by the Job Objects
 /// (Windows) and, on the next open, by the stale-run sweep.
 fn on_exit(app: &tauri::AppHandle) {
     let state = app.state::<run_api::AppState>().inner().clone();
-    if state.active_count() == 0 {
+    if state.active_count() == 0 && state.assistant_active_count() == 0 {
         return;
     }
-    log::info!("exit: cancelling {} active run(s)", state.active_count());
+    log::info!(
+        "exit: cancelling {} active run(s) and {} assistant turn(s)",
+        state.active_count(),
+        state.assistant_active_count()
+    );
     tauri::async_runtime::block_on(state.shutdown(EXIT_WAIT));
 }
 
@@ -73,6 +78,10 @@ pub fn run() {
             commands::send_message,
             commands::list_messages,
             commands::launch_options,
+            commands::assistant_state,
+            commands::assistant_send,
+            commands::assistant_cancel,
+            commands::assistant_reset,
         ])
         .build(tauri::generate_context!());
     let app = match app {

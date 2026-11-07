@@ -344,6 +344,8 @@ mod tests {
             duration_ms: 1,
             is_error: false,
             final_text: Some(text.to_string()),
+            model: None,
+            permission_denials: Vec::new(),
         }
     }
 

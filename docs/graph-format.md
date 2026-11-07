@@ -62,3 +62,21 @@ Deliverable paths are relative to `nodes/<id>/deliverables/`.
   means `settings.default_permission_mode`.
 - Resource tags: capacity comes from `settings.resources`; unknown tags have
   capacity 1; `exclusive` means nothing else runs alongside the node.
+
+## Other folders
+
+Next to `graph.json` the app writes `nodes/<id>/` (brief and deliverables), `runs/<run-id>/`
+(graph-mode runs) and, once assistant mode is used, `assistant/`:
+
+```
+assistant/
+  session.json        scheduler session: session_id, status, turns, model, workflow_hash, last_error, updated_at
+  journal.jsonl       one message per line (user instructions/answers, scheduler stages/questions/
+                      decisions/notes/finals, app system/error messages), append only
+  CHARTER.md          the scheduler charter (written on the first turn; edit it to change the charter)
+  turns/0001/         prompt.md, events.jsonl, stderr.log, reply.md of each scheduler turn
+  PLAN.md, DECISIONS.md   written by the scheduler itself
+```
+
+The scheduler writes node deliverables to the same `nodes/<id>/deliverables/` folders as graph
+mode. See ARCHITECTURE.md "Assistant mode (backend)".
