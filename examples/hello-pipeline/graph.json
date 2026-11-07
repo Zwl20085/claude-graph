@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "name": "hello-pipeline",
+  "settings": {
+    "max_parallel": 2,
+    "resources": { "cpu": 1, "memory": 1, "gpu": 1 },
+    "stop_on_failure": false,
+    "default_model": "sonnet",
+    "default_permission_mode": "acceptEdits",
+    "claude_bin": null
+  },
+  "nodes": [
+    {
+      "id": "survey",
+      "title": "Literature survey",
+      "position": { "x": 80, "y": 160 },
+      "goal": "Collect the ten most cited papers on PCB layout rules for 48 V GaN half-bridges and summarise each in two lines.",
+      "acceptance": "survey.md holds a Markdown table with exactly 10 rows, each with title, year, venue, DOI and a two-line summary.",
+      "scope_in": "Public web pages, open-access PDFs, the docs/ folder of this graph.",
+      "scope_out": "Paywalled full texts; anything outside this graph folder.",
+      "already_known": "The EPC application notes AN009 and AN027 are already read; do not list them.",
+      "deliverables": [
+        { "path": "survey.md", "description": "Markdown table of 10 papers with DOI and two-line summary" }
+      ],
+      "do_nots": ["Do not install packages", "Do not invent DOIs; leave the cell empty if unknown"],
+      "model": "haiku",
+      "resources": [],
+      "permission_mode": "inherit",
+      "allowed_tools": ["Read", "Write", "WebSearch", "WebFetch"],
+      "max_turns": 40,
+      "working_dir": null,
+      "continue_session_of": null,
+      "extra_context": ""
+    },
+    {
+      "id": "design",
+      "title": "Layout rule set",
+      "position": { "x": 420, "y": 160 },
+      "goal": "Turn the survey into a numbered set of layout rules with a numeric limit for each (loop inductance, clearance, via count).",
+      "acceptance": "rules.md lists at least 12 numbered rules, each citing at least one survey row; check_rules.py runs with python and prints PASS for the bundled example.",
+      "scope_in": "The survey deliverable, Python 3 standard library.",
+      "scope_out": "KiCad files, any network access.",
+      "already_known": "Target power-loop inductance is below 1 nH; 4-layer stack-up with 0.2 mm prepreg.",
+      "deliverables": [
+        { "path": "rules.md", "description": "Numbered layout rules with numeric limits and citations" },
+        { "path": "check_rules.py", "description": "Stand-alone checker for the numeric rules with a bundled example" }
+      ],
+      "do_nots": ["Do not use third-party Python packages", "Do not edit the survey deliverable"],
+      "model": "opus",
+      "resources": ["cpu"],
+      "permission_mode": "acceptEdits",
+      "allowed_tools": ["Read", "Write", "Edit", "Bash(python:*)"],
+      "max_turns": 60,
+      "working_dir": null,
+      "continue_session_of": null,
+      "extra_context": "Prefer rules that a reviewer can check from a Gerber viewer."
+    },
+    {
+      "id": "report",
+      "title": "Two-page report",
+      "position": { "x": 760, "y": 160 },
+      "goal": "Write a two-page report that explains the rule set to a hardware engineer who has not read the papers.",
+      "acceptance": "report.md is between 700 and 1100 words, references every rule number once, and ends with a list of open questions.",
+      "scope_in": "Deliverables of survey and design.",
+      "scope_out": "New literature search.",
+      "already_known": "",
+      "deliverables": [
+        { "path": "report.md", "description": "Two-page explanatory report with open questions" }
+      ],
+      "do_nots": ["Do not change rule numbering"],
+      "model": "sonnet",
+      "resources": [],
+      "permission_mode": "inherit",
+      "allowed_tools": null,
+      "max_turns": null,
+      "working_dir": null,
+      "continue_session_of": null,
+      "extra_context": ""
+    }
+  ],
+  "edges": [
+    { "id": "e1", "from": "survey", "to": "design" },
+    { "id": "e2", "from": "design", "to": "report" }
+  ]
+}

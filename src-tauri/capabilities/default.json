@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main window: IPC, events, folder dialog, opening paths.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "opener:default",
+    "log:default"
+  ]
+}
