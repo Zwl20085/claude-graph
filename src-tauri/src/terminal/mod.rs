@@ -23,6 +23,7 @@
 
 pub mod answer;
 pub mod api;
+mod chained;
 pub mod components;
 pub mod deliver;
 pub mod dialog;
@@ -46,6 +47,7 @@ pub mod session;
 mod startup;
 pub mod transcript;
 mod turn;
+pub mod view;
 
 use std::path::{Path, PathBuf};
 

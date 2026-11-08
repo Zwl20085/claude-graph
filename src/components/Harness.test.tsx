@@ -76,7 +76,7 @@ describe('harness store slice', () => {
     const list = vi.spyOn(api, 'listHarnesses');
     await s().init();
     expect(list).toHaveBeenCalledTimes(1);
-    expect(s().harnesses.map((p) => p.id)).toEqual(['claude', 'claude-deepseek', 'codex']);
+    expect(s().harnesses.map((p) => p.id)).toEqual(['claude', 'claude-deepseek', 'codex', 'deepseek-harness']);
     const mine = { ...BUILTIN_HARNESSES[0]!, id: 'mine', label: 'Mine', kind: 'custom' as const, command: 'mine', builtin: false };
     expect(await s().saveHarness(mine)).toBeNull();
     expect(s().harnesses.map((p) => p.id)).toContain('mine');
@@ -106,7 +106,7 @@ describe('Settings: graph harness and Manage dialog', () => {
   it('lists profiles with kind badge and built-in marker; shows the secrets note', async () => {
     await render(<HarnessDialog onClose={() => undefined} />);
     const rows = [...document.querySelectorAll('nav[aria-label="Harness profiles"] li')];
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
     expect(rows[2]?.querySelector('[aria-label="kind codex"]')?.textContent).toBe('Codex CLI');
     expect(rows.every((r) => r.querySelector('[aria-label="built in"]'))).toBe(true);
     expect(q('[aria-label="secrets note"]')?.textContent).toBe(SECRETS_NOTE);
@@ -173,7 +173,7 @@ describe('per-node harness', () => {
     };
     await render(<Live />);
     const select = control<HTMLSelectElement>('Harness', 'select');
-    expect([...select.options].map((o) => o.textContent)).toEqual(['Inherit (Claude Code)', 'Claude Code', 'Claude Code via DeepSeek', 'Codex CLI']);
+    expect([...select.options].map((o) => o.textContent)).toEqual(['Inherit (Claude Code)', 'Claude Code', 'Claude Code via DeepSeek API', 'Codex CLI', 'DeepSeek Harness (dsh)']);
     expect(control<HTMLSelectElement>('Model', 'select').disabled).toBe(false);
     await choose(select, 'codex');
     expect(node()?.harness).toBe('codex');
@@ -218,5 +218,19 @@ describe('session chips', () => {
     expect(chips.map((c) => c.textContent)).toEqual(['Survey', 'DesignCodex CLI']);
     expect(chips[0]?.getAttribute('aria-label')).toMatch(/harness Claude Code$/);
     expect(chips[1]?.getAttribute('aria-label')).toMatch(/harness Codex CLI$/);
+  });
+
+  it('a dsh session says it is headless and chained; a waiting session says needs you', async () => {
+    await render(<SessionChips />);
+    await act(async () =>
+      s().applyRunState(
+        run([
+          session({ title: 'Survey (DeepSeek Harness (dsh))', harness: 'deepseek-harness', pending_prompt: 'survey-p1' }),
+        ]),
+      ),
+    );
+    const chip = document.querySelector('[aria-label="Claude Code sessions"] button');
+    expect(chip?.textContent).toBe('Surveyneeds youdsh (headless, chained)');
+    expect(chip?.getAttribute('aria-label')).toContain('needs you');
   });
 });

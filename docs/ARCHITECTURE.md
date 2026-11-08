@@ -1058,3 +1058,50 @@ payloads with the verified field names, a fake transcript JSONL, markers `FAKE_Q
 pause; a dialog answered from the app; a dialog answered in the window and a text answer; a
 permission prompt), `tests/real_terminal.rs` `real_claude_dialog_and_question_outcomes`
 (ignored).
+
+## dsh harness: chained-headless sessions (2026-11-08)
+
+The DeepSeek Harness CLI `dsh` has no interactive terminal UI, so a session of harness kind
+`deepseek-harness` is driven differently (`Behavior.driver = Driver::Chained`; pty sessions are
+`Driver::Pty`). Verified facts: docs/CLAUDE_CLI_NOTES.md "DeepSeek Harness CLI".
+
+**Profile.** `HarnessKind::DeepseekHarness` (JSON `"deepseek-harness"`), built-in id
+`deepseek-harness`, label "DeepSeek Harness (dsh)" (the `claude-deepseek` built-in is now
+labelled "Claude Code via DeepSeek API"). Fields: `command` = the dsh binary (empty: env
+`CLAUDE_GRAPH_DSH_BIN` as a command line, else `dsh` on PATH, shims resolved to
+`node <…>/@deepseek-ai/dsh/lib/bin.js` by `harness::command::dsh_shim`), `args` = extra args,
+`dsh_profile` (new, `^[a-z0-9][a-z0-9_-]{0,63}$`, empty = `headless`), `env` as usual. The app
+passes no model or permission flags. `check_harness` runs `dsh --version`. The headless engine
+(advanced mode) still rejects non-claude harnesses ("runs in terminal mode only"). Custom
+profiles also gained `option_pattern` and `dialog_hints` (their `DialogStyle`, see "Turn
+outcomes").
+
+**Session** (`terminal/chained.rs`, `terminal/view.rs`). Start: the session folder, the window
+(as for pty sessions), the launch spec (`--profile <p> --json` + args), a `View` (an `Output`
+without a process: what the session renders is kept for `pty_replay` and emitted as `pty:data`);
+`pid` = the app's own pid while the session takes messages. Per message: one process
+`<program> <prefix> --profile <p> --json <args> [--session-id <id>] -` in the session cwd, the text
+on stdin, session env (`CLAUDE_GRAPH_RUN`, `CLAUDE_GRAPH_SESSION`, profile env), in a kill-on-close
+job; the first `session` event's id is kept and every later process adopts it. Every stdout line
+is appended to `runs/<run>/<node>/events.jsonl`; events become node events (`text`, `tool_use`,
+`stderr`, `permission_denied` for "requires approval, but no approval channel") and window lines
+(`▶ node <title>`, the quoted message, `● text`, `⏺ tool(summary)`, `⎿ result`, errors);
+stderr goes to `runs/<run>/sessions/<sid>/dsh-stderr.log`. The turn ends when the process exits:
+exit ≠ 0 → node `failed` "dsh exited with code N: <error event or last stderr lines>"; else the
+`final` text → reply.md (`> ` quoted messages and replies) and the question classifier: done →
+status by deliverables; a question → the node waits exactly as in a pty session (an offer when
+its deliverables are written), and an answer (`answer_prompt`, a Messages-tab message, or a line
+typed in the window) is the next process of the same dsh session; `continue_node` ends it. No
+dialogs can occur. After the node list, follow-up messages (`send_message`, or a line typed in
+the window: `pty_write` collects keys into lines, echoes them, and hands each line to the
+session as `PromptAction::Followup`) run as further processes until the session is cancelled.
+`pty_resize` is a no-op for such a session.
+
+**Frontend.** `HARNESS_KINDS` has `deepseek-harness`; the harness form shows a note and the
+`dsh profile` field (custom profiles: option pattern and dialog hints); the session chip's
+badge says "dsh (headless, chained)".
+
+**Tests.** `harness/dsh.rs` (real event lines, rendering), `harness/command.rs` (shim
+resolution), `terminal/view.rs`, `tests/e2e_dsh.rs` with `scripts/fake-dsh.mjs` (two nodes
+chained by the session id, a question answered by choice, a failure and a denied approval,
+a line typed in the window as a follow-up, `check_harness`), `tests/real_dsh.rs` (ignored).

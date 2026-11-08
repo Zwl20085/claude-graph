@@ -37,6 +37,7 @@ fn overridden(base: HarnessProfile, over: &HarnessProfile) -> HarnessProfile {
         args: over.args.clone(),
         env: over.env.clone(),
         model: over.model.clone(),
+        dsh_profile: over.dsh_profile.clone(),
         ..base
     }
 }
@@ -118,6 +119,9 @@ mod tests {
             dialog_markers: Vec::new(),
             stop_mode: StopMode::Quiet,
             quiet_ms: None,
+            option_pattern: None,
+            dialog_hints: Vec::new(),
+            dsh_profile: None,
         }
     }
 
@@ -127,8 +131,8 @@ mod tests {
         let data = tmp.path();
         assert_eq!(list(data), builtins());
         let after = save(data, &custom("mine")).unwrap();
-        assert_eq!(after.len(), 4);
-        assert_eq!(after[3].id, "mine");
+        assert_eq!(after.len(), 5);
+        assert_eq!(after[4].id, "mine");
         // Override a built-in: label and kind stay, args and model change.
         let over = HarnessProfile {
             label: "Renamed".into(),
@@ -142,11 +146,11 @@ mod tests {
         assert_eq!(codex.kind, HarnessKind::Codex);
         assert!(codex.builtin);
         assert_eq!(codex.model.as_deref(), Some("gpt-5"));
-        assert_eq!(after.len(), 4, "an override is not a new profile");
+        assert_eq!(after.len(), 5, "an override is not a new profile");
         // Delete: customs only.
         assert_eq!(delete(data, CODEX_ID).unwrap_err().code, "invalid_input");
         assert_eq!(delete(data, "nope").unwrap_err().code, "not_found");
-        assert_eq!(delete(data, "mine").unwrap().len(), 3);
+        assert_eq!(delete(data, "mine").unwrap().len(), 4);
         let bad = HarnessProfile {
             id: "Bad Id".into(),
             ..custom("x")
@@ -163,8 +167,17 @@ mod tests {
         )
         .unwrap();
         let ids: Vec<String> = list(tmp.path()).into_iter().map(|p| p.id).collect();
-        assert_eq!(ids, ["claude", "claude-deepseek", "codex", "ok"]);
+        assert_eq!(
+            ids,
+            [
+                "claude",
+                "claude-deepseek",
+                "codex",
+                "deepseek-harness",
+                "ok"
+            ]
+        );
         std::fs::write(tmp.path().join(HARNESSES_FILE), "not json").unwrap();
-        assert_eq!(list(tmp.path()).len(), 3);
+        assert_eq!(list(tmp.path()).len(), 4);
     }
 }

@@ -23,6 +23,7 @@ use crate::run_store::{check_id, read_run_state};
 use crate::terminal::deliver::{Expect, FALLBACK_QUIET};
 use crate::terminal::port::spawn_followup;
 use crate::terminal::pty::Pty;
+use crate::terminal::view::View;
 use crate::terminal::window_label;
 
 /// Largest `pty_write` text.
@@ -54,6 +55,8 @@ pub struct SessionShared {
     /// Answers and "continue" for the session task.
     actions: mpsc::UnboundedSender<PromptAction>,
     actions_rx: Mutex<Option<mpsc::UnboundedReceiver<PromptAction>>>,
+    /// The window of a session without a pty (chained headless, dsh).
+    view: Mutex<Option<Arc<View>>>,
 }
 
 /// What the user decided about the session's pending prompt.
@@ -65,6 +68,9 @@ pub enum PromptAction {
     },
     /// Mark the node waiting on a reply question done.
     Continue { node_id: String },
+    /// A message for the node (chained sessions: typed in the window or sent
+    /// from the Messages tab).
+    Followup { node_id: String, text: String },
 }
 
 impl SessionShared {
@@ -74,6 +80,7 @@ impl SessionShared {
             pending: Mutex::new(None),
             actions,
             actions_rx: Mutex::new(Some(actions_rx)),
+            view: Mutex::new(None),
             run_id: run_id.to_string(),
             graph_dir: graph_dir.to_path_buf(),
             info: Mutex::new(info),
@@ -108,6 +115,21 @@ impl SessionShared {
         self.actions
             .send(action)
             .map_err(|_| AppError::new("not_found", "the session has ended"))
+    }
+
+    pub fn set_view(&self, view: Arc<View>) {
+        *lock(&self.view) = Some(view);
+    }
+
+    /// The window of a chained session (no pty).
+    pub fn view(&self) -> Option<Arc<View>> {
+        lock(&self.view).clone()
+    }
+
+    /// The node a window message goes to: the current one, else the last.
+    pub fn message_node(&self) -> Option<String> {
+        let info = self.info();
+        info.current_node.or_else(|| info.node_ids.last().cloned())
     }
 
     /// The receiving end of [`SessionShared::act`] (once, for the task).
@@ -283,6 +305,12 @@ impl Terminals {
                 });
             }
         }
+        if session.view().is_some() {
+            return session.act(PromptAction::Followup {
+                node_id: node_id.to_string(),
+                text: text.to_string(),
+            });
+        }
         spawn_followup(session, emitter, node_id, text)
     }
 }
@@ -354,6 +382,27 @@ pub fn pty_write(terminals: &Terminals, run_id: &str, sid: &str, text: &str) -> 
     if text.is_empty() {
         return Ok(());
     }
+    if let (None, Some(view)) = (session.pty(), session.view()) {
+        // A chained session: a typed line is a message to its node.
+        let node_id = session.message_node().ok_or_else(session_closed)?;
+        for line in view.keys(text) {
+            if !session.is_task_alive() {
+                return Err(session_closed());
+            }
+            if let Some(p) = session.pending().filter(|p| p.node_id == node_id) {
+                session.act(PromptAction::Answer {
+                    prompt_id: p.prompt.id().to_string(),
+                    answer: PromptAnswer::Text(line),
+                })?;
+            } else {
+                session.act(PromptAction::Followup {
+                    node_id: node_id.clone(),
+                    text: line,
+                })?;
+            }
+        }
+        return Ok(());
+    }
     let pty = session.pty().ok_or_else(session_closed)?;
     pty.write(text.as_bytes())
 }
@@ -373,6 +422,9 @@ pub fn pty_resize(
         ));
     }
     let session = checked(terminals, run_id, sid)?;
+    if session.pty().is_none() && session.view().is_some() {
+        return Ok(()); // a chained session's window has no process to resize
+    }
     let pty = session.pty().ok_or_else(session_closed)?;
     pty.resize(cols, rows)
 }
@@ -384,6 +436,7 @@ pub fn pty_replay(terminals: &Terminals, run_id: &str, sid: &str) -> AppResult<P
     Ok(session
         .pty()
         .map(|p| p.output.replay())
+        .or_else(|| session.view().map(|v| v.output.replay()))
         .unwrap_or(PtyReplay {
             text: String::new(),
             seq: 0,

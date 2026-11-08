@@ -10,6 +10,7 @@ import {
   fromDraft,
   harnessLabel,
   isClaudeKind,
+  isDshHarness,
   newCustomHarness,
   nextCustomId,
   parseEnv,
@@ -18,7 +19,7 @@ import {
 import { createMockIpc, MOCK_EXAMPLE_DIR } from './ipc.mock';
 import { MOCK_HARNESS_FAIL } from './mockHarness';
 import { groupSessions } from './sessions';
-import { envKeyError, harnessIdError, harnessProfileError, validateGraph } from './validate';
+import { envKeyError, harnessIdError, harnessProfileError, optionPatternError, validateGraph } from './validate';
 
 const custom = (patch: Partial<HarnessProfile> = {}): HarnessProfile => ({ ...newCustomHarness('my-cli'), command: 'my-cli', ...patch });
 
@@ -134,19 +135,33 @@ describe('groupSessions splits a chain where the harness changes', () => {
 describe('mock harness commands', () => {
   const setup = () => createMockIpc({ trustAll: true, stepMs: 1 });
 
-  it('lists the three built-ins', async () => {
+  it('dsh fields round-trip through the form; option patterns are checked', () => {
+    const dsh = BUILTIN_HARNESSES.find((p) => p.id === 'deepseek-harness') as HarnessProfile;
+    const draft = { ...toDraft(dsh), dsh_profile: ' headless ', option_pattern: 'ignored' };
+    const { profile } = fromDraft(draft, true);
+    expect(profile).toMatchObject({ kind: 'deepseek-harness', dsh_profile: 'headless', option_pattern: null });
+    expect(isDshHarness(BUILTIN_HARNESSES, 'deepseek-harness')).toBe(true);
+    expect(isDshHarness(BUILTIN_HARNESSES, 'codex')).toBe(false);
+    expect(harnessProfileError({ ...dsh, dsh_profile: 'Bad Name' })).toMatch(/^dsh_profile/);
+    expect(optionPatternError('^(?P<num>\d)\. (?P<label>.+)$')).toBeNull();
+    expect(optionPatternError('^(\d)\. (.+)$')).toMatch(/label/);
+    expect(optionPatternError('(?P<label>[')).toMatch(/valid/);
+  });
+
+  it('lists the four built-ins', async () => {
     const api = setup();
     expect((await api.listHarnesses()).map((p) => [p.id, p.kind, p.builtin])).toEqual([
       ['claude', 'claude', true],
       ['claude-deepseek', 'claude', true],
       ['codex', 'codex', true],
+      ['deepseek-harness', 'deepseek-harness', true],
     ]);
   });
   it('saves customs and built-in overrides (label and kind of a built-in stay)', async () => {
     const api = setup();
     const after = await api.saveHarness(custom());
-    expect(after.map((p) => p.id)).toEqual(['claude', 'claude-deepseek', 'codex', 'my-cli']);
-    expect(after[3]?.builtin).toBe(false);
+    expect(after.map((p) => p.id)).toEqual(['claude', 'claude-deepseek', 'codex', 'deepseek-harness', 'my-cli']);
+    expect(after[4]?.builtin).toBe(false);
     const codex = { ...(after[2] as HarnessProfile), label: 'Renamed', kind: 'custom' as const, model: 'gpt-5' };
     const next = await api.saveHarness(codex);
     expect(next[2]).toMatchObject({ id: 'codex', label: 'Codex CLI', kind: 'codex', model: 'gpt-5', builtin: true });

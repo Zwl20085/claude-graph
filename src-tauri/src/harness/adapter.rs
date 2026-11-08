@@ -10,7 +10,7 @@ use crate::claude_bin::{ClaudeCommand, ResolveEnv};
 use crate::contract::{AppResult, HarnessKind, HarnessProfile};
 use crate::harness::command::program_of;
 use crate::harness::env::expand_profile;
-use crate::harness::{claude, codex, custom};
+use crate::harness::{claude, codex, custom, dsh};
 use crate::terminal::deliver::Expect;
 use crate::terminal::screen::Markers;
 
@@ -21,6 +21,16 @@ pub enum StopSignal {
     Hook,
     /// No output for this long after the submit.
     Quiet(Duration),
+}
+
+/// How a session talks to its CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Driver {
+    /// One interactive process in a pty; messages are typed.
+    Pty,
+    /// One headless process per message, chained by the CLI's session id
+    /// (`crate::terminal::chained`; dsh).
+    Chained,
 }
 
 /// How a session reads its CLI.
@@ -36,6 +46,7 @@ pub struct Behavior {
     pub stop: StopSignal,
     /// A node's Claude model is typed as `/model <m>` (claude kind only).
     pub types_model: bool,
+    pub driver: Driver,
 }
 
 /// The behavior of `profile`'s kind.
@@ -44,6 +55,7 @@ pub fn behavior(profile: &HarnessProfile) -> Behavior {
         HarnessKind::Claude => claude::behavior(),
         HarnessKind::Codex => codex::behavior(),
         HarnessKind::Custom => custom::behavior(profile),
+        HarnessKind::DeepseekHarness => dsh::behavior(),
     };
     b.label = profile.label.clone();
     b
@@ -87,6 +99,7 @@ pub fn spawn_spec(input: &SpawnInput<'_>) -> AppResult<Launch> {
         HarnessKind::Claude => claude::args(input),
         HarnessKind::Codex => codex::args(input),
         HarnessKind::Custom => custom::args(input),
+        HarnessKind::DeepseekHarness => dsh::args(input),
     };
     let args = cmd
         .prefix_args

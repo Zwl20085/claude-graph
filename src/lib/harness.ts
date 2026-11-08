@@ -1,5 +1,5 @@
 /**
- * Harness profiles (HARNESS_CONTRACT): the three built-ins, label lookup, and
+ * Harness profiles (HARNESS_CONTRACT): the four built-ins, label lookup, and
  * the text <-> profile mapping of the edit form (args / markers one per line,
  * env `KEY=value` one per line). Pure; no store, no IPC.
  */
@@ -12,7 +12,13 @@ export const HARNESS_KIND_LABELS: Record<HarnessKind, string> = {
   claude: 'Claude Code',
   codex: 'Codex CLI',
   custom: 'custom',
+  'deepseek-harness': 'DeepSeek Harness (dsh)',
 };
+
+/** Session chip / window text of a dsh session: headless, one process per message. */
+export const DSH_MODE_LABEL = 'dsh (headless, chained)';
+export const DSH_NOTE =
+  'dsh has no interactive terminal: each message runs `dsh --profile <p> --json` once, and later messages continue the same dsh session (--session-id). The app passes no model or permission flags; set them in ~/.dsh.';
 
 export const STOP_MODE_LABELS: Record<StopMode, string> = {
   quiet: 'output goes quiet',
@@ -35,6 +41,9 @@ const base = (p: Pick<HarnessProfile, 'id' | 'label' | 'kind'> & Partial<Harness
   dialog_markers: [],
   stop_mode: 'quiet',
   quiet_ms: null,
+  option_pattern: null,
+  dialog_hints: [],
+  dsh_profile: null,
   ...p,
 });
 
@@ -43,7 +52,7 @@ export const BUILTIN_HARNESSES: readonly HarnessProfile[] = [
   base({ id: 'claude', label: 'Claude Code', kind: 'claude' }),
   base({
     id: 'claude-deepseek',
-    label: 'Claude Code via DeepSeek',
+    label: 'Claude Code via DeepSeek API',
     kind: 'claude',
     env: {
       ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
@@ -56,7 +65,13 @@ export const BUILTIN_HARNESSES: readonly HarnessProfile[] = [
     },
   }),
   base({ id: 'codex', label: 'Codex CLI', kind: 'codex', args: ['--no-alt-screen'] }),
+  base({ id: 'deepseek-harness', label: 'DeepSeek Harness (dsh)', kind: 'deepseek-harness' }),
 ];
+
+/** The harness `id` runs dsh (chained headless). */
+export function isDshHarness(profiles: readonly HarnessProfile[], id: string): boolean {
+  return findHarness(profiles, id)?.kind === 'deepseek-harness';
+}
 
 export function findHarness(profiles: readonly HarnessProfile[], id: string): HarnessProfile | null {
   return profiles.find((p) => p.id === id) ?? null;
@@ -107,6 +122,9 @@ export interface HarnessDraft {
   dialog_markers: string;
   stop_mode: StopMode;
   quiet_ms: string;
+  option_pattern: string;
+  dialog_hints: string;
+  dsh_profile: string;
 }
 
 export function toDraft(p: HarnessProfile): HarnessDraft {
@@ -124,6 +142,9 @@ export function toDraft(p: HarnessProfile): HarnessDraft {
     dialog_markers: p.dialog_markers.join('\n'),
     stop_mode: p.stop_mode,
     quiet_ms: p.quiet_ms === null ? '' : String(p.quiet_ms),
+    option_pattern: p.option_pattern ?? '',
+    dialog_hints: (p.dialog_hints ?? []).join('\n'),
+    dsh_profile: p.dsh_profile ?? '',
   };
 }
 
@@ -175,6 +196,9 @@ export function fromDraft(d: HarnessDraft, builtin: boolean): { profile: Harness
     dialog_markers: custom ? lines(d.dialog_markers) : [],
     stop_mode: custom ? d.stop_mode : 'quiet',
     quiet_ms: custom ? quietMs : null,
+    option_pattern: custom ? orNull(d.option_pattern) : null,
+    dialog_hints: custom ? lines(d.dialog_hints) : [],
+    dsh_profile: d.kind === 'deepseek-harness' ? orNull(d.dsh_profile) : null,
   };
   return { profile, error: null };
 }

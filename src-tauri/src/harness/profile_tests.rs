@@ -15,10 +15,12 @@ fn custom() -> HarnessProfile {
 }
 
 #[test]
-fn builtins_are_the_three_profiles() {
+fn builtins_are_the_four_profiles() {
     let b = builtins();
     let ids: Vec<&str> = b.iter().map(|p| p.id.as_str()).collect();
-    assert_eq!(ids, [CLAUDE_ID, DEEPSEEK_ID, CODEX_ID]);
+    assert_eq!(ids, [CLAUDE_ID, DEEPSEEK_ID, CODEX_ID, DSH_ID]);
+    assert_eq!(b[3].kind, HarnessKind::DeepseekHarness);
+    assert_eq!(b[1].label, "Claude Code via DeepSeek API");
     assert_eq!(b[1].env["ANTHROPIC_AUTH_TOKEN"], "${DEEPSEEK_API_KEY}");
     assert_eq!(b[1].env.len(), 7);
     assert_eq!(b[2].args, ["--no-alt-screen"]);

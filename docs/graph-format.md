@@ -117,7 +117,9 @@ runs/<run-id>/sessions/<sid>/      sid = s1, s2, … (one per connected componen
                     stdin payload as one line of JSON (transcript_path, prompt,
                     last_assistant_message, …); word only when the app binary could not be used
                     (echo fallback); Codex sessions: "stop {notify JSON}" lines
-  transcript.log    raw terminal output of the session
+  transcript.log    raw terminal output of the session (pty sessions)
+  dsh-stderr.log    dsh sessions: dsh's stderr (diagnostics); a dsh session has no pty and no
+                    transcript.log, its window shows a rendering of the run events
   session.json      { sid, title, node_ids, pid, status, harness, started_at, finished_at }
                     (harness: profile id; missing in older files = "claude"; run.json's
                     `sessions[]` entries carry `harness` too)
@@ -137,6 +139,7 @@ and per node `runs/<run-id>/<node-id>/`:
   summary.json      { session, started_at, finished_at, status, reason, transcript_from,
                       transcript_to, questions, waited_for_user, … }
   questions.jsonl   the node's questions and dialogs (below)
+  events.jsonl      dsh sessions only: dsh's raw `--json` run events of the node's processes
 ```
 
 When the CLI reports the turn's final text (Claude Code's Stop payload

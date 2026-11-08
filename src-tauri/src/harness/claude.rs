@@ -5,7 +5,7 @@
 
 use std::ffi::OsString;
 
-use crate::harness::adapter::{Behavior, SpawnInput, StopSignal};
+use crate::harness::adapter::{Behavior, Driver, SpawnInput, StopSignal};
 use crate::terminal::deliver::{Expect, FALLBACK_QUIET};
 use crate::terminal::hooks::HOOKS_FILE;
 use crate::terminal::screen::Markers;
@@ -19,6 +19,7 @@ pub fn behavior() -> Behavior {
         ready_quiet: FALLBACK_QUIET,
         stop: StopSignal::Hook,
         types_model: true,
+        driver: Driver::Pty,
     }
 }
 

@@ -127,20 +127,34 @@ Switch to **headless engine (advanced)** in the settings to get the one-process-
 scheduler described next: explicit model, permission mode and tool list per node,
 resource pools, streamed events and parsed results.
 
-## Harnesses: Claude Code, DeepSeek, Codex CLI, or your own
+## Harnesses: Claude Code, DeepSeek, Codex CLI, dsh, or your own
 
 A harness is the coding-agent CLI a session runs. Pick the graph's default under
 **Settings → Harness**, and override it per node in the Prompt tab. A chain is split into
 separate sessions wherever the harness changes; the next session gets the upstream
 deliverables and replies through its brief.
 
-Three are built in:
+Four are built in:
 
 | Id | What it runs |
 |----|--------------|
 | `claude` | Claude Code, as above. The default. |
-| `claude-deepseek` | Claude Code pointed at DeepSeek's Anthropic-compatible API. |
+| `claude-deepseek` | Claude Code via DeepSeek API: Claude Code pointed at DeepSeek's Anthropic-compatible API. |
 | `codex` | OpenAI Codex CLI, with `--no-alt-screen`. |
+| `deepseek-harness` | DeepSeek Harness (`dsh`), headless only: see below. |
+
+**dsh is headless-only.** The DeepSeek Harness CLI has no interactive terminal, so nothing is
+typed into a window. A dsh session runs one `dsh --profile headless --json` process per message
+(the message on stdin) and chains them with dsh's own session id (`--session-id`), so the nodes
+of a chain, your answers and your follow-ups all continue one dsh conversation. The session
+window shows a readable rendering of dsh's events (a `▶ node` line per node, replies, tool
+calls); typing a line there sends it as the next message. The chip says
+"dsh (headless, chained)". A turn ends when the process exits; its final text goes through the
+same question check as Claude Code (a question pauses the chain until you answer or continue).
+Tool calls that need approval are refused by headless dsh and show up as denied. The app passes
+no model or permission flags: configure dsh in `~/.dsh`. The profile's **dsh profile** field
+picks `--profile` (default `headless`); an empty command finds `dsh` on PATH (or
+`CLAUDE_GRAPH_DSH_BIN`).
 
 **The app stores no secrets.** An environment value may say `${VAR}`; the app reads that
 variable from its own environment when the session starts, and a missing variable fails
@@ -157,7 +171,9 @@ but their command, args, environment and model can be changed. A custom profile 
 - an **idle marker**: text on screen when the CLI waits for input;
 - **dialog markers**, one per line: texts that mean a dialog is open;
 - a **turn end**: output goes quiet for **quiet ms** (default 8000), Claude Code hooks, or
-  Codex notify.
+  Codex notify;
+- optionally an **option pattern** (a regex with `(?P<label>…)`) and **dialog hints**, so the
+  app can read the CLI's choice dialogs (see "When the agent asks you something").
 
 **Check** runs `<command> --version` with the profile's environment. Profiles live in the
 app data folder of this machine, never in `graph.json`. A graph that names a harness this

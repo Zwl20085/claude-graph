@@ -14,6 +14,7 @@ pub mod claude;
 pub mod codex;
 pub mod command;
 pub mod custom;
+pub mod dsh;
 pub mod env;
 pub mod headless;
 pub mod profile;

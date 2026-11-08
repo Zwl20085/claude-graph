@@ -35,6 +35,9 @@ const SETTLE_STEP: Duration = Duration::from_millis(100);
 impl Session {
     pub(super) async fn run_node(&mut self, id: &str, started_at: DateTime<Utc>) -> NodeEnd {
         self.span = None;
+        if self.chain.is_some() {
+            return self.run_chained_node(id, started_at).await;
+        }
         self.report(|i| i.current_node = Some(id.to_string()));
         self.event(NodeEventKind::Text, DELIVERING.to_string());
         let ctx = self.t.ctx.clone();

@@ -288,6 +288,18 @@ export function harnessCommandError(command: string | null): string | null {
 }
 
 /** Profile fields the backend checks on save_harness. First violation, prefixed with the field name. */
+/** A custom option pattern compiles and names a `label` group (JS syntax `(?<label>…)`; Rust takes both). */
+export function optionPatternError(pattern: string | null): string | null {
+  if (pattern === null || pattern.trim() === '') return null;
+  if (!/\(\?P?<label>/.test(pattern)) return 'Name the option text with (?P<label>…).';
+  try {
+    new RegExp(pattern.replace(/\(\?P</g, '(?<'));
+    return null;
+  } catch {
+    return 'Not a valid regular expression.';
+  }
+}
+
 export function harnessProfileError(profile: HarnessProfile): string | null {
   const custom = profile.kind === 'custom';
   const checks: Array<[string, string | null]> = [
@@ -296,6 +308,11 @@ export function harnessProfileError(profile: HarnessProfile): string | null {
     ['command', custom && profile.command === null ? 'A custom harness needs a command.' : harnessCommandError(profile.command)],
     ['env', Object.keys(profile.env).map(envKeyError).find((e) => e !== null) ?? null],
     ['quiet_ms', profile.quiet_ms !== null && !(Number.isInteger(profile.quiet_ms) && profile.quiet_ms > 0) ? 'Must be a positive whole number of ms.' : null],
+    ['option_pattern', optionPatternError(profile.option_pattern ?? null)],
+    [
+      'dsh_profile',
+      profile.dsh_profile && !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(profile.dsh_profile) ? 'Use a-z, 0-9, - and _ (max 64).' : null,
+    ],
   ];
   const hit = checks.find(([, err]) => err !== null);
   return hit ? `${hit[0]}: ${hit[1]}` : null;

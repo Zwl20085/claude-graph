@@ -33,7 +33,7 @@ export function createMockHarnesses(): MockHarnesses {
   const list = (): HarnessProfile[] => {
     const builtins = BUILTIN_HARNESSES.map((b) => {
       const o = saved.find((p) => p.id === b.id);
-      return o ? { ...b, command: o.command, args: o.args, env: o.env, model: o.model } : b;
+      return o ? { ...b, command: o.command, args: o.args, env: o.env, model: o.model, dsh_profile: o.dsh_profile ?? null } : b;
     });
     const customs = saved.filter((p) => !BUILTIN_HARNESSES.some((b) => b.id === p.id));
     return [...builtins, ...customs].map(copy);

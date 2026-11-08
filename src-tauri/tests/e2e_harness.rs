@@ -207,6 +207,9 @@ async fn a_custom_harness_with_quiet_stop_runs_a_node() {
         dialog_markers: vec!["Trust this folder".into()],
         stop_mode: StopMode::Quiet,
         quiet_ms: Some(1500),
+        option_pattern: None,
+        dialog_hints: Vec::new(),
+        dsh_profile: None,
     };
     let list = app.save_harness(&profile).unwrap();
     assert_eq!(list.last().unwrap().id, "fakecli");
@@ -266,6 +269,9 @@ async fn a_missing_env_variable_fails_the_session_before_anything_spawns() {
         dialog_markers: Vec::new(),
         stop_mode: StopMode::Quiet,
         quiet_ms: None,
+        option_pattern: None,
+        dialog_hints: Vec::new(),
+        dsh_profile: None,
     };
     std::env::remove_var("MISSING_VAR");
     app.save_harness(&profile).unwrap();

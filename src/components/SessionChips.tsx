@@ -7,7 +7,7 @@ import { useRef } from 'react';
 import { SquareTerminal } from 'lucide-react';
 import { DEFAULT_HARNESS, runStateMode, sessionHarness, sessionsOf } from '../types/contract';
 import { api } from '../lib/api';
-import { harnessLabel } from '../lib/harness';
+import { DSH_MODE_LABEL, harnessLabel, isDshHarness } from '../lib/harness';
 import { SESSION_COLORS } from '../lib/sessions';
 import { STATUS_COLORS, WAITING_LABEL } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
@@ -35,10 +35,10 @@ export function SessionChips() {
       {sessions.map((s) => {
         const color = SESSION_COLORS[s.status];
         const harness = sessionHarness(s);
-        const label = harnessLabel(harnesses, harness);
+        const label = isDshHarness(harnesses, harness) ? DSH_MODE_LABEL : harnessLabel(harnesses, harness);
         const other = harness !== DEFAULT_HARNESS;
         // The backend appends " (<label>)" to a non-claude session title; the badge shows it instead.
-        const suffix = ` (${label})`;
+        const suffix = ` (${harnessLabel(harnesses, harness)})`;
         const shown = other && s.title.endsWith(suffix) ? s.title.slice(0, -suffix.length) : s.title;
         const needsYou = typeof s.pending_prompt === 'string';
         const chipColor = needsYou ? STATUS_COLORS.waiting : color;

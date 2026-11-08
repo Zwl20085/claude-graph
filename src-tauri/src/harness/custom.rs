@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::contract::{HarnessProfile, StopMode};
-use crate::harness::adapter::{Behavior, SpawnInput, StopSignal};
+use crate::harness::adapter::{Behavior, Driver, SpawnInput, StopSignal};
 use crate::harness::profile::DEFAULT_QUIET_MS;
 use crate::harness::{claude, codex};
 use crate::terminal::deliver::{Expect, FALLBACK_QUIET};
+use crate::terminal::dialog::DialogStyle;
 use crate::terminal::live::Composer;
 use crate::terminal::screen::Markers;
 
@@ -32,7 +33,10 @@ pub fn behavior(p: &HarnessProfile) -> Behavior {
     };
     Behavior {
         label: String::new(),
-        markers: Arc::new(Markers::of(&idle, &dialog)),
+        markers: Arc::new(Markers::of(&idle, &dialog).with_style(DialogStyle::custom(
+            p.option_pattern.as_deref(),
+            &p.dialog_hints,
+        ))),
         start_hook: p.stop_mode == StopMode::ClaudeHooks,
         expect: Expect::Gone(Composer {
             glyph: None,
@@ -47,6 +51,7 @@ pub fn behavior(p: &HarnessProfile) -> Behavior {
         },
         stop,
         types_model: false,
+        driver: Driver::Pty,
     }
 }
 

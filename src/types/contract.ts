@@ -136,7 +136,8 @@ export interface Graph {
 /** Id of the default harness (Claude Code). */
 export const DEFAULT_HARNESS = 'claude';
 
-export const HARNESS_KINDS = ['claude', 'codex', 'custom'] as const;
+/** `deepseek-harness`: the dsh CLI, headless only (one process per message, chained by its session id). */
+export const HARNESS_KINDS = ['claude', 'codex', 'custom', 'deepseek-harness'] as const;
 /** Picks the adapter: readiness / submit / stop detection and the command shape. */
 export type HarnessKind = (typeof HARNESS_KINDS)[number];
 
@@ -150,7 +151,7 @@ export type StopMode = (typeof STOP_MODES)[number];
  * environment when a session starts; the app stores no secrets.
  */
 export interface HarnessProfile {
-  /** ^[a-z0-9][a-z0-9-]{0,31}$; built-ins: claude, claude-deepseek, codex. */
+  /** ^[a-z0-9][a-z0-9-]{0,31}$; built-ins: claude, claude-deepseek, codex, deepseek-harness. */
   id: string;
   label: string;
   kind: HarnessKind;
@@ -171,6 +172,12 @@ export interface HarnessProfile {
   stop_mode: StopMode;
   /** custom only, stop_mode quiet: ms of no output after the submit = turn over (default 8000). */
   quiet_ms: number | null;
+  /** custom only: regex of a dialog's option rows (groups `label`, optional `num`, `cur`). Missing = null. */
+  option_pattern?: string | null;
+  /** custom only: extra texts that mark a dialog. Missing = []. */
+  dialog_hints?: string[];
+  /** deepseek-harness only: the dsh profile (`--profile`); null = headless. */
+  dsh_profile?: string | null;
 }
 
 /** Return value of `check_harness`. */

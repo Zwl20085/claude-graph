@@ -87,6 +87,8 @@ pub(super) struct Session {
     pub(super) stats: Stats,
     /// Prompt ids handed out in this session.
     pub(super) prompt_seq: u32,
+    /// A chained-headless session's program and CLI session id.
+    pub(super) chain: Option<crate::terminal::chained::Chain>,
 }
 
 impl SessionTask {
@@ -117,6 +119,7 @@ impl SessionTask {
             actions,
             stats: Stats::default(),
             prompt_seq: 0,
+            chain: None,
         };
         s.drive().await;
         if let Some(pty) = &s.pty {
@@ -156,8 +159,13 @@ impl Session {
             i.current_node = None;
         });
         if end.is_none() {
-            // Done: the user keeps talking in the window until it exits or is killed.
-            while let Tick::Poll = self.tick(Duration::from_secs(3600)).await {}
+            if self.chain.is_some() {
+                // Done: follow-up messages run until the session is killed.
+                self.serve_followups().await;
+            } else {
+                // Done: the user keeps talking in the window until it exits or is killed.
+                while let Tick::Poll = self.tick(Duration::from_secs(3600)).await {}
+            }
         }
     }
 

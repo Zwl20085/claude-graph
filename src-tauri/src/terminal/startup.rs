@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::claude_bin::ResolveEnv;
 use crate::contract::{PermissionMode, SessionStatus};
-use crate::harness::adapter::{spawn_spec, Launch, SpawnInput};
+use crate::harness::adapter::{spawn_spec, Driver, Launch, SpawnInput};
 use crate::prompt::{display_dir, resolve_working_dir};
 use crate::runner::permission_flag;
 use crate::store::write_json;
@@ -42,12 +42,15 @@ const QUIET_START: Duration = Duration::from_secs(3);
 
 impl Session {
     pub(super) async fn start(&mut self) -> Result<(), End> {
+        if self.behavior.driver == Driver::Chained {
+            return self.start_chained();
+        }
         self.spawn()?;
         self.wait_started().await
     }
 
     /// Program, args and env of the session's harness (no process yet).
-    fn launch_spec(&self, cwd: &std::path::Path) -> Result<Launch, End> {
+    pub(super) fn launch_spec(&self, cwd: &std::path::Path) -> Result<Launch, End> {
         let ctx = &self.t.ctx;
         let profile = ctx
             .harness(&self.t.plan.harness)

@@ -47,9 +47,9 @@ pub const ANSWER_FAILED: &str =
     "dialog_answer_failed: the window did not take the answer; answer it in the window";
 
 /// One message of the node's conversation and the reply's final text.
-struct Exchange {
-    user: String,
-    reply: Option<String>,
+pub(super) struct Exchange {
+    pub(super) user: String,
+    pub(super) reply: Option<String>,
 }
 
 /// The state of a node's turn(s).
@@ -101,7 +101,7 @@ impl Turn {
 
 /// reply.md from the conversation's final texts: each message quoted, then
 /// its reply.
-fn compose(convo: &[Exchange]) -> String {
+pub(super) fn compose(convo: &[Exchange]) -> String {
     let mut out = String::new();
     for e in convo {
         for line in e.user.lines() {
@@ -469,6 +469,9 @@ impl Session {
                     self.clear_prompt(&t.node_id, &p, Some(answer), AnswerVia::Continue, false);
                     let (status, reason) = evaluate(&self.t.ctx, node, t.started);
                     return Some((status, reason, None));
+                }
+                PromptAction::Followup { .. } => {
+                    log::info!("pty session: a follow-up goes through the typing path");
                 }
                 PromptAction::Answer { prompt_id, answer } => {
                     let Some(p) = t.pending.clone().filter(|p| p.id() == prompt_id) else {

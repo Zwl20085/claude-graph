@@ -305,3 +305,50 @@ the digit `2`, the dialog closed, the reply was "You chose **B**." and the node 
 next node's reply "What's your favourite colour?" became a `question` prompt; `continue_node`
 ended it (`succeeded`, no deliverables) and the run succeeded. hooks.log words: `start submit
 stop submit stop`.
+
+## DeepSeek Harness CLI `dsh` (harness `deepseek-harness`) — verified 2026-11-08, dsh 0.2.1-rc.2, Windows 11
+
+**V** = verified on this machine on that date, **U** = not verified. The user's own dsh
+configuration (`~/.dsh`) was used as is; the app never reads `~/.dsh/.credentials.yaml`.
+
+- **Install (V).** `%APPDATA%\npm\dsh.cmd` is a shim that sets
+  `PATH=<…>\DeepSeekHarness\node-v24.22.1-win-x64;%PATH%` and `call`s
+  `<…>\DeepSeekHarness\dsh.cmd`, which runs `node <…>\DeepSeekHarness\node_modules\@deepseek-ai\dsh\lib\bin.js`.
+  The app spawns that node.exe with bin.js directly (no cmd.exe; `harness::command::dsh_shim`);
+  an npm install (bin.js beside the shim) resolves the same way. `dsh --version` →
+  `0.2.1-rc.2`. Env override `CLAUDE_GRAPH_DSH_BIN` (a command line; tests use the fake).
+- **No interactive terminal UI (V).** The `tui` profile does not exist here; the terminal-usable
+  mode is one-shot `dsh --profile headless [--json] [--session-id <id>] [task…|-]` (`-` or no task:
+  stdin). Help text: "Answer one task and exit; the answer goes to stdout and diagnostics to
+  stderr." Working directory = the process cwd.
+- **`--json` events (V)**, one JSON object per stdout line, in this order for a plain answer:
+  `{"type":"session","sessionId":"session-<uuid>","cwd":"…"}`,
+  `{"type":"status","phase":"turn_start","turn":1}`, `{"type":"status","phase":"step_start","turn":1,"step":1}`,
+  `{"type":"thinking","text":"…"}` (often empty), `{"type":"text","text":"ok"}`,
+  `{"type":"status","phase":"step_end",…,"usage":{"inputTokens","outputTokens","cacheReadTokens","cacheWriteTokens","totalTokens"}}`,
+  `{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"completed"}}`, `{"type":"final","text":"ok"}`.
+  Tool use adds `{"type":"tool_call","callId":"call_00_…","tool":"write","input":{"file_path":…,"content":…}}`
+  and `{"type":"tool_result","callId":…,"status":"completed"|"error","result":"…"}`; steps repeat
+  (`step` 2, 3, …) until the final text. The session id is in the first event of every process.
+- **Final text (V).** The `final` event's `text` (the same as the last `text` event). stderr was
+  empty for these runs.
+- **Session continuity (V).** Run 1: "Remember the word PELICAN. Reply with the single word ok." →
+  `ok`, session `session-219e…`. Run 2 with `--session-id session-219e…` and "Which word did I ask
+  you to remember?" → `PELICAN`, events show the same `sessionId` and `turn: 2`.
+- **Unknown session (V).** `--session-id session-nope` → exit 1, stdout
+  `{"type":"error","message":"session \"session-nope\" does not exist; omit --session-id to start a new Session"}`,
+  stderr `dsh: session "session-nope" does not exist; …`.
+- **Approvals in headless (V).** A write outside the workspace: the first `tool_result` is an error
+  "sandbox: file access denied under workspace-write mode … escalation available"; the agent
+  retried with `sandbox_permissions: "danger-full-access"` and got
+  `Error: sandbox escalation to "danger-full-access" requires approval, but no approval channel is available`.
+  It does not block and does not exit non-zero: the turn ends normally (exit 0) and the model
+  reports that it could not do it. The app turns such a result into a `permission_denied` node event.
+  A write inside the workspace (the cwd) needed no approval.
+- **End to end (V).** `cargo test --test real_dsh -- --ignored` (two nodes in one chained
+  session): node a "Remember the word PELICAN …" → `ok`; node b → `PELICAN`; run succeeded in
+  38 s; `check_harness` found `…\node-v24.22.1-win-x64\node.exe …\dsh\lib\bin.js`, version
+  `0.2.1-rc.2`.
+- **U:** a question/answer round through a real dsh (the fake covers it); `--profile acp` / `sdk`
+  (not used); behaviour under approval policy `never` or `danger-full-access` presets; non-Windows
+  installs.

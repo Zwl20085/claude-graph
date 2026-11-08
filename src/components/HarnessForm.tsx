@@ -1,7 +1,7 @@
 /** Edit form of one harness profile: save, check (`check_harness`), delete (customs only). */
 import { useState } from 'react';
 import { HARNESS_KINDS, STOP_MODES, type HarnessCheck, type HarnessProfile } from '../types/contract';
-import { fromDraft, HARNESS_KIND_LABELS, SECRETS_NOTE, STOP_MODE_LABELS, toDraft, type HarnessDraft } from '../lib/harness';
+import { DSH_NOTE, fromDraft, HARNESS_KIND_LABELS, SECRETS_NOTE, STOP_MODE_LABELS, toDraft, type HarnessDraft } from '../lib/harness';
 import { harnessProfileError } from '../lib/validate';
 import { useGraphStore } from '../store/graphStore';
 import { btnCls, errorCls, Field, Input, inputCls, Select, TextArea } from './ui';
@@ -51,6 +51,12 @@ function CustomFields({ draft, set }: { draft: HarnessDraft; set: (patch: Partia
           </label>
         ))}
       </fieldset>
+      <Field label="Option pattern" hint="Regex of a dialog's option rows, with (?P<label>…), optional (?P<num>…) and (?P<cur>…). Empty = numbered lists like 1. Yes.">
+        <Input className={`${inputCls} font-mono`} value={draft.option_pattern} onChange={(e) => set({ option_pattern: e.target.value })} />
+      </Field>
+      <Field label="Dialog hints" hint="One per line: footer texts that mark a dialog (besides Enter to select, Esc to cancel, (y/n), …).">
+        <TextArea rows={2} className={`${inputCls} resize-y font-mono`} value={draft.dialog_hints} onChange={(e) => set({ dialog_hints: e.target.value })} />
+      </Field>
       {draft.stop_mode === 'quiet' && (
         <Field label="Quiet ms" hint="No output for this long after the message = turn over. Empty = 8000.">
           <Input inputMode="numeric" value={draft.quiet_ms} placeholder="8000" onChange={(e) => set({ quiet_ms: e.target.value })} />
@@ -134,7 +140,17 @@ export function HarnessForm({ profile, isNew, takenIds, onSaved, onDeleted }: Ha
       <p role="note" aria-label="secrets note" className="rounded border border-[#3c3c3c] bg-[#1e1e1e] px-2 py-1.5 text-[11px] text-[#9a9a9a]">
         {SECRETS_NOTE}
       </p>
-      {draft.kind !== 'custom' && (
+      {draft.kind === 'deepseek-harness' && (
+        <>
+          <p role="note" aria-label="dsh note" className="rounded border border-[#3c3c3c] bg-[#1e1e1e] px-2 py-1.5 text-[11px] text-[#9a9a9a]">
+            {DSH_NOTE}
+          </p>
+          <Field label="dsh profile" hint="Passed as --profile. Empty = headless.">
+            <Input className={`${inputCls} font-mono`} value={draft.dsh_profile} placeholder="headless" onChange={(e) => set({ dsh_profile: e.target.value })} />
+          </Field>
+        </>
+      )}
+      {draft.kind !== 'custom' && draft.kind !== 'deepseek-harness' && (
         <Field label="Model" hint={draft.kind === 'codex' ? 'Passed as -m at start. Empty = Codex default.' : 'Passed as --model at start. Empty = per node.'}>
           <Input className={`${inputCls} font-mono`} value={draft.model} onChange={(e) => set({ model: e.target.value })} />
         </Field>
