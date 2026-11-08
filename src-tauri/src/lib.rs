@@ -4,18 +4,21 @@ use std::time::Duration;
 
 use tauri::{Manager, RunEvent};
 
+pub mod agentmode;
 pub mod app_settings;
 pub mod approve;
 pub mod assistant;
 pub mod claude_bin;
 pub mod commands;
 pub mod contract;
+pub mod contract_agent;
 pub mod contract_prompt;
 pub mod events;
 pub mod graph_util;
 pub mod harness;
 pub mod job;
 pub mod launch;
+pub mod mcp;
 pub mod paths;
 pub mod prompt;
 pub mod run_api;
@@ -62,6 +65,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(run_api::AppState::default())
+        .manage(agentmode::watch::AgentWatch::default())
         .invoke_handler(tauri::generate_handler![
             commands::check_claude,
             commands::list_harnesses,
@@ -103,6 +107,10 @@ pub fn run() {
             commands::answer_prompt,
             commands::continue_node,
             commands::list_session_prompts,
+            agentmode::gui::agent_watch,
+            agentmode::gui::agent_abandon,
+            agentmode::gui::agent_client_configs,
+            agentmode::gui::agent_install,
         ])
         .build(tauri::generate_context!());
     let app = match app {

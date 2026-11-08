@@ -17,12 +17,8 @@ use serde_json::{json, Value};
 
 use super::wire::{deny, RelayReply, RelayRequest};
 use super::{ENV_ADDR, ENV_NODE_ID, ENV_REG, ENV_RUN_ID, ENV_TOKEN, FLAG_MCP_APPROVE, TOOL_NAME};
+use crate::mcp::{error, reply, INVALID_PARAMS, METHOD_NOT_FOUND};
 
-/// Protocol versions echoed back; anything else gets [`FALLBACK_VERSION`].
-const KNOWN_VERSIONS: [&str; 4] = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
-const FALLBACK_VERSION: &str = "2025-06-18";
-const METHOD_NOT_FOUND: i64 = -32601;
-const INVALID_PARAMS: i64 = -32602;
 /// Longest reply line accepted from the app.
 const REPLY_MAX: u64 = 16 * 1024 * 1024;
 
@@ -101,32 +97,8 @@ impl Relay for TcpRelay {
     }
 }
 
-fn reply(id: &Value, result: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "result": result })
-}
-
-fn error(id: &Value, code: i64, message: &str) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-}
-
 fn initialize(id: &Value, params: Option<&Value>) -> Value {
-    let asked = params
-        .and_then(|p| p.get("protocolVersion"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let version = KNOWN_VERSIONS
-        .iter()
-        .find(|v| **v == asked)
-        .copied()
-        .unwrap_or(FALLBACK_VERSION);
-    reply(
-        id,
-        json!({
-            "protocolVersion": version,
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "claude-graph", "version": env!("CARGO_PKG_VERSION") },
-        }),
-    )
+    crate::mcp::initialize(id, params, json!({ "tools": {} }), None)
 }
 
 fn tools_list(id: &Value) -> Value {
@@ -152,17 +124,10 @@ pub enum Action {
 
 /// Decide what to do with one line (no I/O).
 pub fn handle(line: &str) -> Action {
-    let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else {
+    let Some(req) = crate::mcp::parse(line) else {
         return Action::Nothing;
     };
-    let method = msg
-        .get("method")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let Some(id) = msg.get("id").filter(|id| !id.is_null()).cloned() else {
-        return Action::Nothing;
-    };
-    let params = msg.get("params");
+    let (method, id, params) = (req.method.as_str(), req.id, req.params.as_ref());
     match method {
         "initialize" => Action::Respond(initialize(&id, params)),
         "ping" => Action::Respond(reply(&id, json!({}))),
@@ -191,11 +156,7 @@ pub fn call_result(id: &Value, decision: &Value) -> Value {
 }
 
 fn write_line<W: Write>(out: &Mutex<W>, msg: &Value) {
-    let mut out = out.lock().unwrap_or_else(|p| p.into_inner());
-    let written = writeln!(out, "{msg}").and_then(|_| out.flush());
-    if let Err(e) = written {
-        eprintln!("claude-graph --mcp-approve: writing stdout failed: {e}");
-    }
+    crate::mcp::write_line(out, msg, FLAG_MCP_APPROVE);
 }
 
 /// Serve until `input` ends; returns the threads of calls still being

@@ -205,15 +205,32 @@ pub async fn start_run(
     let st = state.inner().clone();
     let em = emitter(&app);
     blocking(move || {
-        let (run_id, _join) = st.start_by_mode(&existing_dir(&dir)?, target, em)?;
+        let dir = existing_dir(&dir)?;
+        crate::agentmode::gui::refuse_if_agent_active(&dir)?;
+        let (run_id, _join) = st.start_by_mode(&dir, target, em)?;
         Ok(run_id)
     })
     .await
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub async fn cancel_run(state: State<'_, AppState>, run_id: String) -> AppResult<()> {
-    state.cancel_run(&run_id)
+pub async fn cancel_run(
+    state: State<'_, AppState>,
+    watch: State<'_, crate::agentmode::watch::AgentWatch>,
+    run_id: String,
+) -> AppResult<()> {
+    match state.cancel_run(&run_id) {
+        // Not a run of the app: maybe the agent run of the open folder.
+        Err(e) if e.code == "not_found" => {
+            let watch = watch.inner().clone();
+            let id = run_id.clone();
+            let agent =
+                blocking(move || Ok(crate::agentmode::watch::cancel_agent_run(&watch, &id)))
+                    .await?;
+            agent.unwrap_or(Err(e))
+        }
+        other => other,
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]

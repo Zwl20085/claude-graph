@@ -12,5 +12,12 @@ fn main() {
     if let Some(code) = claude_graph_lib::approve::mcp::from_process() {
         std::process::exit(code);
     }
+    // Agent-called mode: `--mcp-graph` (stdio MCP server) and `graph …` (CLI).
+    if let Some(code) = claude_graph_lib::agentmode::mcp_tools::from_process() {
+        std::process::exit(code);
+    }
+    if let Some(code) = claude_graph_lib::agentmode::cli::from_process() {
+        std::process::exit(code);
+    }
     claude_graph_lib::run()
 }

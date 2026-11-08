@@ -563,6 +563,8 @@ impl AppState {
             .into_iter()
             .filter(|r| r.status == crate::contract::RunStatus::Running)
             .map(|r| r.run_id)
+            // Agent runs have no loop in the app; their agent may still be working.
+            .filter(|id| !crate::agentmode::run::is_agent_run(dir, id))
             .collect();
         let mut swept = Vec::new();
         for run_id in running {
