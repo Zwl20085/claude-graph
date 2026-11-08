@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="480" viewBox="0 0 1000 480" role="img" aria-label="Architecture: the React Flow editor saves graph.json; on start_run the Rust scheduler reads it and admits ready nodes through resource pools (cpu 1, memory 1, exclusive); each admitted node becomes one claude -p process that gets its brief on stdin and streams JSON on stdout; every line lands in the run folder (events.jsonl, result.md, summary.json) and deliverables go to nodes/id/deliverables; the status check feeds the scheduler and parsed lines flow back to the editor as live run:state and node:event events.">
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="800" viewBox="0 0 1000 800" role="img" aria-label="Architecture in three lanes. Headless engine (advanced): the React Flow editor saves graph.json; on start_run the Rust scheduler admits ready nodes through resource pools (cpu 1, memory 1, exclusive); each admitted node becomes one claude -p process with its brief on stdin and stream-json on stdout; every line lands in the run folder and deliverables go to nodes/id/deliverables; live run:state and node:event events flow back to the editor. Windows mode (default): the session runner opens one agent session per chain in a pty with its own window, delivers each node's message, and learns about turns from hooks whose hooks.json and hooks.log live in the app data folder, outside the graph folder; runs/run/sessions/sid/hooks.path points there. Agent-called: your Claude Code, Codex or dsh session calls claude-graph --mcp-graph or the graph CLI; each call reads and writes runs/run/run.json under a lock; the open editor polls it once a second.">
   <defs>
     <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 z" fill="#a1a1aa"/>
@@ -11,7 +11,7 @@
     </marker>
   </defs>
 
-  <rect width="1000" height="480" fill="#1e1e1e"/>
+  <rect width="1000" height="800" fill="#1e1e1e"/>
 
   <g font-family="Segoe UI, -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" fill="#e5e5e5">
     <!-- process boundaries -->
@@ -41,6 +41,7 @@
     <!-- Scheduler -->
     <rect x="440" y="40" width="270" height="210" rx="8" fill="#262626" stroke="#52525b"/>
     <text x="458" y="70" font-size="17" font-weight="700">Scheduler</text>
+    <text x="692" y="70" font-size="11" fill="#a78bfa" text-anchor="end" letter-spacing="1">HEADLESS ENGINE</text>
     <text x="458" y="91" font-size="12" fill="#a1a1aa">ready = all upstream succeeded</text>
     <text x="458" y="108" font-size="12" fill="#a1a1aa">order: longest downstream path</text>
 
@@ -102,5 +103,58 @@
     <path d="M560 375 L125 375 L125 184" fill="none" stroke="#3b82f6" stroke-width="2" marker-end="url(#ahb)"/>
     <text x="340" y="365" font-size="12" fill="#60a5fa" text-anchor="middle">live IPC events: run:state, node:event</text>
     <text x="340" y="395" font-size="11" fill="#a1a1aa" text-anchor="middle">status rings, log lines, messages</text>
+
+    <!-- lane 2: Windows mode (default) -->
+    <line x1="30" y1="478" x2="970" y2="478" stroke="#3f3f46" stroke-dasharray="4 4"/>
+    <text x="30" y="506" font-size="12" fill="#60a5fa" letter-spacing="1">WINDOWS MODE (DEFAULT)</text>
+
+    <rect x="440" y="522" width="270" height="110" rx="8" fill="#262626" stroke="#52525b"/>
+    <text x="458" y="550" font-size="17" font-weight="700">Session runner</text>
+    <text x="458" y="572" font-size="12" fill="#a1a1aa">one session per chain, max_parallel</text>
+    <text x="458" y="590" font-size="12" fill="#a1a1aa">gate → type → confirm, then follow</text>
+    <text x="458" y="608" font-size="12" fill="#a1a1aa">the turn: done / question / dialog</text>
+
+    <rect x="760" y="522" width="210" height="110" rx="8" fill="#262626" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="776" y="548" font-size="14" font-weight="700">agent session</text>
+    <text x="776" y="570" font-size="12" fill="#a1a1aa">Claude Code, Codex, custom: pty</text>
+    <text x="776" y="588" font-size="12" fill="#a1a1aa">dsh: one process per message</text>
+    <text x="776" y="612" font-size="12" fill="#71717a">shown in a session window</text>
+
+    <path d="M710 560 L756 560" stroke="#3b82f6" stroke-width="2" marker-end="url(#ahb)"/>
+    <text x="733" y="552" font-size="11" fill="#60a5fa" text-anchor="middle">message</text>
+
+    <rect x="30" y="522" width="360" height="110" rx="8" fill="#262626" stroke="#52525b" stroke-dasharray="5 4"/>
+    <text x="48" y="546" font-size="12" fill="#71717a" letter-spacing="1">APP DATA FOLDER (NOT THE GRAPH)</text>
+    <text x="48" y="570" font-size="12" font-family="Consolas, Menlo, monospace">sessions/&lt;run&gt;-&lt;hash&gt;/&lt;sid&gt;/</text>
+    <text x="64" y="590" font-size="12" font-family="Consolas, Menlo, monospace">hooks.json  hooks.log</text>
+    <text x="48" y="616" font-size="11" fill="#a1a1aa">runs/&lt;run&gt;/sessions/&lt;sid&gt;/hooks.path points here</text>
+
+    <path d="M865 632 L865 660 L210 660 L210 636" fill="none" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+    <text x="540" y="654" font-size="11" fill="#a1a1aa" text-anchor="middle">hook lines: start · submit · stop · notify</text>
+    <path d="M390 577 L436 577" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+
+    <!-- lane 3: agent-called -->
+    <line x1="30" y1="680" x2="970" y2="680" stroke="#3f3f46" stroke-dasharray="4 4"/>
+    <text x="30" y="706" font-size="12" fill="#4ade80" letter-spacing="1">AGENT-CALLED (FROM YOUR CLI)</text>
+
+    <rect x="760" y="718" width="210" height="64" rx="8" fill="#262626" stroke="#22c55e" stroke-width="1.5"/>
+    <text x="776" y="742" font-size="14" font-weight="700">your agent session</text>
+    <text x="776" y="764" font-size="12" fill="#a1a1aa">Claude Code · Codex · dsh</text>
+
+    <rect x="440" y="718" width="270" height="64" rx="8" fill="#262626" stroke="#52525b"/>
+    <text x="458" y="742" font-size="13" font-weight="700" font-family="Consolas, Menlo, monospace">claude-graph --mcp-graph</text>
+    <text x="458" y="764" font-size="12" fill="#a1a1aa">or: claude-graph graph next …</text>
+
+    <path d="M756 740 L714 740" stroke="#22c55e" stroke-width="1.5" marker-end="url(#ahg)"/>
+    <path d="M714 762 L756 762" stroke="#22c55e" stroke-width="1.5" marker-end="url(#ahg)"/>
+    <text x="735" y="732" font-size="10" fill="#4ade80" text-anchor="middle">call</text>
+    <text x="735" y="778" font-size="10" fill="#4ade80" text-anchor="middle">brief</text>
+
+    <rect x="30" y="718" width="360" height="64" rx="8" fill="#262626" stroke="#52525b"/>
+    <text x="48" y="742" font-size="12" font-family="Consolas, Menlo, monospace">runs/&lt;run&gt;/run.json  agent_log.jsonl</text>
+    <text x="48" y="764" font-size="11" fill="#a1a1aa">each call: read-modify-write under .agent.lock</text>
+    <path d="M436 750 L394 750" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+    <path d="M30 750 L14 750 L14 200 L70 200 L70 186" fill="none" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ahb)"/>
+    <text x="27" y="420" font-size="11" fill="#60a5fa" transform="rotate(-90 27 420)" text-anchor="middle">editor polls every 1 s</text>
   </g>
 </svg>

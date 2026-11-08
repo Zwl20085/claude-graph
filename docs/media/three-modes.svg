@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="540" viewBox="0 0 1200 540" role="img" aria-label="Three ways to use Claude Graph. A, Windows mode: the app opens real agent session windows and delivers each node's message in order. B, call it from your CLI: your agent (Claude Code, Codex or dsh) pulls one brief at a time with graph_next and answers with graph_report, while the app schedules and records. C, advanced: the headless engine runs one claude -p process per node with explicit settings and a per-node Results view, and Assistant mode hands the whole graph to one scheduler session.">
+  <defs>
+    <pattern id="dots" width="20" height="20" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#3a3a3a"/>
+    </pattern>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#a1a1aa"/>
+    </marker>
+    <marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#3b82f6"/>
+    </marker>
+    <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#22c55e"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="540" fill="#1e1e1e"/>
+  <rect width="1200" height="540" fill="url(#dots)"/>
+
+  <g font-family="Segoe UI, -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" fill="#e5e5e5">
+
+    <!-- A: Windows mode -->
+    <rect x="20" y="20" width="370" height="500" rx="10" fill="#232323" stroke="#3b82f6" stroke-width="2"/>
+    <rect x="20" y="20" width="370" height="6" rx="3" fill="#3b82f6"/>
+    <text x="40" y="58" font-size="13" fill="#60a5fa" font-weight="700" letter-spacing="1">A · DEFAULT</text>
+    <text x="40" y="84" font-size="20" font-weight="700">Windows mode</text>
+    <text x="40" y="106" font-size="13" fill="#a1a1aa">The app opens real agent windows and</text>
+    <text x="40" y="124" font-size="13" fill="#a1a1aa">delivers each node's message, in order.</text>
+
+    <rect x="40" y="148" width="330" height="70" rx="8" fill="#262626" stroke="#52525b"/>
+    <text x="54" y="170" font-size="12" fill="#71717a" letter-spacing="1">CLAUDE GRAPH</text>
+    <rect x="56" y="182" width="74" height="24" rx="4" fill="#22c55e"/><text x="93" y="199" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="middle">survey</text>
+    <rect x="166" y="182" width="74" height="24" rx="4" fill="#8b5cf6"/><text x="203" y="199" font-size="12" font-weight="600" fill="#ffffff" text-anchor="middle">design</text>
+    <rect x="276" y="182" width="74" height="24" rx="4" fill="#3b82f6"/><text x="313" y="199" font-size="12" font-weight="600" fill="#ffffff" text-anchor="middle">report</text>
+    <line x1="130" y1="194" x2="164" y2="194" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+    <line x1="240" y1="194" x2="274" y2="194" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+
+    <path d="M205 220 L205 254" stroke="#3b82f6" stroke-width="2" marker-end="url(#ahb)"/>
+    <text x="215" y="242" font-size="12" fill="#60a5fa">message 1, 2, 3</text>
+
+    <rect x="40" y="260" width="330" height="190" rx="8" fill="#141414" stroke="#52525b"/>
+    <rect x="40" y="260" width="330" height="26" rx="8" fill="#2d2d2d"/>
+    <rect x="40" y="276" width="330" height="10" fill="#2d2d2d"/>
+    <circle cx="56" cy="273" r="4" fill="#ef4444"/><circle cx="70" cy="273" r="4" fill="#f59e0b"/><circle cx="84" cy="273" r="4" fill="#22c55e"/>
+    <text x="100" y="277" font-size="12" fill="#a1a1aa">session window · one per chain</text>
+    <g font-family="Consolas, Menlo, monospace" font-size="12">
+      <text x="54" y="308" fill="#71717a">&gt; /model haiku</text>
+      <text x="54" y="328" fill="#e5e5e5">&gt; Collect the ten most cited…</text>
+      <text x="54" y="346" fill="#22c55e">● wrote survey.md</text>
+      <text x="54" y="368" fill="#e5e5e5">&gt; Node "Layout rule set" (design):</text>
+      <text x="54" y="386" fill="#e5e5e5">  read the brief at …/brief.md</text>
+      <text x="54" y="404" fill="#60a5fa">● working…</text>
+      <text x="54" y="432" fill="#71717a">your login · your settings · your skills</text>
+    </g>
+    <text x="40" y="482" font-size="12" fill="#71717a">Claude Code · Claude Code via DeepSeek API</text>
+    <text x="40" y="500" font-size="12" fill="#71717a">Codex CLI · dsh (headless, chained) · custom</text>
+
+    <!-- B: from your CLI -->
+    <rect x="415" y="20" width="370" height="500" rx="10" fill="#232323" stroke="#22c55e" stroke-width="2"/>
+    <rect x="415" y="20" width="370" height="6" rx="3" fill="#22c55e"/>
+    <text x="435" y="58" font-size="13" fill="#4ade80" font-weight="700" letter-spacing="1">B · AGENT-CALLED</text>
+    <text x="435" y="84" font-size="20" font-weight="700">Call it from your CLI</text>
+    <text x="435" y="106" font-size="13" fill="#a1a1aa">Your agent pulls one brief at a time</text>
+    <text x="435" y="124" font-size="13" fill="#a1a1aa">through the app's MCP tools.</text>
+
+    <rect x="435" y="148" width="330" height="150" rx="8" fill="#141414" stroke="#52525b"/>
+    <rect x="435" y="148" width="330" height="26" rx="8" fill="#2d2d2d"/>
+    <rect x="435" y="164" width="330" height="10" fill="#2d2d2d"/>
+    <text x="451" y="165" font-size="12" fill="#a1a1aa">your session · Claude Code / Codex / dsh</text>
+    <g font-family="Consolas, Menlo, monospace" font-size="12">
+      <text x="449" y="196" fill="#e5e5e5">you: run the graph in C:\work\g</text>
+      <text x="449" y="216" fill="#4ade80">⏺ graph_open → run 2026…Z</text>
+      <text x="449" y="236" fill="#4ade80">⏺ graph_next → brief of "hello"</text>
+      <text x="449" y="256" fill="#e5e5e5">  (does the work here)</text>
+      <text x="449" y="276" fill="#4ade80">⏺ graph_report hello: done</text>
+    </g>
+
+    <path d="M560 302 L560 352" stroke="#22c55e" stroke-width="2" marker-end="url(#ahg)"/>
+    <text x="552" y="330" font-size="12" fill="#4ade80" text-anchor="end">graph_report</text>
+    <path d="M640 352 L640 302" stroke="#22c55e" stroke-width="2" marker-end="url(#ahg)"/>
+    <text x="648" y="330" font-size="12" fill="#4ade80">graph_next</text>
+
+    <rect x="435" y="356" width="330" height="94" rx="8" fill="#262626" stroke="#52525b"/>
+    <text x="449" y="380" font-size="13" font-weight="700" font-family="Consolas, Menlo, monospace">claude-graph --mcp-graph</text>
+    <text x="449" y="402" font-size="12" fill="#a1a1aa">schedules: dependencies, tags, max_parallel</text>
+    <text x="449" y="420" font-size="12" fill="#a1a1aa">checks deliverables, writes the run record</text>
+    <text x="449" y="438" font-size="12" fill="#71717a">an open app window follows within ~1 s</text>
+    <text x="435" y="482" font-size="12" fill="#71717a">The conversation stays in your CLI.</text>
+    <text x="435" y="500" font-size="12" fill="#71717a">Plain CLI too: claude-graph graph next …</text>
+
+    <!-- C: advanced -->
+    <rect x="810" y="20" width="370" height="500" rx="10" fill="#232323" stroke="#8b5cf6" stroke-width="2"/>
+    <rect x="810" y="20" width="370" height="6" rx="3" fill="#8b5cf6"/>
+    <text x="830" y="58" font-size="13" fill="#a78bfa" font-weight="700" letter-spacing="1">C · ADVANCED</text>
+    <text x="830" y="84" font-size="20" font-weight="700">Headless engine</text>
+    <text x="830" y="106" font-size="13" fill="#a1a1aa">One process per node, explicit model,</text>
+    <text x="830" y="124" font-size="13" fill="#a1a1aa">permissions and tools; parsed results.</text>
+
+    <rect x="830" y="148" width="330" height="62" rx="8" fill="#262626" stroke="#52525b"/>
+    <text x="844" y="172" font-size="14" font-weight="700">Scheduler</text>
+    <text x="844" y="194" font-size="12" fill="#a1a1aa">resource pools · cpu 1 · memory 1 · exclusive</text>
+
+    <path d="M909 212 L909 238" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+    <path d="M1081 212 L1081 238" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#ah)"/>
+    <rect x="830" y="242" width="158" height="44" rx="6" fill="#262626" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="909" y="262" font-size="13" font-weight="700" text-anchor="middle" font-family="Consolas, Menlo, monospace">claude -p</text>
+    <text x="909" y="279" font-size="11" fill="#a1a1aa" text-anchor="middle">brief on stdin</text>
+    <rect x="1002" y="242" width="158" height="44" rx="6" fill="#262626" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="1081" y="262" font-size="13" font-weight="700" text-anchor="middle" font-family="Consolas, Menlo, monospace">claude -p</text>
+    <text x="1081" y="279" font-size="11" fill="#a1a1aa" text-anchor="middle">stream-json out</text>
+
+    <rect x="830" y="300" width="330" height="62" rx="8" fill="#262626" stroke="#52525b"/>
+    <text x="844" y="322" font-size="13" font-weight="700">Results, per node and run</text>
+    <text x="844" y="344" font-size="12" fill="#a1a1aa">status · cost · turns · denied tools</text>
+
+    <line x1="830" y1="384" x2="1160" y2="384" stroke="#3f3f46" stroke-dasharray="4 4"/>
+
+    <rect x="830" y="400" width="330" height="62" rx="8" fill="#262626" stroke="#8b5cf6" stroke-width="1.5"/>
+    <text x="844" y="424" font-size="14" font-weight="700">Assistant mode</text>
+    <text x="844" y="446" font-size="12" fill="#a1a1aa">one scheduler session runs the whole graph</text>
+    <text x="830" y="482" font-size="12" fill="#71717a">Permission mode "Ask me in the app":</text>
+    <text x="830" y="500" font-size="12" fill="#71717a">approvals open a dialog in the app.</text>
+  </g>
+</svg>

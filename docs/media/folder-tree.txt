@@ -1,12 +1,12 @@
 hello-pipeline/
-|   graph.json
-|   GRAPH_LOG.md
+|   graph.json                   nodes, edges, positions, settings
+|   GRAPH_LOG.md                 one line per node per run
 |
 +---nodes
 |   +---survey
-|   |   |   brief.md
+|   |   |   brief.md             the brief as last saved
 |   |   \---deliverables
-|   |           survey.md
+|   |           survey.md        what the agent wrote
 |   +---design
 |   |   |   brief.md
 |   |   \---deliverables
@@ -16,17 +16,29 @@ hello-pipeline/
 |       |   brief.md
 |       \---deliverables
 |               report.md
++---assistant                    Assistant mode only
+|   |   session.json
+|   |   journal.jsonl
+|   |   CHARTER.md
+|   |   PLAN.md
+|   |   DECISIONS.md
+|   \---turns
+|       \---0001                 prompt.md, events.jsonl, reply.md, stderr.log
 \---runs
-    \---20261107T040952Z
-        |   run.json
+    \---20261108T200336Z         a Windows-mode run
+        |   run.json             status, timings, sessions of every node
+        +---sessions
+        |   \---s1               one per chain (split where the harness changes)
+        |           session.json
+        |           transcript.log
+        |           hooks.path   where this session's hooks live (app data folder)
         +---survey
-        |       events.jsonl
-        |       messages.jsonl
-        |       prompt.md
+        |       prompt.md        the brief that was sent
+        |       reply.md         the node's turn as text
         |       result.md
-        |       stderr.log
         |       summary.json
         +---design
-        |       (same six files)
+        |       (same files)
+        |       questions.jsonl  every question or dialog, and how it was answered
         \---report
-                (same six files)
+                (same files)
