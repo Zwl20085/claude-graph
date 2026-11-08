@@ -97,7 +97,7 @@ describe('harness store slice', () => {
 describe('Settings: graph harness and Manage dialog', () => {
   it('the Harness select sets settings.harness; Manage opens the dialog', async () => {
     await render(<SettingsPopover />);
-    await choose(control<HTMLSelectElement>('Harness', 'select'), 'codex');
+    await choose(control<HTMLSelectElement>('Default harness', 'select'), 'codex');
     expect(s().graph?.settings.harness).toBe('codex');
     await click(q('[aria-label="manage harnesses"]'));
     expect(q('[role="dialog"][aria-modal="true"]')?.textContent).toContain('Harnesses');
@@ -214,7 +214,7 @@ describe('session chips', () => {
     await act(async () =>
       s().applyRunState(run([session({}), session({ sid: 's2', title: 'Design (Codex CLI)', harness: 'codex', node_ids: ['design'] })])),
     );
-    const chips = [...document.querySelectorAll('[aria-label="Claude Code sessions"] button')];
+    const chips = [...document.querySelectorAll('[aria-label="sessions"] button')];
     expect(chips.map((c) => c.textContent)).toEqual(['Survey', 'DesignCodex CLI']);
     expect(chips[0]?.getAttribute('aria-label')).toMatch(/harness Claude Code$/);
     expect(chips[1]?.getAttribute('aria-label')).toMatch(/harness Codex CLI$/);
@@ -229,7 +229,7 @@ describe('session chips', () => {
         ]),
       ),
     );
-    const chip = document.querySelector('[aria-label="Claude Code sessions"] button');
+    const chip = document.querySelector('[aria-label="sessions"] button');
     expect(chip?.textContent).toBe('Surveyneeds youdsh (headless, chained)');
     expect(chip?.getAttribute('aria-label')).toContain('needs you');
   });

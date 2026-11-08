@@ -37,7 +37,7 @@ export function StartScreen() {
       <div className="w-[520px] space-y-5 rounded border border-[#3c3c3c] bg-[#252526] p-6">
         <div>
           <h1 className="text-lg font-semibold text-[#d4d4d4]">Claude Graph</h1>
-          <p className="text-[13px] text-[#9a9a9a]">Draw a graph of Claude Code tasks and run it with your local claude CLI.</p>
+          <p className="text-[13px] text-[#9a9a9a]">Draw a graph of agent tasks and run them in interactive session windows (Claude Code by default; Codex, dsh or your own CLI per node).</p>
         </div>
         <div className="flex gap-2">
           <input className={inputCls} placeholder="New graph name" value={name} onChange={(e) => setName(e.target.value)} />

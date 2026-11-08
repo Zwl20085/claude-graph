@@ -130,7 +130,7 @@ describe('permission helpers', () => {
   });
 
   it('approvalsText', () => {
-    expect(approvalsText(1)).toBe('1 approval waiting');
-    expect(approvalsText(3)).toBe('3 approvals waiting');
+    expect(approvalsText(1)).toBe('1 approval needed');
+    expect(approvalsText(3)).toBe('3 approvals needed');
   });
 });

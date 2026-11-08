@@ -59,7 +59,7 @@ describe('App smoke (mock mode)', () => {
     expect(document.body.textContent).toContain('Literature survey');
 
     await act(async () => store.getState().select('design'));
-    for (const tab of ['Brief (recommended)', 'Messages', 'Results', 'Prompt']) await click(button(tab));
+    for (const tab of ['Brief', 'Chat', 'Results', 'Prompt']) await click(button(tab));
     await click(button('Preview brief'));
     await act(async () => new Promise((r) => setTimeout(r, 500)));
     expect(document.body.textContent).toContain('# Node: Layout rule set');
@@ -81,13 +81,14 @@ describe('App smoke (mock mode)', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(store.getState().runState?.status).toBe('running');
 
-    await click(button('Open folder'));
+    await click(document.querySelector('[aria-label="File"]'));
+    await click(button('Show in file manager'));
     await click(document.querySelector('[aria-label="settings"]'));
-    expect(document.body.textContent).toContain('App settings (this machine)');
+    expect(document.body.textContent).toContain('This machine');
     await act(async () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     });
-    expect(document.body.textContent).not.toContain('App settings (this machine)');
+    expect(document.body.textContent).not.toContain('This machine');
     await act(async () => root.unmount());
     expect(errors).not.toHaveBeenCalled();
   });

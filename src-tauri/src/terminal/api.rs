@@ -198,7 +198,7 @@ impl SessionShared {
         let info = self.info();
         WindowSpec {
             label: window_label(&self.run_id, &info.sid),
-            title: format!("Claude Code — {}", info.title),
+            title: format!("{} — session window", info.title),
             url: format!(
                 "index.html#/terminal/{}/{}?dir={}",
                 self.run_id,

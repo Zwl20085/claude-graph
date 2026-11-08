@@ -108,7 +108,7 @@ describe('hash routing', () => {
   it('#/terminal/<run>/<sid> renders the session window, no hash renders the main app', async () => {
     window.location.hash = '#/terminal/R1/s1';
     await render(<Root />);
-    expect(document.querySelector('[aria-label="Claude Code terminal of session s1"]')).not.toBeNull();
+    expect(document.querySelector('[aria-label="terminal of session s1"]')).not.toBeNull();
     expect(document.body.textContent).not.toContain('main window');
     await act(async () => root?.unmount());
 

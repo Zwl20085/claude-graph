@@ -28,6 +28,7 @@ import {
 } from '../types/contract';
 import type { Api } from '../lib/api';
 import { errorMessage } from './runHelpers';
+import { notifyUnfocused } from '../lib/notify';
 
 export interface PromptState {
   /** Pending prompts of the shown runs, oldest first. */
@@ -143,8 +144,10 @@ export function createPromptActions(api: Api, set: SetPatch, get: Get, toast: To
     const { announcedPrompts, runState, graph } = get();
     if (announcedPrompts.includes(p.prompt.id)) return;
     set({ announcedPrompts: remember(announcedPrompts, p.prompt.id) });
-    if (runState === null || runState.run_id === p.run_id) toast('warning', needsYouText(p, graph), p.node_id);
-    else toast('warning', otherRunText(p));
+    const text = runState === null || runState.run_id === p.run_id ? needsYouText(p, graph) : otherRunText(p);
+    if (runState === null || runState.run_id === p.run_id) toast('warning', text, p.node_id);
+    else toast('warning', text);
+    void notifyUnfocused('Claude Graph', text);
   };
 
   const add = (p: SessionPrompt): void => {

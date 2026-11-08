@@ -1,4 +1,4 @@
-/** In-app toasts, auto-dismissed after a few seconds (errors stay longer). */
+/** In-app toasts, auto-dismissed after a few seconds (errors stay longer); "Show" reveals the node, an action (Retry) runs once. The bell keeps the last 20. */
 import { useEffect } from 'react';
 import { X } from 'lucide-react';
 import { useGraphStore, type Toast, type ToastKind } from '../store/graphStore';
@@ -8,7 +8,7 @@ const COLORS: Record<ToastKind, string> = { info: '#3b82f6', success: '#22c55e',
 
 function ToastItem({ toast }: { toast: Toast }) {
   const dismiss = useGraphStore((s) => s.dismissToast);
-  const select = useGraphStore((s) => s.select);
+  const reveal = useGraphStore((s) => s.revealNode);
   useEffect(() => {
     const handle = setTimeout(() => dismiss(toast.id), LIFETIME_MS[toast.kind]);
     return () => clearTimeout(handle);
@@ -20,12 +20,23 @@ function ToastItem({ toast }: { toast: Toast }) {
       style={{ borderColor: COLORS[toast.kind] }}
     >
       <span className="flex-1 whitespace-pre-wrap">{toast.text}</span>
+      {toast.action !== undefined && (
+        <button
+          className="shrink-0 rounded border border-[#3c3c3c] px-1.5 text-[12px] hover:bg-[#37373d]"
+          onClick={() => {
+            toast.action?.run();
+            dismiss(toast.id);
+          }}
+        >
+          {toast.action.label}
+        </button>
+      )}
       {toast.nodeId !== undefined && (
         <button
           className="shrink-0 rounded border border-[#3c3c3c] px-1.5 text-[12px] hover:bg-[#37373d]"
           aria-label={`show node ${toast.nodeId}`}
           onClick={() => {
-            select(toast.nodeId ?? null);
+            if (toast.nodeId !== undefined) reveal(toast.nodeId);
             dismiss(toast.id);
           }}
         >

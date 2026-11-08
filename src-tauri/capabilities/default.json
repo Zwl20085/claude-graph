@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window and Claude Code session windows (term-<run>-<sid>): IPC, events, folder dialog. Session windows are created by the backend. Reveal runs backend-side (no opener permission for the webview).",
+  "description": "Main window and Claude Code session windows (term-<run>-<sid>): IPC, events, folder dialog. Session windows are created by the backend. Reveal runs backend-side (no opener permission for the webview). notification:default: an OS notification when a node needs the user while the window is unfocused.",
   "windows": [
     "main",
     "term-*"
@@ -13,6 +13,7 @@
     "core:window:allow-close",
     "core:window:allow-destroy",
     "dialog:default",
-    "log:default"
+    "log:default",
+    "notification:default"
   ]
 }

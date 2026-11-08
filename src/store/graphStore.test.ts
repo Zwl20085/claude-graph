@@ -147,7 +147,7 @@ describe('graph store: runs', () => {
     await s().openGraph(DIR);
     s().addNodeAt({ x: 0, y: 0 });
     expect(await s().startRun('all')).toBe(false);
-    expect(s().toasts[s().toasts.length - 1]?.text).toMatch(/new-node/);
+    expect(s().toasts[s().toasts.length - 1]?.text).toMatch(/New node has no prompt or goal/);
     expect(await s().startRun({ from: 'report' })).toBe(true);
     await s().cancelRun();
     await vi.runAllTimersAsync();

@@ -85,9 +85,15 @@ describe('PromptCard', () => {
       reply_excerpt: 'Want tests too?',
     });
     await render(<PromptCard prompt={sp} />);
-    expect(document.body.textContent).toContain('The reply ends with a question');
+    expect(document.body.textContent).toContain('a is asking:');
+    // The first skip of a run asks; declining sends nothing.
+    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    await act(async () => root?.render(<PromptCard prompt={sp} confirm={confirm} />));
+    await click(button(CONTINUE_LABEL));
+    expect(continueNode).not.toHaveBeenCalled();
     await click(button(CONTINUE_LABEL));
     expect(continueNode).toHaveBeenCalledWith('R1', 's1', 'a');
+    expect(confirm).toHaveBeenCalledTimes(2);
   });
 });
 

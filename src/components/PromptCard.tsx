@@ -13,8 +13,9 @@ import { useGraphStore } from '../store/graphStore';
 import { openSessionWindow } from './SessionChips';
 import { btnCls, inputCls } from './ui';
 
-export const CONTINUE_LABEL = 'Continue without answering';
-export const CONTINUE_HINT = 'Treat the question as an offer: the node is done (status by its deliverables) and the next node starts.';
+export const CONTINUE_LABEL = 'Skip this question — continue the chain';
+export const CONTINUE_HINT = 'The node ends now (its status comes from its deliverables) and the next node starts. You can still reply later in its window.';
+export const SKIP_CONFIRM = `${CONTINUE_LABEL}?\n\n${CONTINUE_HINT}`;
 /** Longest typed answer (the backend's `WRITE_MAX`). */
 export const ANSWER_MAX = 64 * 1024;
 const KIND_TEXT: Record<string, string> = {
@@ -26,9 +27,14 @@ const KIND_TEXT: Record<string, string> = {
 
 interface Props {
   prompt: SessionPrompt;
+  /** Asks before the first skip of a run; true = go ahead (default: window.confirm). */
+  confirm?: (text: string) => boolean;
 }
 
-export function PromptCard({ prompt }: Props) {
+export function PromptCard({ prompt, confirm = (t) => window.confirm(t) }: Props) {
+  const title = useGraphStore((s) => s.graph?.nodes.find((n) => n.id === prompt.node_id)?.title?.trim() || prompt.node_id);
+  const skipConfirmed = useGraphStore((s) => s.skipConfirmedRuns.includes(prompt.run_id));
+  const confirmSkip = useGraphStore((s) => s.confirmSkip);
   const busy = useGraphStore((s) => s.promptAnswering.includes(prompt.prompt.id));
   const answer = useGraphStore((s) => s.answerPrompt);
   const continueNode = useGraphStore((s) => s.continueNode);
@@ -41,7 +47,14 @@ export function PromptCard({ prompt }: Props) {
   const multi = p.type === 'dialog' && p.multi;
   const color = STATUS_COLORS.waiting;
   const send = (a: PromptAnswer): void => void answer(prompt, a);
-  const lead = p.type === 'dialog' ? `A dialog in the window ${KIND_TEXT[p.kind] ?? KIND_TEXT.unknown}` : 'The reply ends with a question';
+  const lead = p.type === 'dialog' ? `(a dialog in its session window ${KIND_TEXT[p.kind] ?? KIND_TEXT.unknown})` : '';
+  const skip = (): void => {
+    if (!skipConfirmed) {
+      if (!confirm(SKIP_CONFIRM)) return;
+      confirmSkip(prompt.run_id);
+    }
+    void continueNode(prompt);
+  };
 
   return (
     <section
@@ -51,7 +64,8 @@ export function PromptCard({ prompt }: Props) {
       style={{ borderColor: color }}
     >
       <p className="flex items-center gap-1 font-semibold" style={{ color }}>
-        <CircleHelp size={13} />Needs you · <span className="font-normal">{lead}</span>
+        <CircleHelp size={13} />
+        {title} is asking:{lead && <span className="font-normal"> {lead}</span>}
       </p>
       {p.type === 'dialog' && p.header && <p className="text-[11px] text-[#9a9a9a]">{p.header}</p>}
       <p id={questionId} className="whitespace-pre-wrap text-[#e5e5e5]">{p.question || '(no question text)'}</p>
@@ -111,6 +125,7 @@ export function PromptCard({ prompt }: Props) {
           />
           <button
             className={`${btnCls} self-end bg-[#3b82f6] text-white`}
+            title="Answer (Ctrl+Enter)"
             disabled={busy || text.trim() === ''}
             onClick={() => send({ text: text.trim() })}
           >
@@ -120,14 +135,12 @@ export function PromptCard({ prompt }: Props) {
       )}
       <div className="flex flex-wrap gap-1">
         {p.type === 'reply' && (
-          <button
-            className={`${btnCls} border border-[#3c3c3c]`}
-            disabled={busy}
-            title={CONTINUE_HINT}
-            onClick={() => void continueNode(prompt)}
-          >
-            {CONTINUE_LABEL}
-          </button>
+          <div className="w-full space-y-0.5">
+            <button className={`${btnCls} border border-[#3c3c3c]`} disabled={busy} onClick={skip}>
+              {CONTINUE_LABEL}
+            </button>
+            <p className="text-[11px] text-[#8a8a8a]">{CONTINUE_HINT}</p>
+          </div>
         )}
         <button
           className={`${btnCls} border border-[#3c3c3c]`}

@@ -31,8 +31,8 @@ function setup(overrides: Partial<Api> = {}) {
 }
 
 describe('waiting status', () => {
-  it('is blue, pulsing and labelled "needs you"', () => {
-    expect(STATUS_COLORS.waiting).toBe('#38bdf8');
+  it('is violet, pulsing and labelled "needs you"', () => {
+    expect(STATUS_COLORS.waiting).toBe('#a78bfa');
     expect(ringStyle('waiting').className).toBe('cg-pulse-wait');
     expect(statusLabel('waiting')).toBe(WAITING_LABEL);
   });

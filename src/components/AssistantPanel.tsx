@@ -18,14 +18,17 @@ interface EmptyStateProps {
 function EmptyState({ disabled, onRun }: EmptyStateProps) {
   return (
     <div className="space-y-2 p-1 text-[12px] text-[#9a9a9a]">
-      <p>The scheduler session runs your workflow and reports stages, questions and decisions here.</p>
-      <p>Model and permissions come from your Claude Code settings.</p>
-      <p>
-        Unattended runs need <code className="text-[#d4d4d4]">permissions.defaultMode: &quot;acceptEdits&quot;</code> or allow rules there.
+      <p className="text-[#d4d4d4]">
+        The Assistant is one scheduler session that runs the whole graph for you and reports stages, questions and
+        decisions here. To run node by node instead, use Run all in the top bar.
       </p>
       <button className={`${btnCls} border border-[#3b82f6] text-white`} disabled={disabled} onClick={onRun} aria-label="run the workflow">
         <Play size={13} />Run the workflow
       </button>
+      <p className="text-[11px]">
+        Model and permissions come from your Claude Code settings. Unattended runs need{' '}
+        <code className="text-[#d4d4d4]">permissions.defaultMode: &quot;acceptEdits&quot;</code> or allow rules there.
+      </p>
     </div>
   );
 }

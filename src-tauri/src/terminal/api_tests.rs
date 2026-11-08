@@ -94,5 +94,5 @@ fn registry_finds_sessions_and_kills() {
     assert_eq!(url_encode("C:/a b/ü"), "C%3A%2Fa%20b%2F%C3%BC");
     assert_eq!(list_sessions(&t, None, "R1").unwrap().len(), 1);
     assert_eq!(list_sessions(&t, None, "R2").unwrap_err().code, "not_found");
-    assert_eq!(w.title, "Claude Code — T");
+    assert_eq!(w.title, "T — session window");
 }

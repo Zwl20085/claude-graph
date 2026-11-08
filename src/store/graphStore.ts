@@ -37,6 +37,8 @@ import * as ops from '../lib/graphOps';
 import { isRunActive } from '../lib/status';
 import { createHarnessActions, INITIAL_HARNESSES, type HarnessActions, type HarnessState } from './harnessSlice';
 import { createPermissionActions, INITIAL_PERMISSIONS, type PermissionActions, type PermissionState } from './permissionSlice';
+import { createUiActions, HISTORY_CAP, INITIAL_UI, type UiActions, type UiState } from './uiSlice';
+import { closedSessionNotices, runEndNotice, titleOf } from './runWatch';
 import { answerFailed, createPromptActions, INITIAL_PROMPTS, type PromptActions, type PromptState } from './promptSlice';
 import {
   acceptsRunState,
@@ -61,12 +63,18 @@ export const MAX_SAVE_ROUNDS = 10;
 export const IGNORED_CLAUDE_BIN_TEXT = 'ignored: claude path is a per-machine setting';
 
 export type ToastKind = 'info' | 'success' | 'warning' | 'error';
+/** An extra button on a toast (for example "Retry"). */
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
 export interface Toast {
   id: number;
   kind: ToastKind;
   text: string;
-  /** A toast about a node: it offers "Show", which selects the node. */
+  /** A toast about a node: it offers "Show", which reveals the node. */
   nodeId?: string;
+  action?: ToastAction;
 }
 export type ClaudeState = { kind: 'checking' } | { kind: 'ok'; check: ClaudeCheck } | { kind: 'error'; message: string };
 
@@ -97,6 +105,8 @@ export interface GraphState {
   /** Shown as the trust dialog while non-null. */
   trustRequest: TrustRequest | null;
   toasts: readonly Toast[];
+  /** The last notifications (newest last), for the bell. */
+  toastHistory: readonly Toast[];
   recent: readonly string[];
 }
 
@@ -134,7 +144,7 @@ export interface GraphActions {
   applyRunState: (rs: unknown) => void;
   appendEvent: (ev: NodeEvent) => void;
   clearEvents: (nodeId: string) => void;
-  pushToast: (kind: ToastKind, text: string, nodeId?: string) => void;
+  pushToast: (kind: ToastKind, text: string, nodeId?: string, action?: ToastAction) => void;
   dismissToast: (id: number) => void;
 }
 
@@ -145,7 +155,9 @@ export type GraphStore = GraphState &
   PermissionState &
   PermissionActions &
   PromptState &
-  PromptActions;
+  PromptActions &
+  UiState &
+  UiActions;
 
 const CLOSED: Pick<
   GraphState,
@@ -207,10 +219,16 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
     let bufferedStates = new Map<string, RunState>();
     let bufferedEvents: NodeEvent[] = [];
 
-    const pushToast = (kind: ToastKind, text: string, nodeId?: string): void => {
+    const pushToast = (kind: ToastKind, text: string, nodeId?: string, action?: ToastAction): void => {
       toastSeq += 1;
-      const toast: Toast = nodeId === undefined ? { id: toastSeq, kind, text } : { id: toastSeq, kind, text, nodeId };
-      set({ toasts: [...get().toasts, toast] });
+      const toast: Toast = {
+        id: toastSeq,
+        kind,
+        text,
+        ...(nodeId === undefined ? {} : { nodeId }),
+        ...(action === undefined ? {} : { action }),
+      };
+      set({ toasts: [...get().toasts, toast], toastHistory: [...get().toastHistory, toast].slice(-HISTORY_CAP) });
     };
 
     const doSave = async (): Promise<boolean> => {
@@ -276,10 +294,14 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
 
     /** Show `rs`; buffered lines of that run are appended right away, in arrival order. */
     const showRun = (rs: RunState): void => {
+      const { runState: prev, graph } = get();
+      const ended = runEndNotice(prev, rs, graph);
+      const notices = [...closedSessionNotices(prev, rs, graph), ...(ended === null ? [] : [ended])];
       const ran = get().ranNodeIds;
       set({ runState: rs, ranNodeIds: ran === null ? null : unionIds(ran, Object.keys(rs.nodes)) });
       // Prompts of a waiting node show after a reload or an open too, not only on the next run:state.
       void get().syncSessionPrompts(rs);
+      notices.forEach((n) => pushToast(n.kind, n.text, n.nodeId));
       if (bufferedEvents.some((e) => e.run_id === rs.run_id)) {
         const mine = bufferedEvents.filter((e) => e.run_id === rs.run_id);
         bufferedEvents = bufferedEvents.filter((e) => e.run_id !== rs.run_id);
@@ -389,6 +411,9 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
       ...createPermissionActions(api, set, get, pushToast),
       ...INITIAL_PROMPTS,
       ...createPromptActions(api, set, get, pushToast),
+      ...INITIAL_UI,
+      ...createUiActions(set, get),
+      toastHistory: [],
       saving: false,
       startingRun: false,
       claude: { kind: 'checking' },
@@ -552,12 +577,13 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
         const { dir, graph } = get();
         if (!dir || !graph) return false;
         if (isRunActive(get().runState)) {
-          pushToast('error', 'A run is already active.');
+          pushToast('info', 'A run is already active; cancel it first.');
           return false;
         }
         const empty = emptyTargets(graph, target, get().runState);
         if (empty.length > 0) {
-          pushToast('error', `Refused: these nodes have no prompt or goal: ${empty.join(', ')}`);
+          const names = empty.map((id) => titleOf(graph, id)).join(', ');
+          pushToast('error', `Nothing to send: ${names} ${empty.length === 1 ? 'has' : 'have'} no prompt or goal yet.`, empty[0]);
           return false;
         }
         const myEpoch = epoch;

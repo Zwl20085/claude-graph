@@ -68,7 +68,7 @@ export function waitingNodeIds(prompts: readonly PermissionPrompt[], run: RunSta
 }
 
 export function approvalsText(n: number): string {
-  return `${n} approval${n === 1 ? '' : 's'} waiting`;
+  return `${n} approval${n === 1 ? '' : 's'} needed`;
 }
 
 export function createPermissionActions(api: Api, set: SetPatch, get: Get, toast: Toast): PermissionActions {

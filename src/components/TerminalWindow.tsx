@@ -9,7 +9,6 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import type { ITerminalOptions } from '@xterm/xterm';
 import {
-  DEFAULT_HARNESS,
   isRunState,
   sessionHarness,
   sessionsOf,
@@ -268,7 +267,7 @@ export default function TerminalWindow({ runId, sid, dir }: TerminalWindowProps)
   useSessionTerminal(host, runId, sid, report);
   const harnessId = sessionHarness(session);
   const harness = useHarnessLabel(harnessId);
-  useWindowTitle(`${harnessId === DEFAULT_HARNESS ? 'Claude Code' : harness} — ${session?.title || sid}`);
+  useWindowTitle(`${harness} — ${session?.title || sid}`);
 
   return (
     <div className="flex h-screen flex-col bg-[#1e1e1e] text-[#d4d4d4]">
@@ -281,7 +280,7 @@ export default function TerminalWindow({ runId, sid, dir }: TerminalWindowProps)
           </button>
         </div>
       )}
-      <div ref={host} className="min-h-0 flex-1 p-1" role="region" aria-label={`Claude Code terminal of session ${sid}`} />
+      <div ref={host} className="min-h-0 flex-1 p-1" role="region" aria-label={`terminal of session ${sid}`} />
     </div>
   );
 }

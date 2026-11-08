@@ -1,5 +1,5 @@
 /** App shell: start screen, or top bar + canvas + side panel (Assistant | Node) + log panel. */
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { isTauri } from './lib/api';
@@ -11,36 +11,41 @@ import { SidePanel } from './components/SidePanel';
 import { StartScreen } from './components/StartScreen';
 import { Toasts } from './components/Toasts';
 import { TopBar } from './components/TopBar';
+import { RunSummaryStrip } from './components/RunSummaryStrip';
 import { TrustDialog } from './components/TrustDialog';
 import { PermissionDialog } from './components/PermissionDialog';
 import { errorMessage } from './store/runHelpers';
 import { assistantStore } from './store/assistantStore';
+import { ShortcutSheet, useShortcuts } from './components/Shortcuts';
+import { SidePanelResizer, useSidePanelWidth } from './components/SidePanelResizer';
+import { GRID } from './components/Canvas';
+import type { Graph, Position } from './types/contract';
 
 const APP_NAME = 'Claude Graph';
 
-/** Window title "Claude Graph — <name>*"; the native title too when inside Tauri. */
-function useWindowTitle(name: string | null, dirty: boolean): void {
+/** Window title "(N) Claude Graph — <name>*" (N: questions waiting); the native title too inside Tauri. */
+export function windowTitle(name: string | null, dirty: boolean, questions: number): string {
+  const base = name === null ? APP_NAME : `${APP_NAME} — ${name}${dirty ? '*' : ''}`;
+  return questions > 0 ? `(${questions}) ${base}` : base;
+}
+
+function useWindowTitle(name: string | null, dirty: boolean, questions: number): void {
   useEffect(() => {
-    const title = name === null ? APP_NAME : `${APP_NAME} — ${name}${dirty ? '*' : ''}`;
+    const title = windowTitle(name, dirty, questions);
     document.title = title;
     if (!isTauri()) return;
     import('@tauri-apps/api/window')
       .then(({ getCurrentWindow }) => getCurrentWindow().setTitle(title))
       .catch((err) => console.warn('setTitle failed (capability core:window:allow-set-title?)', err));
-  }, [name, dirty]);
+  }, [name, dirty, questions]);
 }
 
-function useSaveShortcut(): void {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        void graphStore().getState().save();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+/** Where Ctrl+N puts a node: one row below the lowest node (grid-snapped). */
+export function nextNodePosition(graph: Graph | null): Position {
+  const nodes = graph?.nodes ?? [];
+  if (nodes.length === 0) return { x: 0, y: 0 };
+  const lowest = nodes.reduce((a, b) => (b.position.y > a.position.y ? b : a));
+  return { x: Math.round(lowest.position.x / GRID) * GRID, y: Math.round((lowest.position.y + 6 * GRID) / GRID) * GRID };
 }
 
 /**
@@ -93,6 +98,23 @@ function useAssistantBinding(dir: string | null): void {
   }, [dir]);
 }
 
+/** A reveal request (badge, toast "Show") opens the side panel on the Node tab. */
+function useReveal(onReveal: () => void): void {
+  const seq = useGraphStore((s) => s.revealSeq);
+  const last = useRef(seq);
+  useEffect(() => {
+    if (seq !== last.current) onReveal();
+    last.current = seq;
+  }, [seq, onReveal]);
+}
+
+/** A graph opened with no nodes starts on the Node tab (where the first node is made). */
+function useNodeTabOnEmpty(dir: string | null, onEmpty: () => void): void {
+  useEffect(() => {
+    if (dir !== null && (graphStore().getState().graph?.nodes.length ?? 0) === 0) onEmpty();
+  }, [dir, onEmpty]);
+}
+
 /** Selecting a node on the canvas switches the side panel to the Node tab. */
 function useNodeTabOnSelect(onSelect: () => void): void {
   const selected = useGraphStore((s) => s.selectedNodeId);
@@ -111,14 +133,31 @@ export default function App() {
   const [inspectorOpen, setInspectorOpen] = useStoredFlag('cg.inspectorOpen', true);
   const [assistantTab, setAssistantTab] = useStoredFlag('cg.sideTab.assistant', true);
   const showNodeTab = useCallback(() => setAssistantTab(false), [setAssistantTab]);
+  const revealPanel = useCallback(() => {
+    setInspectorOpen(true);
+    setAssistantTab(false);
+  }, [setInspectorOpen, setAssistantTab]);
+  const questions = useGraphStore((s) => s.sessionPrompts.length);
+  const [sheet, setSheet] = useState(false);
+  const [panelWidth, setPanelWidth] = useSidePanelWidth();
+  const shortcuts = useMemo(
+    () => ({
+      addNode: () => void graphStore().getState().addNodeAt(nextNodePosition(graphStore().getState().graph)),
+      toggleLog: () => setLogVisible(!logVisible),
+      showSheet: () => setSheet(true),
+    }),
+    [logVisible, setLogVisible],
+  );
   const openAssistant = (): void => {
     setInspectorOpen(true);
     setAssistantTab(true);
   };
   useAssistantBinding(dir);
   useNodeTabOnSelect(showNodeTab);
-  useWindowTitle(name, dirty);
-  useSaveShortcut();
+  useReveal(revealPanel);
+  useNodeTabOnEmpty(dir, showNodeTab);
+  useWindowTitle(name, dirty, questions);
+  useShortcuts(shortcuts);
   useSaveOnClose();
 
   return (
@@ -128,6 +167,7 @@ export default function App() {
       ) : (
         <ReactFlowProvider key={dir}>
           <TopBar logVisible={logVisible} onToggleLog={() => setLogVisible(!logVisible)} onOpenAssistant={openAssistant} />
+          <RunSummaryStrip />
           <div className="flex min-h-0 flex-1">
             <div className="flex min-w-0 flex-1 flex-col">
               <main className="min-h-0 flex-1">
@@ -149,13 +189,15 @@ export default function App() {
               {inspectorOpen ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
             </button>
             {inspectorOpen && (
-              <aside className="w-[400px] shrink-0 bg-[#252526]">
+              <aside className="relative shrink-0 bg-[#252526]" style={{ width: panelWidth }}>
+                <SidePanelResizer width={panelWidth} onWidth={setPanelWidth} />
                 <SidePanel assistant={assistantTab} onSelectTab={setAssistantTab} />
               </aside>
             )}
           </div>
         </ReactFlowProvider>
       )}
+      {sheet && <ShortcutSheet onClose={() => setSheet(false)} />}
       <TrustDialog />
       <PermissionDialog />
       <Toasts />

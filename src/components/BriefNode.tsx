@@ -41,14 +41,24 @@ function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
     >
       <div className="flex items-center gap-2 px-2 py-1" style={{ background: color }}>
         <span className="flex-1 truncate text-[13px] font-semibold text-white">{node.title || node.id}</span>
+        {status && status !== 'waiting' && (
+          <span
+            className="shrink-0 rounded px-1.5 text-[11px] font-semibold text-black"
+            style={{ background: ring.borderColor }}
+            aria-label={`status ${statusLabel(status)}`}
+          >
+            {statusLabel(status)}
+          </span>
+        )}
         {status === 'waiting' && (
           <span
-            className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[#38bdf8] text-[11px] font-bold text-black"
-            title="This node asked you something: answer it in the Messages tab."
+            className="flex h-4 shrink-0 items-center justify-center gap-0.5 rounded-full px-1.5 text-[11px] font-bold text-black"
+            style={{ background: ring.borderColor }}
+            title="This node asked you something: answer it in the Chat tab."
             role="img"
             aria-label="needs you"
           >
-            ?
+            ? {statusLabel(status)}
           </span>
         )}
         {harnessLabel !== null && (
@@ -65,7 +75,6 @@ function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
       <div className="space-y-1.5 px-2 py-2 text-[12px]">
         <div className="flex items-center gap-1 text-[10px] text-[#8a8a8a]">
           <span className="font-mono">{node.id}</span>
-          {status && <span className="ml-auto" style={{ color: ring.borderColor }}>{statusLabel(status)}</span>}
           {empty && <span className="ml-auto rounded bg-[#f59e0b] px-1 font-semibold text-black">empty</span>}
         </div>
         <p className="line-clamp-2 whitespace-pre-line text-[#c8c8c8]">
@@ -81,9 +90,9 @@ function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
             <span
               className="ml-auto rounded bg-[#f59e0b] px-1 text-[10px] font-semibold text-black"
               title="A tool call of this node waits for your approval."
-              aria-label="waiting for you"
+              aria-label="approval needed"
             >
-              waiting for you
+              approval needed
             </span>
           )}
           {denied && (

@@ -245,8 +245,8 @@ describe('PermissionDialog with the store', () => {
     });
     expect(document.querySelector('[aria-label="queue position"]')?.textContent).toBe('1 of 2');
     expect(dialog()?.textContent).toContain('Literature survey');
-    const badge = document.querySelector('button[aria-label="2 approvals waiting"]') as HTMLButtonElement;
-    expect(badge.textContent).toBe('2 approvals waiting');
+    const badge = document.querySelector('button[aria-label="2 approvals needed"]') as HTMLButtonElement;
+    expect(badge.textContent).toBe('2 approvals needed');
     expect(badge.className).toContain('bg-[#f59e0b]');
 
     await click(button('Decide later'));
@@ -257,7 +257,7 @@ describe('PermissionDialog with the store', () => {
     await act(async () => store.getState().removePermissionPrompt('p1'));
     expect(document.querySelector('[aria-label="queue position"]')?.textContent).toBe('1 of 1');
     expect(dialog()?.textContent).toContain('design');
-    expect(document.querySelector('button[aria-label="1 approval waiting"]')).not.toBeNull();
+    expect(document.querySelector('button[aria-label="1 approval needed"]')).not.toBeNull();
   });
 });
 

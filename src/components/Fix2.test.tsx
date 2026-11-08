@@ -93,9 +93,8 @@ describe('denials in the UI', () => {
       </>,
     );
     await wait(20);
-    const runButton = [...document.querySelectorAll('button')].find((b) => b.textContent?.includes(runId));
-    await act(async () => runButton?.click());
-    await wait(20);
+    // The latest run of the node opens by itself.
+    expect(document.querySelector('[aria-label="runs of this node"]')?.textContent).toContain(runId);
     const line = document.querySelector('[aria-label="denied tools"]');
     expect(line?.textContent).toBe(`Denied tools: WebSearch. ${DENIED_HINT}`);
     expect(document.body.textContent).toContain('DENIED');
@@ -111,18 +110,18 @@ describe('denials in the UI', () => {
 });
 
 describe('blocked node in the inspector', () => {
-  it('shows the banner and its button opens the Messages tab', async () => {
+  it('shows the banner and its button opens the Chat tab', async () => {
     const store = await ranStore('ask me FAKE_BLOCKED');
     expect(store.getState().runState?.nodes.survey?.status).toBe('blocked');
     await act(async () => store.getState().select('survey'));
     await render(<Inspector />);
     const banner = document.querySelector('[aria-label="node blocked"]');
     expect(banner?.textContent).toContain(
-      'This node stopped and asked you something. Read its reply and answer in the Messages tab; a DONE reply will mark it succeeded.',
+      'This node stopped and asked you something. Read its reply and answer in the Chat tab; a DONE reply will mark it succeeded.',
     );
-    await act(async () => (document.querySelector('button[aria-label="open Messages"]') as HTMLButtonElement).click());
+    await act(async () => (document.querySelector('button[aria-label="open Chat"]') as HTMLButtonElement).click());
     const selected = document.querySelector('[role="tab"][aria-selected="true"]');
-    expect(selected?.textContent).toBe('Messages');
+    expect(selected?.textContent).toBe('Chat');
 
     await act(async () => store.getState().select('report'));
     expect(document.querySelector('[aria-label="node blocked"]')).toBeNull();

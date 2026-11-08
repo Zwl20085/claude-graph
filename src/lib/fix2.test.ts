@@ -49,12 +49,12 @@ describe('permission mode claude_settings', () => {
 });
 
 describe('blocked status', () => {
-  it('has the amber colour, its own label, an amber ring and edge', () => {
+  it('has the orange colour, its own label, an orange ring and edge', () => {
     expect(NODE_STATUSES).toContain('blocked');
-    expect(STATUS_COLORS.blocked).toBe('#f59e0b');
+    expect(STATUS_COLORS.blocked).toBe('#f97316');
     expect(statusLabel('blocked')).toBe('blocked');
-    expect(ringStyle('blocked')).toEqual({ borderColor: '#f59e0b', borderStyle: 'solid', className: '' });
-    expect(edgeVisual('blocked').stroke).toBe('#f59e0b');
+    expect(ringStyle('blocked')).toEqual({ borderColor: '#f97316', borderStyle: 'solid', className: '' });
+    expect(edgeVisual('blocked').stroke).toBe('#f97316');
     expect(composerState('blocked').enabled).toBe(true);
   });
 

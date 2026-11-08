@@ -69,9 +69,9 @@ describe('SessionChips', () => {
   it('one chip per session with its status colour; a click opens that session window', async () => {
     const open = vi.spyOn(api, 'openSessionWindow').mockResolvedValue(undefined);
     await render(<SessionChips />);
-    expect(document.querySelector('[aria-label="Claude Code sessions"]')).toBeNull();
+    expect(document.querySelector('[aria-label="sessions"]')).toBeNull();
     await act(async () => store.getState().applyRunState(terminalRun([session({}), session({ sid: 's2', title: 'Solo', status: 'done', node_ids: [] })])));
-    const chips = [...document.querySelectorAll('[aria-label="Claude Code sessions"] button')] as HTMLButtonElement[];
+    const chips = [...document.querySelectorAll('[aria-label="sessions"] button')] as HTMLButtonElement[];
     expect(chips.map((c) => c.textContent)).toEqual(['Literature survey', 'Solo']);
     expect(chips[0]?.style.borderColor).toBe('rgb(59, 130, 246)');
     expect(chips[1]?.style.borderColor).toBe('rgb(34, 197, 94)');
@@ -86,16 +86,16 @@ describe('SessionChips', () => {
     await act(async () => store.getState().applyRunState(terminalRun([session({})])));
     await act(async () => store.getState().applyRunState(terminalRun([session({ current_node: 'design' })])));
     expect(open).not.toHaveBeenCalled();
-    await click(document.querySelector('[aria-label="Claude Code sessions"] button'));
+    await click(document.querySelector('[aria-label="sessions"] button'));
     await act(async () => new Promise((r) => setTimeout(r, 0)));
     expect(open).toHaveBeenCalledTimes(1);
-    expect(store.getState().toasts.map((t) => t.text)).toContain('Could not open the Claude Code window: no window');
+    expect(store.getState().toasts.map((t) => t.text)).toContain('Could not open the session window: no window');
   });
 
   it('headless runs show no chips', async () => {
     await render(<SessionChips />);
     await act(async () => store.getState().applyRunState({ ...terminalRun([session({})]), mode: 'headless' }));
-    expect(document.querySelector('[aria-label="Claude Code sessions"]')).toBeNull();
+    expect(document.querySelector('[aria-label="sessions"]')).toBeNull();
   });
 });
 
@@ -111,7 +111,7 @@ describe('run-mode radio and Prompt note', () => {
     const radio = (v: string) => document.querySelector<HTMLInputElement>(`input[name="run_mode"][value="${v}"]`);
     expect(radio('terminal')?.checked).toBe(true);
     expect(radio('headless')?.checked).toBe(false);
-    expect(document.body.textContent).toContain('Claude Code windows (default)');
+    expect(document.body.textContent).toContain('Interactive windows (default)');
     expect(document.querySelector('[aria-label="terminal mode note"]')?.textContent).toBe(HEADLESS_ONLY_NOTE);
     await click(radio('headless'));
     expect(store.getState().graph?.settings.run_mode).toBe('headless');
@@ -131,7 +131,7 @@ describe('Messages tab, terminal path', () => {
     const write = vi.spyOn(api, 'ptyWrite').mockResolvedValue(undefined);
     await act(async () => store.getState().applyRunState(terminalRun([session({})])));
     await render(<MessagesTab nodeId="design" />);
-    expect(document.body.textContent).toContain('Typed into the Claude Code window “Literature survey”.');
+    expect(document.body.textContent).toContain('Typed into the session window “Literature survey”.');
     const box = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="message to this node"]');
     expect(box?.disabled).toBe(false);
     await act(async () => typeInto(box as HTMLTextAreaElement, 'use the\nsecond dataset'));
@@ -140,11 +140,14 @@ describe('Messages tab, terminal path', () => {
     expect(document.body.textContent).toContain('use the second dataset');
   });
 
-  it('a closed session says so and disables the composer', async () => {
+  it('a closed session says so and offers Run from here instead of the composer', async () => {
     await act(async () => store.getState().applyRunState(terminalRun([session({ status: 'cancelled' })])));
     await render(<MessagesTab nodeId="survey" />);
     expect(document.body.textContent).toContain(SESSION_CLOSED_TEXT);
-    expect(document.querySelector<HTMLTextAreaElement>('textarea')?.disabled).toBe(true);
+    expect(document.querySelector<HTMLTextAreaElement>('textarea')).toBeNull();
+    const start = vi.spyOn(store.getState(), 'startRun');
+    expect(button('Run from here')).toBeDefined();
+    void start;
   });
 
   it('a failed write keeps the draft and shows a toast', async () => {
@@ -155,7 +158,8 @@ describe('Messages tab, terminal path', () => {
     await act(async () => typeInto(box, 'hello'));
     await click(button('Send'));
     expect(box.value).toBe('hello');
-    expect(store.getState().toasts.map((t) => t.text)).toContain('Message not sent: session gone');
+    const toast = store.getState().toasts.find((t) => t.text === 'Message to survey not sent: session gone');
+    expect(toast?.action?.label).toBe('Retry');
   });
 
   it('terminalLine flattens line breaks', () => {
@@ -164,14 +168,14 @@ describe('Messages tab, terminal path', () => {
 });
 
 describe('Results tab', () => {
-  it('shows "Open Claude Code window" while the node session is alive', async () => {
+  it('shows "Open session window" while the node session is alive', async () => {
     const open = vi.spyOn(api, 'openSessionWindow').mockResolvedValue(undefined);
     await act(async () => store.getState().applyRunState(terminalRun([session({ status: 'done' })])));
     await render(<ResultsTab nodeId="report" />);
     await act(async () => new Promise((r) => setTimeout(r, 0)));
-    await click(button('Open Claude Code window'));
+    await click(button('Open session window'));
     expect(open).toHaveBeenCalledWith('R1', 's1');
     await act(async () => store.getState().applyRunState({ ...terminalRun([session({ status: 'failed' })]), status: 'failed' }));
-    expect(button('Open Claude Code window')).toBeUndefined();
+    expect(button('Open session window')).toBeUndefined();
   });
 });

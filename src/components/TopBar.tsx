@@ -1,25 +1,12 @@
-/** Top bar: graph name, file actions, run controls, settings, claude status. */
+/** Top bar: graph name, File menu, Add node, Run split-button and run chip, sessions, needs-you / approvals badges, harness status, bell, log, settings. */
 import { useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from 'react';
 import { useReactFlow } from '@xyflow/react';
-import {
-  type LucideIcon,
-  ExternalLink,
-  FilePlus,
-  FolderOpen,
-  PanelBottom,
-  Play,
-  PlayCircle,
-  Plus,
-  RotateCcw,
-  Save,
-  Settings as SettingsIcon,
-  ShieldQuestion,
-  Square,
-} from 'lucide-react';
-import { api, MOCK_MODE } from '../lib/api';
-import { errorMessage } from '../store/runHelpers';
-import { isRunActive, RERUN_FAILED_TITLE, runHasFailures } from '../lib/status';
-import { graphStore, useGraphStore, type ClaudeState } from '../store/graphStore';
+import { type LucideIcon, PanelBottom, Plus, Settings as SettingsIcon, ShieldQuestion, Square } from 'lucide-react';
+import { runStateMode, sessionsOf } from '../types/contract';
+import { MOCK_MODE } from '../lib/api';
+import { isRunActive } from '../lib/status';
+import { graphStore, useGraphStore } from '../store/graphStore';
+import { FileMenu, HarnessChip, NeedsYouBadge, NotificationBell, RunChip, RunSplitButton, SessionsDropdown } from './TopBarParts';
 import { GRID } from './Canvas';
 import { SessionChips } from './SessionChips';
 import { AgentRunChip } from './AgentRunChip';
@@ -29,7 +16,6 @@ import { showsPill } from '../lib/assistantView';
 import { useAssistantStore } from '../store/assistantStore';
 import { approvalsText } from '../store/permissionSlice';
 import { btnCls } from './ui';
-import { newGraphFlow, openFolderFlow } from './StartScreen';
 
 /** Breakpoint below which toolbar buttons show only their icon (the bar stays one line). */
 export const LABEL_CLS = 'hidden min-[1200px]:inline';
@@ -51,23 +37,6 @@ function BarButton({ icon: Icon, label, title, disabled, className = '', onClick
       <Icon size={14} className="shrink-0" />
       <span className={LABEL_CLS}>{label}</span>
     </button>
-  );
-}
-
-function ClaudeChip({ state }: { state: ClaudeState }) {
-  if (state.kind === 'checking') return <span className="text-[11px] text-[#8a8a8a]">checking claude…</span>;
-  const ok = state.kind === 'ok' && state.check.found;
-  const text = ok
-    ? `claude ${state.kind === 'ok' ? (state.check.version ?? '') : ''}`.trim()
-    : 'claude not found — install Claude Code and log in';
-  const title = state.kind === 'ok' ? (state.check.path ?? undefined) : state.message;
-  return (
-    <span
-      title={title}
-      className={`rounded-full px-2 py-0.5 text-[11px] ${ok ? 'bg-[#22c55e]/15 text-[#22c55e]' : 'bg-[#ef4444]/15 text-[#ef4444]'}`}
-    >
-      {text}
-    </span>
   );
 }
 
@@ -104,7 +73,7 @@ function AssistantChip({ onOpen }: { onOpen: () => void }) {
   );
 }
 
-/** Amber "N approvals waiting" while permission prompts are pending; a click shows the dialog. */
+/** Amber "N approval(s) needed" while permission prompts are pending; a click shows the dialog. */
 export function ApprovalsBadge() {
   const count = useGraphStore((s) => s.permissionPrompts.length);
   const show = useGraphStore((s) => s.showPermissionDialog);
@@ -133,67 +102,49 @@ export function TopBar({ logVisible, onToggleLog, onOpenAssistant }: TopBarProps
   const name = useGraphStore((s) => s.graph?.name ?? '');
   const dirty = useGraphStore((s) => s.dirty);
   const runState = useGraphStore((s) => s.runState);
-  const selected = useGraphStore((s) => s.selectedNodeId);
-  const claude = useGraphStore((s) => s.claude);
-  const starting = useGraphStore((s) => s.startingRun);
-  const dir = useGraphStore((s) => s.dir);
+  const sessionCount = useGraphStore((s) => (runStateMode(s.runState) === 'terminal' ? sessionsOf(s.runState).length : 0));
   const [settingsOpen, setSettingsOpen, settingsRef] = useDismissable();
   const { screenToFlowPosition } = useReactFlow();
   const store = graphStore().getState;
-  const active = isRunActive(runState) || starting;
 
   const addNode = (): void => {
     const p = screenToFlowPosition({ x: window.innerWidth * 0.4, y: window.innerHeight * 0.4 });
     store().addNodeAt({ x: Math.round(p.x / GRID) * GRID, y: Math.round(p.y / GRID) * GRID });
   };
 
-  const revealGraph = (): void => {
-    if (!dir) return;
-    api.revealGraphDir(dir).catch((err) => store().pushToast('error', `Could not open the folder: ${errorMessage(err)}`));
-  };
-
   return (
-    <header className="flex h-10 shrink-0 flex-nowrap items-center gap-1 overflow-hidden whitespace-nowrap border-b border-[#3c3c3c] bg-[#252526] px-2 text-[13px]">
-      <span className="mr-1 shrink-0 font-semibold text-[#3b82f6]">Claude Graph</span>
+    <header className="flex h-10 shrink-0 flex-nowrap items-center gap-1 overflow-visible whitespace-nowrap border-b border-[#3c3c3c] bg-[#252526] px-2 text-[13px]">
+      <span className="mr-1 hidden shrink-0 font-semibold text-[#3b82f6] min-[1000px]:inline">Claude Graph</span>
       <input
-        className="w-48 min-w-[5rem] shrink rounded bg-transparent px-1 py-0.5 outline-none hover:bg-[#1e1e1e] focus:bg-[#1e1e1e]"
+        className="w-40 min-w-[5rem] shrink rounded bg-transparent px-1 py-0.5 outline-none hover:bg-[#1e1e1e] focus:bg-[#1e1e1e]"
         value={name}
         aria-label="graph name"
         onChange={(e) => store().setName(e.target.value)}
       />
       <span title={dirty ? 'unsaved changes' : 'saved'} className={`h-2 w-2 shrink-0 rounded-full ${dirty ? 'bg-[#f59e0b]' : 'bg-transparent'}`} />
-      <div className="mx-2 h-5 w-px shrink-0 bg-[#3c3c3c]" />
-      <BarButton icon={FilePlus} label="New" title="New graph" onClick={() => void newGraphFlow()} />
-      <BarButton icon={FolderOpen} label="Open" title="Open graph folder" onClick={() => void openFolderFlow()} />
-      <BarButton icon={ExternalLink} label="Open folder" title="Show the graph folder in the file manager" onClick={revealGraph} />
-      <BarButton icon={Save} label="Save" title="Save (Ctrl+S)" onClick={() => void store().save()} />
-      <BarButton icon={Plus} label="Add node" title="Add node (or double-click the canvas)" onClick={addNode} />
-      <div className="mx-2 h-5 w-px shrink-0 bg-[#3c3c3c]" />
-      <BarButton icon={Play} label="Run all" disabled={active} onClick={() => void store().startRun('all')} />
-      <BarButton
-        icon={PlayCircle}
-        label="Run from selected"
-        disabled={active || selected === null}
-        onClick={() => selected && void store().startRun({ from: selected })}
-      />
-      <BarButton
-        icon={RotateCcw}
-        label="Rerun failed"
-        title={RERUN_FAILED_TITLE}
-        disabled={active || !runHasFailures(runState)}
-        onClick={() => runState && void store().startRun({ failed_of: runState.run_id })}
-      />
+      <FileMenu />
+      <BarButton icon={Plus} label="Add node" title="Add node (Ctrl+N, or double-click the canvas)" onClick={addNode} />
+      <div className="mx-1 h-5 w-px shrink-0 bg-[#3c3c3c]" />
+      <RunSplitButton />
       {isRunActive(runState) && (
-        <BarButton icon={Square} label="Cancel" className="text-[#ef4444]" onClick={() => void store().cancelRun()} />
+        <BarButton icon={Square} label="Cancel" title="Cancel the run (Esc)" className="text-[#ef4444]" onClick={() => void store().cancelRun()} />
       )}
-      <SessionChips />
+      <RunChip onOpenSettings={() => setSettingsOpen(true)} />
+      <div className="hidden min-w-0 shrink min-[1100px]:flex">
+        <SessionChips />
+      </div>
+      <SessionsDropdown count={sessionCount}>
+        <SessionChips vertical />
+      </SessionsDropdown>
       <AgentRunChip />
       <div className="ml-auto flex shrink-0 items-center gap-2">
         {MOCK_MODE && <span className="rounded bg-[#f59e0b]/15 px-1.5 text-[11px] text-[#f59e0b]" title="No Tauri backend: in-memory mock">mock</span>}
+        <NeedsYouBadge />
         <ApprovalsBadge />
         <AssistantChip onOpen={onOpenAssistant} />
-        <ClaudeChip state={claude} />
-        <button className={`${btnCls} ${logVisible ? 'bg-[#37373d]' : ''}`} onClick={onToggleLog} title="Show/hide the log panel" aria-label="show or hide the log panel" aria-pressed={logVisible}>
+        <HarnessChip />
+        <NotificationBell />
+        <button className={`${btnCls} ${logVisible ? 'bg-[#37373d]' : ''}`} onClick={onToggleLog} title="Show/hide the log panel (Ctrl+J)" aria-label="show or hide the log panel" aria-pressed={logVisible}>
           <PanelBottom size={14} />
         </button>
         <div className="relative" ref={settingsRef}>

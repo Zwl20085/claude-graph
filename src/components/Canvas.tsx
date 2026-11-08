@@ -31,6 +31,7 @@ import { graphStore, useGraphStore } from '../store/graphStore';
 import type { DenialsByNode } from '../store/runHelpers';
 import { waitingNodeIds } from '../store/permissionSlice';
 import { BriefNode } from './BriefNode';
+import { EmptyCanvas, StatusLegend } from './CanvasOverlays';
 import { WireEdge } from './WireEdge';
 
 export const GRID = 16;
@@ -100,8 +101,15 @@ export function Canvas() {
     graphStore().getState().addNodeAt({ x: snap(p.x), y: snap(p.y) });
   };
 
+  const addCentered = (): void => {
+    const p = screenToFlowPosition({ x: window.innerWidth * 0.4, y: window.innerHeight * 0.4 });
+    graphStore().getState().addNodeAt({ x: snap(p.x), y: snap(p.y) });
+  };
+
   return (
-    <div className="h-full w-full" onDoubleClick={onDoubleClick}>
+    <div className="relative h-full w-full" onDoubleClick={onDoubleClick}>
+      {(graph?.nodes.length ?? 0) === 0 && <EmptyCanvas onAddNode={addCentered} />}
+      <StatusLegend />
       <ReactFlow<BriefFlowNode, WireFlowEdge>
         nodes={nodes}
         edges={edges}

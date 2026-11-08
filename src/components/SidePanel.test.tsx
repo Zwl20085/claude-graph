@@ -56,7 +56,7 @@ describe('side panel tabs', () => {
     await act(async () => root?.render(<App />));
     await act(async () => new Promise((r) => setTimeout(r, 20)));
 
-    expect(document.querySelector('aside')?.className).toContain('w-[400px]');
+    expect(document.querySelector('aside')?.getAttribute('style')).toContain('width');
     expect(tab('Assistant')?.getAttribute('aria-selected')).toBe('true');
     expect(byLabel('run the workflow')).not.toBeNull();
     expect(byLabel('open the assistant tab')).toBeNull();

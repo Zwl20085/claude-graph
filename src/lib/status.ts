@@ -15,10 +15,10 @@ export const STATUS_COLORS: Record<NodeStatus, string> = {
   running: '#3b82f6',
   succeeded: '#22c55e',
   failed: '#ef4444',
-  blocked: '#f59e0b',
+  blocked: '#f97316',
   skipped: '#777777',
   cancelled: '#b45309',
-  waiting: '#38bdf8',
+  waiting: '#a78bfa',
 };
 
 /** Border colour of a node card that is not part of the shown run. */
