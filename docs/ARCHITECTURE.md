@@ -1051,8 +1051,8 @@ options"), `continue_node { run_id, sid, node_id }` (reply questions only),
 "Node X needs you" with **Show** (selects the node); the card stays disabled after a button
 until the prompt clears or a `stderr` event of that node arrives. `PromptCard.tsx` on top of
 the terminal Messages tab; a "needs you" banner in the inspector; a `?` badge on the node card;
-"needs you" on the session chip; the Results tab lists the questions. Status `waiting`: light
-blue `#38bdf8`, slow pulse, label "needs you". The mock (`simulatePrompts`, on in browser dev)
+"needs you" on the session chip; the Results tab lists the questions. Status `waiting`:
+violet `#a78bfa`, slow pulse, label "needs you". The mock (`simulatePrompts`, on in browser dev)
 opens a choice dialog on the first node of a terminal run and a reply question after the
 second (`mockPrompts.ts`).
 
