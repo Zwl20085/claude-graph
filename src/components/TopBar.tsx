@@ -22,6 +22,7 @@ import { isRunActive, RERUN_FAILED_TITLE, runHasFailures } from '../lib/status';
 import { graphStore, useGraphStore, type ClaudeState } from '../store/graphStore';
 import { GRID } from './Canvas';
 import { SessionChips } from './SessionChips';
+import { AgentRunChip } from './AgentRunChip';
 import { SettingsPopover } from './SettingsPopover';
 import { StatusPill } from './AssistantHeader';
 import { showsPill } from '../lib/assistantView';
@@ -186,6 +187,7 @@ export function TopBar({ logVisible, onToggleLog, onOpenAssistant }: TopBarProps
         <BarButton icon={Square} label="Cancel" className="text-[#ef4444]" onClick={() => void store().cancelRun()} />
       )}
       <SessionChips />
+      <AgentRunChip />
       <div className="ml-auto flex shrink-0 items-center gap-2">
         {MOCK_MODE && <span className="rounded bg-[#f59e0b]/15 px-1.5 text-[11px] text-[#f59e0b]" title="No Tauri backend: in-memory mock">mock</span>}
         <ApprovalsBadge />

@@ -5,6 +5,8 @@
 import '@xyflow/react/dist/style.css';
 import App from './App';
 import { api } from './lib/api';
+import { agentApi } from './lib/agentApi';
+import { installAgentWatch } from './store/agentStore';
 import { createGraphStore, installStore } from './store/graphStore';
 import { errorMessage } from './store/runHelpers';
 
@@ -23,6 +25,8 @@ api
 api.onSessionPrompt((p) => store.getState().addSessionPrompt(p)).catch(listenFailed('session_prompt'));
 api.onSessionPromptCleared((c) => store.getState().clearSessionPrompt(c)).catch(listenFailed('session_prompt_cleared'));
 void store.getState().init();
+// Agent-called mode: follow runs driven from a CLI in the open folder.
+installAgentWatch(store, agentApi);
 
 export default function MainApp() {
   return <App />;

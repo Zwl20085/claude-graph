@@ -1105,3 +1105,40 @@ badge says "dsh (headless, chained)".
 resolution), `terminal/view.rs`, `tests/e2e_dsh.rs` with `scripts/fake-dsh.mjs` (two nodes
 chained by the session id, a question answered by choice, a failure and a denied approval,
 a line typed in the window as a follow-up, `check_harness`), `tests/real_dsh.rs` (ignored).
+
+## Agent-called mode (2026-11-08)
+
+The full reference is [cli-addon.md](cli-addon.md). The backend is `src-tauri/src/agentmode/`:
+
+| File | Role |
+|---|---|
+| `run.rs` | run.json with `"engine": "agent"`, lock files, run log |
+| `pick.rs` | Pure picker: dependencies, tags, `exclusive`, `max_parallel`, retry |
+| `open.rs` / `next.rs` / `report.rs` | The engine |
+| `brief.rs` | Terminal brief, upstream replies, "Report back" |
+| `text.rs` | Text output |
+| `mcp_tools.rs` | `--mcp-graph` server: tools, instructions, prompt `graph_run` |
+| `cli.rs` | `graph …` CLI, exit codes 0/1/2/3/4 |
+| `watch.rs` | The GUI's 1 s poller |
+| `gui.rs` | Commands `agent_watch`, `agent_abandon`, `agent_client_configs`, `agent_install` |
+| `install.rs` | Client snippets and "Add" |
+
+Types live in `contract_agent.rs` and `src/types/agent.ts`. The shared stdio MCP plumbing is in
+`src-tauri/src/mcp/`, which `--mcp-approve` also uses.
+
+How it fits with the rest of the app:
+
+- Every agent call is a separate read-modify-write of run.json under `runs/<run>/.agent.lock`, so
+  the state lives only in the folder.
+- `sweep_stale` skips agent runs.
+- `start_run` refuses with `run_active` while an agent run is active.
+- `cancel_run` falls back to stopping the watched folder's agent run.
+- The frontend has its own API module (`src/lib/agentApi.ts`) and store (`src/store/agentStore.ts`).
+  `AgentRunChip` sits in the top bar, `AgentMessages` serves the Messages tab of agent runs, and
+  `CliAddonPanel` is in Settings.
+
+Tests:
+
+- `agentmode/{pick_tests, flow_tests, watch_tests}.rs`, plus unit tests in each module.
+- `tests/e2e_agent.rs` drives the binary over stdio MCP and as a CLI.
+- `src/store/agentStore.test.ts` and `src/components/AgentMode.test.tsx` cover the frontend.

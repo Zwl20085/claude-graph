@@ -4,6 +4,7 @@ import { Plus, Trash2 } from 'lucide-react';
 import { harnessOf, MODELS, PERMISSION_MODES, runModeOf, type RunMode, type Settings } from '../types/contract';
 import { ASK_APP_HINT, permissionLabel } from '../lib/status';
 import { IGNORED_CLAUDE_BIN_TEXT, useGraphStore } from '../store/graphStore';
+import { CliAddonPanel } from './CliAddonPanel';
 import { HarnessDialog } from './HarnessDialog';
 import { HarnessSelect } from './HarnessSelect';
 import { btnCls, errorCls, Field, Input, inputBoxCls, inputCls, NumberInput, Select, tagError } from './ui';
@@ -186,6 +187,7 @@ export function SettingsPopover() {
         </p>
       )}
       <AppSettingsSection />
+      <CliAddonPanel />
     </div>
   );
 }

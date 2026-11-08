@@ -76,3 +76,20 @@ fn cancel_agent_run_only_for_the_watched_folder() {
     let after = w.watch(Some(dir), std::sync::Arc::new(Null)).unwrap();
     assert!(!after.active);
 }
+
+#[test]
+fn a_new_poller_does_not_replay_an_existing_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = fixture(tmp.path());
+    let c = Caller {
+        client: "Claude Code".into(),
+        channel: Channel::Mcp,
+    };
+    let rid = open::open(&dir, &c, false).unwrap().run_id;
+    open::note(&dir, Some(&rid), None, "old note").unwrap();
+    let mut p = Poller::new(dir.clone());
+    assert!(p.poll().is_none(), "existing state is the baseline");
+    assert_eq!(p.current().unwrap().last_note.as_deref(), Some("old note"));
+    next::next(&dir, &rid, &c, 1, None).unwrap();
+    assert!(p.poll().unwrap().state.is_some());
+}

@@ -385,6 +385,26 @@ then hand it to Claude Code as a whole and just talk to it. That is the **Assist
 Both modes read and write the same graph folder and can be used on the same graph, one
 after the other. They never share a process.
 
+## Call it from your CLI
+
+You can also drive a graph the other way round. You stay in your own Claude Code, Codex or dsh
+session, and the agent calls Claude Graph for the work, one node at a time. The app schedules
+(dependencies, resource tags, `max_parallel`) and keeps the run record. If the app window is open
+on the folder, it follows the run live.
+
+```
+you:    run the graph in C:\work\my-graph
+agent:  graph_open → 3 nodes, run 20261108T200336Z;  graph_next → brief of "hello"
+agent:  (writes hello.txt) → graph_report {node_id: "hello", status: "done", summary: "…"}
+agent:  graph_next → "join" (with the upstream summaries) … → done: true
+```
+
+To set it up, open **Settings → Use from your CLI**, or run
+`claude mcp add --scope user claude-graph -- "<path to claude-graph.exe>" --mcp-graph`. For agents
+that prefer a shell there is a plain CLI: `claude-graph graph open|next|report|note|status <dir>`.
+The tools, exit codes and per-client setup are in [docs/cli-addon.md](docs/cli-addon.md), and a
+`/graph` slash command is in [examples/claude-command-graph.md](examples/claude-command-graph.md).
+
 ## Everything stays in the graph folder
 
 ```

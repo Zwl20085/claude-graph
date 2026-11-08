@@ -170,5 +170,11 @@ length when the node's message started to be typed and when the Stop hook was se
 to 1.5 s for the output to go quiet); `null` when the message was never submitted. The raw
 bytes of the turn are `transcript.log[transcript_from..transcript_to]`.
 
+An **agent-called** run (the app driven from a CLI, [cli-addon.md](cli-addon.md)) writes the same
+per-node files. Its `run.json` also has `"engine": "agent"` and
+`"agent": { "client", "channel", "last_seen" }`. The run log is `runs/<run>/agent_log.jsonl`. A
+blocked report makes the node `waiting`, with its question in `questions.jsonl`
+(`kind: "question"`, `source: "reply"`).
+
 The scheduler writes node deliverables to the same `nodes/<id>/deliverables/` folders as graph
 mode. See ARCHITECTURE.md "Assistant mode (backend)".

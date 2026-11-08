@@ -14,6 +14,8 @@ import {
 import { useGraphStore } from '../store/graphStore';
 import { errorMessage } from '../store/runHelpers';
 import { TerminalMessages } from './TerminalMessages';
+import { AgentMessages } from './AgentMessages';
+import { agentRunOf, useAgentStore } from '../store/agentStore';
 import { btnCls, inputCls } from './ui';
 
 /**
@@ -80,6 +82,9 @@ function useHistory(dir: string | null, runId: string | null, nodeId: string) {
 /** Terminal-mode runs type into the node's live session; headless runs chat with its CLI session. */
 export function MessagesTab({ nodeId }: { nodeId: string }) {
   const terminal = useGraphStore((s) => runStateMode(s.runState) === 'terminal');
+  const runId = useGraphStore((s) => s.runState?.run_id);
+  const agent = useAgentStore((s) => agentRunOf(s.info, runId));
+  if (agent) return <AgentMessages nodeId={nodeId} client={agent.client} />;
   return terminal ? <TerminalMessages nodeId={nodeId} /> : <HeadlessMessages nodeId={nodeId} />;
 }
 

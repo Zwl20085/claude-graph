@@ -157,9 +157,12 @@ fn scan(dir: &Path) -> Vec<(String, Option<AgentRun>, Option<RunStatus>)> {
         .collect()
 }
 
-/// The newest agent run of `dir`, finished or not.
+/// The newest agent run of `dir`, finished or not (stops at the first one).
 pub fn latest(dir: &Path) -> Option<AgentRun> {
-    scan(dir).into_iter().find_map(|(_, run, _)| run)
+    run_ids(dir).into_iter().find_map(|id| {
+        let text = read_optional(&run_dir(dir, &id).join(RUN_FILE)).ok()??;
+        parse_run(&text, &id).ok()?
+    })
 }
 
 /// The newest agent run still `running`.

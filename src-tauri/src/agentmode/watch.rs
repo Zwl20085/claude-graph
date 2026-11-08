@@ -45,13 +45,19 @@ fn kind_of(entry: &LogEntry) -> NodeEventKind {
 }
 
 impl Poller {
+    /// Starts from what is on disk now: only later changes are pushed (the
+    /// window loads the newest run itself, which may be a newer app run).
     pub fn new(dir: PathBuf) -> Self {
-        Self {
+        let mut poller = Self {
             dir,
             seen: None,
             log_offset: 0,
             last_note: None,
+        };
+        if poller.poll().is_some() {
+            log::debug!("agent watcher primed on {}", poller.dir.display());
         }
+        poller
     }
 
     pub fn dir(&self) -> &Path {
