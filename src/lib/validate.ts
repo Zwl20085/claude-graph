@@ -288,10 +288,18 @@ export function harnessCommandError(command: string | null): string | null {
 }
 
 /** Profile fields the backend checks on save_harness. First violation, prefixed with the field name. */
-/** A custom option pattern compiles and names a `label` group (JS syntax `(?<label>…)`; Rust takes both). */
+/** Rust-regex syntax the JS engine lacks: inline flags such as `(?i)`, `(?x:…)`. */
+const RUST_INLINE_FLAGS = /\(\?[imsxuU]+(?:-[imsxuU]+)?(?=[):])/;
+
+/**
+ * A custom option pattern names a `label` group and compiles. The backend
+ * (Rust `regex`) is the authority: `(?P<…>)` is read as `(?<…>)`, and a
+ * pattern using Rust-only inline flags is left to the backend's check.
+ */
 export function optionPatternError(pattern: string | null): string | null {
   if (pattern === null || pattern.trim() === '') return null;
   if (!/\(\?P?<label>/.test(pattern)) return 'Name the option text with (?P<label>…).';
+  if (RUST_INLINE_FLAGS.test(pattern)) return null;
   try {
     new RegExp(pattern.replace(/\(\?P</g, '(?<'));
     return null;

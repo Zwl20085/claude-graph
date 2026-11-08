@@ -13,7 +13,7 @@ use crate::prompt::{display_dir, resolve_working_dir};
 use crate::runner::permission_flag;
 use crate::store::write_json;
 use crate::terminal::deliver::QUIET;
-use crate::terminal::hooks::{hooks_json, Hook, HOOKS_FILE, HOOKS_LOG};
+use crate::terminal::hooks::{hooks_json, Hook, HOOKS_FILE, HOOKS_LOG, SESSION_DIR_ENV};
 use crate::terminal::port::Tick;
 use crate::terminal::pty::{Pty, PtySpec};
 use crate::terminal::session::{End, Session, POLL};
@@ -29,11 +29,17 @@ pub const STRIPPED_ENV: [&str; 2] = ["CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE"];
 pub fn session_env(
     run_id: &str,
     sid: &str,
+    hooks_dir: &std::path::Path,
     profile_env: Vec<(String, Option<String>)>,
 ) -> Vec<(String, Option<String>)> {
     let removed = STRIPPED_ENV.map(|k| (k.to_string(), None));
-    let set = [("CLAUDE_GRAPH_RUN", run_id), ("CLAUDE_GRAPH_SESSION", sid)]
-        .map(|(k, v)| (k.to_string(), Some(v.to_string())));
+    let dir = hooks_dir.display().to_string();
+    let set = [
+        ("CLAUDE_GRAPH_RUN", run_id),
+        ("CLAUDE_GRAPH_SESSION", sid),
+        (SESSION_DIR_ENV, dir.as_str()),
+    ]
+    .map(|(k, v)| (k.to_string(), Some(v.to_string())));
     removed.into_iter().chain(profile_env).chain(set).collect()
 }
 
@@ -55,7 +61,7 @@ impl Session {
         let profile = ctx
             .harness(&self.t.plan.harness)
             .map_err(|e| End::Failed(e.message))?;
-        let dir = session_dir(&ctx.graph_dir, &ctx.run_id, &self.t.plan.sid);
+        let dir = self.hooks_dir();
         let mode = ctx.graph.settings.default_permission_mode;
         let resolve = ResolveEnv::from_process(None);
         spawn_spec(&SpawnInput {
@@ -78,12 +84,10 @@ impl Session {
         let dir = session_dir(&ctx.graph_dir, &run_id, &sid);
         let fail = |what: String| End::Failed(what);
         std::fs::create_dir_all(&dir).map_err(|e| fail(format!("io: {}: {e}", dir.display())))?;
-        let hooks = dir.join(HOOKS_FILE);
-        write_json(
-            &hooks,
-            &hooks_json(&dir.join(HOOKS_LOG), Some(&ctx.notify_exe)),
-        )
-        .map_err(|e| fail(e.message))?;
+        let hooks_dir = self.prepare_hooks_dir()?;
+        let settings = hooks_json(&hooks_dir.join(HOOKS_LOG), Some(&ctx.notify_exe))
+            .map_err(|e| fail(e.message))?;
+        write_json(&hooks_dir.join(HOOKS_FILE), &settings).map_err(|e| fail(e.message))?;
         self.report(|i| i.status = SessionStatus::Starting);
         let first = self
             .t
@@ -110,7 +114,7 @@ impl Session {
             program: launch.program,
             args: launch.args,
             cwd,
-            env: session_env(&run_id, &sid, launch.env),
+            env: session_env(&run_id, &sid, &hooks_dir, launch.env),
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
             transcript: dir.join(TRANSCRIPT_FILE),
@@ -131,8 +135,38 @@ impl Session {
         self.t.shared.set_pty(pty.clone());
         let pid = pty.pid();
         self.pty = Some(pty);
-        self.report(|i| i.pid = pid);
+        self.report(|i| {
+            i.pid = pid;
+            i.alive = true;
+        });
         Ok(())
+    }
+
+    /// The session's hooks folder ([`crate::terminal::hooks_dir`]).
+    pub(super) fn hooks_dir(&self) -> std::path::PathBuf {
+        let ctx = &self.t.ctx;
+        crate::terminal::hooks_dir(
+            &ctx.hooks_root,
+            &ctx.graph_dir,
+            &ctx.run_id,
+            &self.t.plan.sid,
+        )
+    }
+
+    /// Create the hooks folder, share it, and leave a pointer to it in the
+    /// session folder (for the record).
+    pub(super) fn prepare_hooks_dir(&self) -> Result<std::path::PathBuf, End> {
+        let ctx = &self.t.ctx;
+        let dir = self.hooks_dir();
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| End::Failed(format!("io: {}: {e}", dir.display())))?;
+        self.t.shared.set_hooks_dir(dir.clone());
+        let pointer = session_dir(&ctx.graph_dir, &ctx.run_id, &self.t.plan.sid)
+            .join(crate::terminal::HOOKS_POINTER);
+        if let Err(e) = std::fs::write(&pointer, format!("{}\n", dir.display())) {
+            log::warn!("writing {} failed: {e}", pointer.display());
+        }
+        Ok(dir)
     }
 
     /// Started: the `start` hook line (harnesses that have one), or the
@@ -177,12 +211,13 @@ mod tests {
 
     #[test]
     fn session_env_sets_ids_and_strips_parent_session_markers() {
-        let env = session_env("R1", "s2", Vec::new());
+        let env = session_env("R1", "s2", std::path::Path::new("/d/s2"), Vec::new());
         assert!(env.contains(&("CLAUDE_GRAPH_RUN".into(), Some("R1".into()))));
         assert!(env.contains(&("CLAUDE_GRAPH_SESSION".into(), Some("s2".into()))));
         assert!(env.contains(&("CLAUDE_CODE_CHILD_SESSION".into(), None)));
         assert!(env.contains(&("CLAUDECODE".into(), None)));
-        assert_eq!(env.len(), 4);
+        assert!(env.contains(&(SESSION_DIR_ENV.into(), Some("/d/s2".into()))));
+        assert_eq!(env.len(), 5);
     }
 
     #[test]
@@ -191,7 +226,7 @@ mod tests {
             ("ANTHROPIC_BASE_URL".to_string(), Some("u".to_string())),
             ("CLAUDE_GRAPH_RUN".to_string(), Some("spoof".to_string())),
         ];
-        let env = session_env("R1", "s1", profile);
+        let env = session_env("R1", "s1", std::path::Path::new("/d/s1"), profile);
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             keys,
@@ -201,7 +236,8 @@ mod tests {
                 "ANTHROPIC_BASE_URL",
                 "CLAUDE_GRAPH_RUN",
                 "CLAUDE_GRAPH_RUN",
-                "CLAUDE_GRAPH_SESSION"
+                "CLAUDE_GRAPH_SESSION",
+                SESSION_DIR_ENV
             ]
         );
         assert_eq!(env[4].1.as_deref(), Some("R1"), "the run id is set last");

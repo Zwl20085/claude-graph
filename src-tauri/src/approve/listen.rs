@@ -3,6 +3,12 @@
 //! line `{decision}`. A wrong token, a malformed line or a silent peer is
 //! closed without a reply. When the asker closes its end before the user
 //! answered, the prompt is withdrawn.
+//!
+//! The token is the request's first field: it is checked on a small first
+//! chunk ([`HEAD_MAX`] bytes) before the body (up to [`REQUEST_MAX`]) is
+//! read, and at most [`UNVERIFIED_MAX`] connections may be in that phase at
+//! once (more are closed at once), so a local process without the token can
+//! neither make the app buffer large requests nor pile up connections.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
@@ -10,6 +16,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 
 use crate::contract::{AppError, AppResult};
 
@@ -21,6 +28,13 @@ use super::CANCELLED;
 const REQUEST_MAX: u64 = 32 * 1024 * 1024;
 /// How long a fresh connection may take to send its request line.
 const REQUEST_WAIT: Duration = Duration::from_secs(30);
+/// The first chunk read: enough for `{"token":"<hex>"`.
+pub const HEAD_MAX: usize = 256;
+/// How long a fresh connection may take to send its first chunk.
+const HEAD_WAIT: Duration = Duration::from_secs(5);
+/// Connections whose token is not checked yet, at most.
+pub const UNVERIFIED_MAX: usize = 16;
+const TOKEN_PREFIX: &[u8] = b"{\"token\":\"";
 
 /// Bind `127.0.0.1:0` and serve on the async runtime; returns the address.
 pub fn start(approvals: &Approvals) -> AppResult<SocketAddr> {
@@ -44,6 +58,7 @@ pub fn start(approvals: &Approvals) -> AppResult<SocketAddr> {
 }
 
 async fn accept_loop(listener: TcpListener, weak: Weak<Inner>) {
+    let unverified = Arc::new(Semaphore::new(UNVERIFIED_MAX));
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -54,26 +69,71 @@ async fn accept_loop(listener: TcpListener, weak: Weak<Inner>) {
             }
         };
         let Some(inner) = weak.upgrade() else { return };
+        let Ok(permit) = unverified.clone().try_acquire_owned() else {
+            log::warn!("approval connection refused: {UNVERIFIED_MAX} connections unverified");
+            continue;
+        };
         let approvals = Approvals { inner };
-        tokio::spawn(connection(stream, approvals));
+        tokio::spawn(connection(stream, approvals, Some(permit)));
     }
 }
 
-async fn read_request(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> Option<Vec<u8>> {
-    let mut buf = Vec::new();
-    let mut limited = (&mut *reader).take(REQUEST_MAX);
-    let read = limited.read_until(b'\n', &mut buf);
-    match tokio::time::timeout(REQUEST_WAIT, read).await {
-        Ok(Ok(n)) if n > 0 && buf.ends_with(b"\n") => Some(buf),
+/// The token of a request's first chunk (`{"token":"<token>"…`).
+pub fn head_token(head: &[u8]) -> Option<&str> {
+    let rest = head.strip_prefix(TOKEN_PREFIX)?;
+    let end = rest.iter().position(|b| *b == b'"')?;
+    std::str::from_utf8(&rest[..end]).ok()
+}
+
+/// The first chunk: up to [`HEAD_MAX`] bytes, ending early at a newline.
+async fn read_head(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> Option<Vec<u8>> {
+    let mut head = Vec::new();
+    let read = async {
+        let mut limited = (&mut *reader).take(HEAD_MAX as u64);
+        limited.read_until(b'\n', &mut head).await
+    };
+    match tokio::time::timeout(HEAD_WAIT, read).await {
+        Ok(Ok(n)) if n > 0 => Some(head),
         _ => None,
     }
 }
 
-/// Serve one relay connection.
-pub async fn connection(stream: TcpStream, approvals: Approvals) {
+async fn read_request(
+    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    head: Vec<u8>,
+) -> Option<Vec<u8>> {
+    if head.ends_with(b"\n") {
+        return Some(head);
+    }
+    let mut buf = head;
+    let left = REQUEST_MAX.saturating_sub(buf.len() as u64);
+    let mut limited = (&mut *reader).take(left);
+    let read = limited.read_until(b'\n', &mut buf);
+    match tokio::time::timeout(REQUEST_WAIT, read).await {
+        Ok(Ok(_)) if buf.ends_with(b"\n") => Some(buf),
+        _ => None,
+    }
+}
+
+/// Serve one relay connection (`permit`: its place among the unverified
+/// ones, released once the token is checked).
+pub async fn connection(
+    stream: TcpStream,
+    approvals: Approvals,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) {
     let (rd, mut wr) = stream.into_split();
     let mut reader = BufReader::new(rd);
-    let Some(line) = read_request(&mut reader).await else {
+    let Some(head) = read_head(&mut reader).await else {
+        log::warn!("approval connection closed: no request");
+        return;
+    };
+    if !head_token(&head).is_some_and(|t| approvals.token_matches(t)) {
+        log::warn!("approval connection closed: wrong token");
+        return;
+    }
+    drop(permit);
+    let Some(line) = read_request(&mut reader, head).await else {
         log::warn!("approval connection closed: no request line");
         return;
     };

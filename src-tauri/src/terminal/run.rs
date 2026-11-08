@@ -78,6 +78,7 @@ fn session_info(p: &SessionPlan) -> TerminalSession {
         node_ids: p.node_ids.clone(),
         status: SessionStatus::Starting,
         pid: None,
+        alive: false,
         current_node: None,
         harness: p.harness.clone(),
         pending_prompt: None,

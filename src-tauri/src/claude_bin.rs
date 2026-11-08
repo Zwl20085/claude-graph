@@ -14,9 +14,11 @@
 //! when that file exists (node.exe next to the shim, else on PATH); else to
 //! `<shim dir>\node_modules\@anthropic-ai\claude-code\bin\claude.exe` (current
 //! npm releases), spawned directly; otherwise the batch file itself is the
-//! program, and Rust's std applies its batch-file
-//! argument escaping (and refuses arguments it cannot pass safely, which the
-//! runner reports as `spawn_failed`).
+//! program. Headless runs spawn it through Rust's std, which applies its
+//! batch-file argument escaping (and refuses arguments it cannot pass
+//! safely, reported as `spawn_failed`). The pty (terminal mode) has no such
+//! escaping: cmd.exe would read `&`, `|`, `%`, … in an argument, so
+//! [`batch_args_safe`] refuses those spawns (see `terminal::pty`).
 //! The runner reuses [`ClaudeCommand::command`] to spawn the real process.
 
 use std::ffi::OsString;
@@ -79,6 +81,21 @@ impl ClaudeCommand {
         cmd.creation_flags(CREATE_NO_WINDOW);
         cmd
     }
+}
+
+/// Characters cmd.exe reads in a batch file's command line.
+pub const BATCH_UNSAFE: &[char] = &['&', '|', '<', '>', '^', '%', '!', '"', '(', ')', '\n', '\r'];
+
+/// `Err(c)`: an argument holds `c`, which cmd.exe would interpret when the
+/// program is a batch file started without std's escaping (the pty).
+pub fn batch_args_safe<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> Result<(), char> {
+    for a in args {
+        let a = a.as_ref().to_string_lossy();
+        if let Some(c) = a.chars().find(|c| BATCH_UNSAFE.contains(c)) {
+            return Err(c);
+        }
+    }
+    Ok(())
 }
 
 pub fn is_batch_file(path: &Path) -> bool {

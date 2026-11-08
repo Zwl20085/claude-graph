@@ -143,11 +143,46 @@ fn relay_env_is_validated() {
 }
 
 #[test]
+fn the_token_is_read_from_the_first_chunk() {
+    use super::listen::head_token;
+    assert_eq!(
+        head_token(br#"{"token":"ab12","run_id":"R"}"#),
+        Some("ab12")
+    );
+    assert_eq!(
+        head_token(br#"{"token":"ab12"#),
+        None,
+        "cut before the quote"
+    );
+    assert_eq!(head_token(br#"{"run_id":"R","token":"ab12"}"#), None);
+    assert_eq!(head_token(b"garbage"), None);
+    // The client writes the token first.
+    let line = serde_json::to_string(&RelayRequest {
+        token: "ff".into(),
+        run_id: "R".into(),
+        node_id: "n".into(),
+        reg: "g".into(),
+        arguments: json!({}),
+    })
+    .unwrap();
+    assert_eq!(head_token(line.as_bytes()), Some("ff"));
+}
+
+#[test]
 fn summaries_and_match_keys() {
     let bash = json!({"command":"echo hi","description":"x"});
     assert_eq!(summary("Bash", &bash), "echo hi");
     let other = json!({"command":"echo hi","description":"other words"});
     assert_eq!(match_key("Bash", &bash), match_key("Bash", &other));
+    assert_eq!(match_key("Bash", &bash).key, "echo hi");
+    // Every field that changes the call is part of the key.
+    let unsandboxed = json!({"command":"echo hi","dangerouslyDisableSandbox":true});
+    assert_ne!(match_key("Bash", &bash), match_key("Bash", &unsandboxed));
+    let background = json!({"command":"echo hi","run_in_background":true});
+    assert_ne!(
+        match_key("Bash", &unsandboxed),
+        match_key("Bash", &background)
+    );
     assert_eq!(
         match_key("Write", &json!({"file_path":"/a","content":"1"})).key,
         "/a"

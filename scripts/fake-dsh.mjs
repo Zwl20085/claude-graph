@@ -20,7 +20,11 @@
 // - FAKE_APPROVAL: a write outside the workspace that headless dsh denies
 //   ("requires approval, but no approval channel is available").
 // - REMEMBER=<word> stores a word in the session; RECALL answers with it.
+// - FAKE_SLOW: the answer comes after 1.5 s.
+// - FAKE_BACKGROUND: starts a background process that inherits stdout and
+//   stderr and lives 60 s (a tool's `npm run dev &`), then exits normally.
 // A brief's deliverables are written (as tool_call / tool_result pairs).
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
@@ -139,6 +143,14 @@ async function main() {
         'error',
         'Error: sandbox escalation to "danger-full-access" requires approval, but no approval channel is available',
       );
+    }
+    if (all.includes('FAKE_SLOW')) await new Promise((done) => setTimeout(done, 1500));
+    if (all.includes('FAKE_BACKGROUND')) {
+      const bg = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+        stdio: ['ignore', 'inherit', 'inherit'],
+        windowsHide: true,
+      });
+      bg.unref();
     }
     const remember = all.match(/REMEMBER=(\w+)/)?.[1];
     if (remember) session.memory = remember;

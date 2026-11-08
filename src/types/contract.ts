@@ -260,6 +260,11 @@ export interface TerminalSession {
   harness?: string;
   /** Id of the question or dialog the session waits on (`list_session_prompts` has it). */
   pending_prompt?: string | null;
+  /**
+   * The session takes messages (its process, or for chained sessions its
+   * task, is alive). Chained sessions have no pid. Missing in older payloads.
+   */
+  alive?: boolean;
 }
 
 /** Payload of `pty:data`. */
@@ -396,6 +401,10 @@ export const TRUST_ITEM_KINDS = [
   'bash_tool',
   'absolute_working_dir',
   'claude_bin_in_graph',
+  'shell_prompt',
+  'slash_prompt',
+  'project_settings',
+  'custom_harness',
 ] as const;
 export type TrustItemKind = (typeof TRUST_ITEM_KINDS)[number];
 
@@ -469,7 +478,8 @@ export function isTerminalSession(v: unknown): v is TerminalSession {
     (v.pid === null || v.pid === undefined || typeof v.pid === 'number') &&
     (v.current_node === null || v.current_node === undefined || typeof v.current_node === 'string') &&
     (v.harness === undefined || typeof v.harness === 'string') &&
-    (v.pending_prompt === undefined || v.pending_prompt === null || typeof v.pending_prompt === 'string')
+    (v.pending_prompt === undefined || v.pending_prompt === null || typeof v.pending_prompt === 'string') &&
+    (v.alive === undefined || typeof v.alive === 'boolean')
   );
 }
 

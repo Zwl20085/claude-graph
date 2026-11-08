@@ -164,20 +164,32 @@ fn crlf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
+/// Agent text without control characters but `\n` and `\t` (no escape
+/// sequence from a tool result or reply reaches the window's terminal).
+pub fn clean(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect()
+}
+
 /// The window text of an event (`None`: not shown). `tool_of` names the
 /// tool of a call id.
 pub fn render(ev: &DshEvent, tool_of: impl Fn(&str) -> Option<String>) -> Option<String> {
     Some(match ev {
-        DshEvent::Session { id } => format!("{DIM}session {id}{RESET}\r\n"),
-        DshEvent::Text(t) if !t.trim().is_empty() => format!("\u{25cf} {}\r\n", crlf(t.trim())),
+        DshEvent::Session { id } => format!("{DIM}session {}{RESET}\r\n", clean(id)),
+        DshEvent::Text(t) if !t.trim().is_empty() => {
+            format!("\u{25cf} {}\r\n", crlf(&clean(t.trim())))
+        }
         DshEvent::ToolCall { tool, input, .. } => {
             format!(
-                "{CYAN}\u{23fa} {tool}({}){RESET}\r\n",
-                tool_summary(tool, input)
+                "{CYAN}\u{23fa} {}({}){RESET}\r\n",
+                clean(tool),
+                clean(&tool_summary(tool, input))
             )
         }
         DshEvent::ToolResult { id, ok, result } => {
-            let tool = tool_of(id).unwrap_or_default();
+            let tool = clean(&tool_of(id).unwrap_or_default());
+            let result = &clean(result);
             if approval_denied(*ok, result) {
                 format!(
                     "{YELLOW}  \u{26a0} {tool}: needs approval; headless dsh denies it{RESET}\r\n"
@@ -188,9 +200,9 @@ pub fn render(ev: &DshEvent, tool_of: impl Fn(&str) -> Option<String>) -> Option
                 format!("{RED}  \u{23bf} {}{RESET}\r\n", cut(result, RESULT_SHOWN))
             }
         }
-        DshEvent::Error(m) => format!("{RED}error: {}{RESET}\r\n", crlf(m)),
+        DshEvent::Error(m) => format!("{RED}error: {}{RESET}\r\n", crlf(&clean(m))),
         DshEvent::TurnEnd { reason } if reason != "completed" => {
-            format!("{DIM}turn ended: {reason}{RESET}\r\n")
+            format!("{DIM}turn ended: {}{RESET}\r\n", clean(reason))
         }
         _ => return None,
     })

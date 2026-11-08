@@ -13,7 +13,7 @@ use claude_graph_lib::contract::{
     HarnessKind, HarnessProfile, NodeStatus, RunStatus, RunTarget, SessionStatus, StopMode,
 };
 use claude_graph_lib::harness::command::ENV_CODEX_BIN;
-use claude_graph_lib::run_api::AppState;
+use claude_graph_lib::run_api::{abs, AppState};
 use common::term::*;
 use common::*;
 use serde_json::{json, Value};
@@ -145,8 +145,7 @@ async fn a_chain_switches_harness_in_order_with_a_brief_between_sessions() {
     assert!(brief.contains("untrusted data"), "{brief}");
     // The side-turn notify came before the deliverable: the node waited for its own.
     assert!(dir.join("nodes/design/deliverables/design.md").is_file());
-    let hooks =
-        fs::read_to_string(dir.join("runs").join(&run_id).join("sessions/s2/hooks.log")).unwrap();
+    let hooks = fs::read_to_string(hooks_dir(dir, &run_id, "s2").join("hooks.log")).unwrap();
     assert_eq!(
         hooks.lines().filter(|l| l.starts_with("stop")).count(),
         2,
@@ -213,6 +212,9 @@ async fn a_custom_harness_with_quiet_stop_runs_a_node() {
     };
     let list = app.save_harness(&profile).unwrap();
     assert_eq!(list.last().unwrap().id, "fakecli");
+    // A graph-chosen profile with its own args/env is a trust item.
+    assert!(!app.trust_status(&abs(dir)).unwrap().trusted);
+    app.trust_graph(&abs(dir)).unwrap();
     let rec = Arc::new(Recorder::default());
     let (run_id, state) = run(&app, dir, RunTarget::All, &rec).await;
     assert_eq!(state.status, RunStatus::Succeeded, "{state:#?}");
@@ -275,6 +277,7 @@ async fn a_missing_env_variable_fails_the_session_before_anything_spawns() {
     };
     std::env::remove_var("MISSING_VAR");
     app.save_harness(&profile).unwrap();
+    app.trust_graph(&abs(dir)).unwrap();
     let (run_id, state) = run(&app, dir, RunTarget::All, &rec).await;
     assert_eq!(state.status, RunStatus::Failed);
     let a = &state.nodes["a"];
@@ -293,7 +296,9 @@ async fn a_missing_env_variable_fails_the_session_before_anything_spawns() {
         !sdir.join("transcript.log").exists(),
         "no process was spawned"
     );
-    assert!(!sdir.join("fake-received.log").exists());
+    assert!(!hooks_dir(dir, &run_id, "s1")
+        .join("fake-received.log")
+        .is_file());
     assert!(rec.windows.lock().unwrap().is_empty(), "no window either");
 }
 

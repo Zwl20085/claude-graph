@@ -151,7 +151,9 @@ pub fn spawn_followup(
     tokio::spawn(async move {
         let _typing = session.typing().await;
         let info = session.info();
-        let dir = session_dir(&session.graph_dir, &session.run_id, &info.sid);
+        let dir = session
+            .hooks_dir()
+            .unwrap_or_else(|| session_dir(&session.graph_dir, &session.run_id, &info.sid));
         let mut hooks = HookLog::at_end(dir.join(HOOKS_LOG));
         let mut announced = None;
         let mut port = PtyPort {

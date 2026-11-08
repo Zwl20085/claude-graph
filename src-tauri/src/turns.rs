@@ -51,6 +51,9 @@ pub struct RunCtx {
     pub harnesses: Vec<HarnessProfile>,
     /// The app binary, Codex's notify program (`<exe> --notify <hooks.log>`).
     pub notify_exe: PathBuf,
+    /// `<data_dir>/claude-graph/sessions`: the sessions' hooks folders
+    /// ([`crate::terminal::hooks_dir`]).
+    pub hooks_root: PathBuf,
     /// "Ask me in the app": the run's approval registration, when some node
     /// of the graph uses `ask_app` (dropped with the run).
     pub approval: Option<Registration>,

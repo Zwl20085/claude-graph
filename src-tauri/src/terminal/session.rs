@@ -89,12 +89,14 @@ pub(super) struct Session {
     pub(super) prompt_seq: u32,
     /// A chained-headless session's program and CLI session id.
     pub(super) chain: Option<crate::terminal::chained::Chain>,
+    /// Chained sessions: follow-ups (node, text) that arrived while a node
+    /// ran, delivered after it.
+    pub(super) deferred: Vec<(String, String)>,
 }
 
 impl SessionTask {
     /// Run the session to its end (process exited or killed).
     pub async fn run(self) {
-        let dir = session_dir(&self.ctx.graph_dir, &self.ctx.run_id, &self.plan.sid);
         let behavior = self
             .ctx
             .harness(&self.plan.harness)
@@ -103,10 +105,17 @@ impl SessionTask {
         self.shared
             .set_delivery(behavior.expect.clone(), behavior.ready_quiet);
         let actions = self.shared.take_actions();
+        let hooks_dir = crate::terminal::hooks_dir(
+            &self.ctx.hooks_root,
+            &self.ctx.graph_dir,
+            &self.ctx.run_id,
+            &self.plan.sid,
+        );
         let mut s = Session {
             behavior,
             kill: self.shared.kill_watch(),
-            hooks: HookLog::new(dir.join(HOOKS_LOG)),
+            hooks: HookLog::new(hooks_dir.join(HOOKS_LOG)),
+            deferred: Vec::new(),
             t: self,
             pty: None,
             exit: None,
@@ -127,7 +136,10 @@ impl SessionTask {
                 pty.kill().await;
             }
         }
-        s.report(|i| i.pid = None);
+        s.report(|i| {
+            i.pid = None;
+            i.alive = false;
+        });
         s.t.shared.task_ended();
     }
 }
@@ -245,7 +257,11 @@ impl Session {
         };
         let path = std::path::PathBuf::from(path);
         if self.transcript.as_ref().map(|t| t.path()) != Some(path.as_path()) {
-            self.transcript = Transcript::new(path);
+            let roots: Vec<std::path::PathBuf> = dirs::home_dir()
+                .into_iter()
+                .chain([self.t.ctx.hooks_root.clone()])
+                .collect();
+            self.transcript = Transcript::new(path, &roots);
         }
     }
 

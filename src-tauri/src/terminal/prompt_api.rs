@@ -10,6 +10,19 @@ use crate::terminal::api::{check_sid, PromptAction, Terminals, WRITE_MAX};
 /// The error for a free-text answer to a prompt without a text option.
 pub const ONLY_OPTIONS: &str = "this prompt only takes one of its options";
 
+/// Text from the agent (a reply's choice label) that would switch Claude
+/// Code's input mode if typed: `!` (shell mode, also through a bracketed
+/// paste; docs/CLAUDE_CLI_NOTES.md), `/` (a slash command), `#` (memory).
+pub fn unsafe_to_type(text: &str) -> bool {
+    matches!(text.trim_start().chars().next(), Some('!' | '/' | '#'))
+}
+
+/// The refusal for a choice label [`unsafe_to_type`].
+pub fn choice_refused(label: &str) -> String {
+    let first = label.trim_start().chars().next().unwrap_or('!');
+    format!("this choice starts with `{first}`; type your answer instead")
+}
+
 fn stale(prompt_id: &str) -> AppError {
     AppError::new(
         "not_found",
@@ -28,6 +41,11 @@ pub fn check_answer(prompt: &TurnPrompt, answer: &PromptAnswer) -> AppResult<()>
         ),
         TurnPrompt::Reply(r) => (r.choices.len(), false, true),
     };
+    if let (TurnPrompt::Reply(r), PromptAnswer::Choice(i)) = (prompt, answer) {
+        if let Some(c) = r.choices.get(*i).filter(|c| unsafe_to_type(&c.label)) {
+            return bad(&choice_refused(&c.label));
+        }
+    }
     match answer {
         PromptAnswer::Choice(i) if *i < count => Ok(()),
         PromptAnswer::Choice(i) => bad(&format!("no option {i}: the prompt has {count}")),
@@ -161,6 +179,25 @@ mod tests {
         assert!(check_answer(&m, &PromptAnswer::Choices(vec![5])).is_err());
         assert!(check_answer(&m, &PromptAnswer::Text("own".into())).is_ok());
         let r = reply();
+        let bang = TurnPrompt::Reply(ReplyQuestion {
+            id: "n-p3".into(),
+            question: "Run?".into(),
+            choices: ["!rm -rf x", " /clear", "#note", "fine"]
+                .iter()
+                .map(|l| ReplyChoice {
+                    label: l.to_string(),
+                    detail: None,
+                })
+                .collect(),
+            reply_excerpt: "Run?".into(),
+        });
+        for i in 0..3 {
+            let err = check_answer(&bang, &PromptAnswer::Choice(i)).unwrap_err();
+            assert!(err.message.contains("type your answer instead"), "{err:?}");
+        }
+        assert!(check_answer(&bang, &PromptAnswer::Choice(3)).is_ok());
+        // The user's own text may start with anything.
+        assert!(check_answer(&bang, &PromptAnswer::Text("!ls".into())).is_ok());
         assert!(check_answer(&r, &PromptAnswer::Text("use jest".into())).is_ok());
         assert!(check_answer(&r, &PromptAnswer::Text("  ".into())).is_err());
         assert!(check_answer(&r, &PromptAnswer::Choice(0)).is_ok());
@@ -175,6 +212,7 @@ mod tests {
             node_ids: vec!["n".into()],
             status: SessionStatus::Running,
             pid: None,
+            alive: false,
             current_node: Some("n".into()),
             harness: "claude".into(),
             pending_prompt: None,

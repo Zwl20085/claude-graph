@@ -111,18 +111,31 @@ run.json files load as `"headless"` with no sessions) also writes one folder per
 
 ```
 runs/<run-id>/sessions/<sid>/      sid = s1, s2, … (one per connected component, split where the harness changes)
-  hooks.json        --settings file: SessionStart/UserPromptSubmit/Stop/Notification hooks running
-                    `"<app>" --notify "<hooks.log>" --event <word> --stdin`
-  hooks.log         start / submit / stop / notify, one line per hook: the word, then the hook's
-                    stdin payload as one line of JSON (transcript_path, prompt,
-                    last_assistant_message, …); word only when the app binary could not be used
-                    (echo fallback); Codex sessions: "stop {notify JSON}" lines
+  hooks.path        the path of the session's hooks folder (below), for the record
   transcript.log    raw terminal output of the session (pty sessions)
   dsh-stderr.log    dsh sessions: dsh's stderr (diagnostics); a dsh session has no pty and no
                     transcript.log, its window shows a rendering of the run events
   session.json      { sid, title, node_ids, pid, status, harness, started_at, finished_at }
+                    (pid: null for dsh sessions, which run one process per message; run.json's
+                    sessions carry `alive`: the session still takes messages)
                     (harness: profile id; missing in older files = "claude"; run.json's
                     `sessions[]` entries carry `harness` too)
+```
+
+The hook files live **outside the graph folder** (the agents can write there), in the app's
+data folder, `<data_dir>/claude-graph/sessions/<run-id>-<graph hash>/<sid>/` (`<graph hash>`:
+8 hex digits of the graph folder's sha256):
+
+```
+  hooks.json        --settings file: SessionStart/UserPromptSubmit/Stop/Notification hooks running
+                    `"<app>" --notify --event <word> --stdin` (no path in the command: the app
+                    finds hooks.log through CLAUDE_GRAPH_SESSION_DIR, set on the session process)
+  hooks.log         start / submit / stop / notify, one line per hook: the word, then the hook's
+                    stdin payload as one line of JSON (transcript_path, prompt,
+                    last_assistant_message, …); word only when the app binary could not be used
+                    (`echo` fallback, only when this folder's path holds nothing but letters,
+                    digits, spaces and _ . : / \ - ~; otherwise the session does not start);
+                    Codex sessions: "stop {notify JSON}" lines
 ```
 
 and per node `runs/<run-id>/<node-id>/`:

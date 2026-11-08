@@ -58,8 +58,10 @@ pub fn from_process() -> LaunchOptions {
 }
 
 /// Hidden mode flag: `claude-graph --notify <hooks.log> [json]` (Codex's
-/// `notify` program), or `claude-graph --notify <hooks.log> --event <word>
-/// --stdin` (Claude Code hook commands: the payload JSON comes on stdin).
+/// `notify` program, run without a shell), or `claude-graph --notify
+/// --event <word> --stdin` (Claude Code hook commands, run by a shell: the
+/// payload JSON comes on stdin and hooks.log is the one in
+/// `$CLAUDE_GRAPH_SESSION_DIR`).
 /// See docs/ARCHITECTURE.md "Harness profiles" and "Turn outcomes".
 pub const FLAG_NOTIFY: &str = "--notify";
 const FLAG_EVENT: &str = "--event";
@@ -73,7 +75,9 @@ pub const STDIN_MAX: usize = 4 * 1024 * 1024;
 /// A parsed notify invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotifyArgs<'a> {
-    pub file: PathBuf,
+    /// hooks.log as given (`None`: the one in the session folder named by
+    /// the environment).
+    pub file: Option<PathBuf>,
     /// The line's word (`stop` unless `--event` names another).
     pub word: &'a str,
     /// Read the payload from stdin.
@@ -85,12 +89,17 @@ pub struct NotifyArgs<'a> {
 /// `Some(..)` when `args` (after the executable) ask for the notify mode.
 /// An unknown `--event` word is `None` (nothing is written).
 pub fn notify_args(args: &[String]) -> Option<NotifyArgs<'_>> {
-    let [flag, file, rest @ ..] = args else {
+    let [flag, after @ ..] = args else {
         return None;
     };
     if flag != FLAG_NOTIFY {
         return None;
     }
+    let (file, rest) = match after {
+        [first, rest @ ..] if !first.starts_with("--") => (Some(PathBuf::from(first)), rest),
+        [_, ..] => (None, after),
+        [] => return None,
+    };
     let mut word = "stop";
     let mut stdin = false;
     let mut payload = None;
@@ -110,7 +119,7 @@ pub fn notify_args(args: &[String]) -> Option<NotifyArgs<'_>> {
         i += 1;
     }
     Some(NotifyArgs {
-        file: PathBuf::from(file),
+        file,
         word,
         stdin,
         payload,
@@ -179,9 +188,20 @@ pub fn notify_from_process() -> Option<i32> {
         eprintln!("claude-graph --notify: bad arguments");
         return Some(2);
     };
+    let file = parsed.file.clone().or_else(|| {
+        std::env::var_os(crate::terminal::hooks::SESSION_DIR_ENV)
+            .map(|d| PathBuf::from(d).join(NOTIFY_FILE))
+    });
+    let Some(file) = file else {
+        eprintln!(
+            "claude-graph --notify: no hooks.log given and {} is not set",
+            crate::terminal::hooks::SESSION_DIR_ENV
+        );
+        return Some(2);
+    };
     let input = if parsed.stdin { read_stdin() } else { None };
     let payload = input.as_deref().or(parsed.payload);
-    Some(match notify_word(&parsed.file, parsed.word, payload) {
+    Some(match notify_word(&file, parsed.word, payload) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("claude-graph --notify: {e}");
@@ -285,8 +305,12 @@ mod tests {
         let n = notify_args(&only_file).unwrap();
         assert_eq!(
             (n.file, n.payload, n.word),
-            (PathBuf::from("C:/s/hooks.log"), None, "stop")
+            (Some(PathBuf::from("C:/s/hooks.log")), None, "stop")
         );
+        // Hook commands name no path: hooks.log comes from the environment.
+        let env_form = args(&["--notify", "--event", "stop", "--stdin"]);
+        let n = notify_args(&env_form).unwrap();
+        assert_eq!((n.file, n.word, n.stdin), (None, "stop", true));
         let hostile = "{\"a\":\"\\\"&|<>\"}\r\n& del /q *| echo pwned";
         let a = args(&["--notify", "/s/hooks.log", hostile]);
         assert_eq!(notify_args(&a).unwrap().payload, Some(hostile));

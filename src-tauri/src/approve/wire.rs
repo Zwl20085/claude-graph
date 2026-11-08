@@ -119,8 +119,30 @@ pub struct MatchKey {
     pub key: String,
 }
 
+/// Bash input fields that do not change what runs (left out of its key).
+const BASH_PROSE: &[&str] = &["command", "description"];
+
 pub fn match_key(tool: &str, input: &Value) -> MatchKey {
     let key = match field(tool, input) {
+        // Bash: the command plus every other field that changes the call
+        // (timeout, background, sandbox), so an approval of `x` never covers
+        // `x` run with the sandbox off.
+        Some(text) if tool == "Bash" => {
+            let rest: serde_json::Map<String, Value> = input
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter(|(k, _)| !BASH_PROSE.contains(&k.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if rest.is_empty() {
+                text.to_string()
+            } else {
+                format!("{text}\u{1f}{}", canonical_json(&Value::Object(rest)))
+            }
+        }
         Some(text) => text.to_string(),
         None => format!("sha256:{}", sha256_hex(&canonical_json(input))),
     };

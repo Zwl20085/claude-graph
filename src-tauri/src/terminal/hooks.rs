@@ -4,21 +4,43 @@
 //! `hooks.log`: `start` (SessionStart), `submit` (UserPromptSubmit: a typed
 //! prompt was accepted), `stop` (Stop, end of every reply) and `notify`
 //! (Notification: it waits for the user). When the app binary writes the
-//! line (`"<app>" --notify "<hooks.log>" --event <word> --stdin`) the word is
-//! followed by the hook's stdin payload as one line of JSON (`transcript_path`,
-//! the Stop's `last_assistant_message`, …; docs/CLAUDE_CLI_NOTES.md); the
-//! `echo` fallback writes the word only. [`HookLog::poll`] returns the lines
-//! added since the last poll.
+//! line (`"<app>" --notify --event <word> --stdin`) the word is followed by
+//! the hook's stdin payload as one line of JSON (`transcript_path`, the
+//! Stop's `last_assistant_message`, …; docs/CLAUDE_CLI_NOTES.md); the `echo`
+//! fallback writes the word only. [`HookLog::poll`] returns the lines added
+//! since the last poll.
+//!
+//! The hook command is run by a shell, so no session path goes into it: the
+//! app binary finds hooks.log through [`SESSION_DIR_ENV`] (set on the
+//! session's process, inherited by its hooks), and its own path must pass
+//! [`path_check`]. The `echo` form needs the log path in the command, so it
+//! is used only when that path passes the same check; otherwise the session
+//! does not start.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::contract::AppResult;
+use crate::contract::{AppError, AppResult};
 use crate::prompt::display_dir;
 
 pub const HOOKS_FILE: &str = "hooks.json";
 pub const HOOKS_LOG: &str = "hooks.log";
+/// Environment variable naming the session's hooks folder.
+pub const SESSION_DIR_ENV: &str = "CLAUDE_GRAPH_SESSION_DIR";
+/// Most bytes of hooks.log read per poll.
+pub const POLL_MAX: u64 = 8 * 1024 * 1024;
+
+/// `Err(c)`: the first character of `path` that may not go into a shell
+/// command (allowed: `A-Z a-z 0-9`, space, `_ . : / \ -`, and the `~` of
+/// Windows short names, inert inside the command's double quotes).
+pub fn path_check(path: &str) -> Result<(), char> {
+    let ok = |c: char| c.is_ascii_alphanumeric() || " _.:/\\-~".contains(c);
+    match path.chars().find(|c| !ok(*c)) {
+        Some(c) => Err(c),
+        None => Ok(()),
+    }
+}
 
 /// One line of hooks.log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,33 +69,54 @@ fn echo(word: &str, log: &str) -> Value {
     json!([{ "hooks": [{ "type": "command", "command": format!("echo {word}>> \"{log}\"") }] }])
 }
 
-/// `"<app>" --notify "<log>" --event <word> --stdin`: the app binary appends
-/// the word and the hook's stdin JSON (quoted forward-slash paths work in
-/// cmd.exe and sh alike).
-fn notify(word: &str, log: &str, exe: &str) -> Value {
-    let command = format!("\"{exe}\" --notify \"{log}\" --event {word} --stdin");
+/// `"<app>" --notify --event <word> --stdin`: the app binary appends the
+/// word and the hook's stdin JSON to `$CLAUDE_GRAPH_SESSION_DIR/hooks.log`
+/// (a quoted forward-slash path works in cmd.exe and sh alike).
+fn notify(word: &str, exe: &str) -> Value {
+    let command = format!("\"{exe}\" --notify --event {word} --stdin");
     json!([{ "hooks": [{ "type": "command", "command": command }] }])
 }
 
 /// The settings JSON for a session whose hooks.log is `log`. `exe`: the app
 /// binary that records the payloads; `None`, a path that is not a file, or
-/// a path holding a quote gives the `echo` form (words only).
-pub fn hooks_json(log: &Path, exe: Option<&Path>) -> Value {
+/// one with a character [`path_check`] refuses gives the `echo` form (words
+/// only), and only when `log` passes the check: else an error naming the
+/// character.
+pub fn hooks_json(log: &Path, exe: Option<&Path>) -> AppResult<Value> {
     let log = display_dir(log);
-    let exe = exe
-        .filter(|e| e.is_file())
-        .map(display_dir)
-        .filter(|e| !e.contains('"') && !log.contains('"'));
-    let hook = |word: &str| match &exe {
-        Some(exe) => notify(word, &log, exe),
-        None => echo(word, &log),
+    let exe = exe.filter(|e| e.is_file()).map(display_dir);
+    let use_exe = match &exe {
+        Some(e) => match path_check(e) {
+            Ok(()) => true,
+            Err(c) => {
+                log::warn!("the app path {e} holds {c:?}; hooks fall back to echo");
+                false
+            }
+        },
+        None => false,
     };
-    json!({ "hooks": {
+    if !use_exe {
+        if let Err(c) = path_check(&log) {
+            return Err(AppError::new(
+                "invalid_input",
+                format!(
+                    "cannot set up the session hooks: the path {log} holds the character {c:?}, \
+                     which cannot go into a hook command; move the app to a folder whose path \
+                     uses only letters, digits, spaces and _ . : / \\ -"
+                ),
+            ));
+        }
+    }
+    let hook = |word: &str| match (&exe, use_exe) {
+        (Some(exe), true) => notify(word, exe),
+        _ => echo(word, &log),
+    };
+    Ok(json!({ "hooks": {
         "SessionStart": hook("start"),
         "UserPromptSubmit": hook("submit"),
         "Stop": hook("stop"),
         "Notification": hook("notify"),
-    }})
+    }}))
 }
 
 /// The bytes of `path` from `offset` (empty when missing or not longer).
@@ -89,7 +132,7 @@ fn read_from(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
     }
     f.seek(SeekFrom::Start(offset))?;
     let mut buf = Vec::new();
-    f.read_to_end(&mut buf)?;
+    f.take(POLL_MAX).read_to_end(&mut buf)?;
     Ok(buf)
 }
 
@@ -124,6 +167,14 @@ impl HookLog {
     pub fn poll_lines(&mut self) -> AppResult<Vec<HookLine>> {
         let bytes = read_from(&self.path, self.offset)?;
         let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else {
+            if bytes.len() as u64 >= POLL_MAX {
+                // One line longer than a whole poll: skip it.
+                log::warn!(
+                    "{}: skipping a line over {POLL_MAX} bytes",
+                    self.path.display()
+                );
+                self.offset += POLL_MAX;
+            }
             return Ok(Vec::new());
         };
         self.offset += u64::try_from(end + 1).unwrap_or(u64::MAX);
@@ -216,7 +267,7 @@ mod tests {
 
     #[test]
     fn hooks_json_appends_words_with_forward_slashes() {
-        let v = hooks_json(Path::new("/tmp/s1/hooks.log"), None);
+        let v = hooks_json(Path::new("/tmp/s1/hooks.log"), None).unwrap();
         let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
@@ -238,21 +289,51 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let exe = tmp.path().join("app.exe");
         std::fs::write(&exe, b"x").unwrap();
-        let v = hooks_json(Path::new("/tmp/s1/hooks.log"), Some(&exe));
+        let v = hooks_json(Path::new("/tmp/s1/hooks.log"), Some(&exe)).unwrap();
         let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
+        assert!(cmd.ends_with("\" --notify --event stop --stdin"), "{cmd}");
         assert!(
-            cmd.ends_with("--notify \"/tmp/s1/hooks.log\" --event stop --stdin"),
-            "{cmd}"
+            !cmd.contains("hooks.log"),
+            "no session path in the command: {cmd}"
         );
         assert!(cmd.starts_with('"') && !cmd.contains('\\'));
         let missing = tmp.path().join("gone.exe");
-        let v = hooks_json(Path::new("/tmp/s1/hooks.log"), Some(&missing));
+        let v = hooks_json(Path::new("/tmp/s1/hooks.log"), Some(&missing)).unwrap();
         let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
         assert!(cmd.starts_with("echo "));
+    }
+
+    #[test]
+    fn shell_characters_never_reach_a_hook_command() {
+        assert_eq!(path_check("C:/Users/a b/x_y.z-1"), Ok(()));
+        for (p, c) in [
+            ("C:/w/50%off", '%'),
+            ("/home/$proj", '$'),
+            ("C:/a&b", '&'),
+            ("/x`y", '`'),
+            ("C:/\"q", '"'),
+        ] {
+            assert_eq!(path_check(p), Err(c), "{p}");
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let bad_dir = tmp.path().join("app%x");
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        let exe = bad_dir.join("app.exe");
+        std::fs::write(&exe, b"x").unwrap();
+        // A refused app path falls back to echo when the log path is plain …
+        let v = hooks_json(Path::new("/tmp/s1/hooks.log"), Some(&exe)).unwrap();
+        let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(cmd.starts_with("echo stop"), "{cmd}");
+        // … and with a log path the shell would expand, the session refuses.
+        let err = hooks_json(Path::new("/tmp/$x/hooks.log"), Some(&exe)).unwrap_err();
+        assert!(err.message.contains("'$'"), "{}", err.message);
+        assert!(hooks_json(Path::new("/tmp/%x%/hooks.log"), None).is_err());
     }
 
     #[test]

@@ -71,6 +71,20 @@ pub fn session_dir(graph_dir: &Path, run_id: &str, sid: &str) -> PathBuf {
     run_dir(graph_dir, run_id).join("sessions").join(sid)
 }
 
+/// File in the session folder naming the session's hooks folder.
+pub const HOOKS_POINTER: &str = "hooks.path";
+
+/// `<root>/<run>-<graph>/<sid>/` (`root`: `<data_dir>/claude-graph/sessions`;
+/// `<graph>`: 8 hex digits of the graph folder's sha256, so runs of two
+/// graphs started in the same second never share a folder): hooks.json and
+/// hooks.log live here, outside the graph folder the agents can write to.
+pub fn hooks_dir(root: &Path, graph_dir: &Path, run_id: &str, sid: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(graph_dir.display().to_string().as_bytes());
+    let short: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    root.join(format!("{run_id}-{short}")).join(sid)
+}
+
 /// Label of a session window.
 pub fn window_label(run_id: &str, sid: &str) -> String {
     format!("term-{run_id}-{sid}")

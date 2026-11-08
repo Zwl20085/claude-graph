@@ -252,6 +252,11 @@ impl Approvals {
         let (tx, rx) = oneshot::channel();
         {
             let mut st = self.lock();
+            // The registration may have closed since it was checked: its
+            // close denies only the prompts already pending.
+            if !st.regs.contains_key(&req.reg) {
+                return Submitted::Now(deny("no active Claude Graph run for this request"));
+            }
             if st.pending.len() >= MAX_PENDING {
                 return Submitted::Now(deny(&format!(
                     "too many approvals are waiting in Claude Graph ({MAX_PENDING}); denied"

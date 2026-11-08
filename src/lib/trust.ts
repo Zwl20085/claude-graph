@@ -30,6 +30,10 @@ export function trustItems(graph: Graph): TrustItem[] {
     if (node.working_dir !== null && isAbsolutePath(node.working_dir)) {
       items.push({ node_id: node.id, kind: 'absolute_working_dir', detail: node.working_dir });
     }
+    const first = node.prompt.trimStart();
+    const line = first.split('\n')[0] ?? '';
+    if (first.startsWith('!')) items.push({ node_id: node.id, kind: 'shell_prompt', detail: line });
+    if (first.startsWith('/')) items.push({ node_id: node.id, kind: 'slash_prompt', detail: line });
   }
   return items;
 }
@@ -57,6 +61,14 @@ export function trustItemText(item: TrustItem): string {
       return `${node ?? 'A node'} uses an absolute working directory: ${item.detail}`;
     case 'claude_bin_in_graph':
       return 'graph.json names a claude binary (ignored)';
+    case 'shell_prompt':
+      return `${node ?? 'A node'}: this graph types shell commands into the agent (${item.detail})`;
+    case 'slash_prompt':
+      return `${node ?? 'A node'} starts with a slash command (${item.detail})`;
+    case 'project_settings':
+      return `${node ? `${node}: ` : ''}this graph ships Claude Code project settings (${item.detail})`;
+    case 'custom_harness':
+      return `${node ?? 'The graph'} ${item.detail}`;
     default:
       return `${node ? `${node}: ` : ''}${String(item.kind)} ${item.detail}`.trim();
   }

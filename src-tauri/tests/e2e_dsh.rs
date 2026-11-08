@@ -161,6 +161,80 @@ async fn a_question_pauses_until_answered() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_message_sent_while_the_node_runs_is_a_follow_up_not_the_answer() {
+    let nodes = vec![
+        node(
+            "a",
+            0.0,
+            0.0,
+            json!({ "prompt": "set up FAKE_QUESTION FAKE_SLOW" }),
+        ),
+        node("b", 0.0, 100.0, json!({ "prompt": "second" })),
+    ];
+    let t = trial(nodes, &[("a", "b")]);
+    let dir = t.tmp.path();
+    let (run_id, join) = t
+        .app
+        .start_by_mode(dir, RunTarget::All, t.rec.clone())
+        .unwrap();
+    wait_until("a running", || received(dir).len() == 1).await;
+    // Typed while the turn runs, before any question exists.
+    term::pty_write(t.app.terminals(), &run_id, "s1", "early note\r").unwrap();
+    wait_until("a question", || {
+        !t.rec.session_prompts.lock().unwrap().is_empty()
+    })
+    .await;
+    let p = t.rec.session_prompts.lock().unwrap()[0].clone();
+    assert_eq!(
+        received(dir).len(),
+        1,
+        "the note did not answer the question"
+    );
+    prompt_api::answer_prompt(
+        t.app.terminals(),
+        &run_id,
+        "s1",
+        p.prompt.id(),
+        PromptAnswer::Choice(1),
+    )
+    .unwrap();
+    let state: RunState = finish(join).await;
+    assert_eq!(state.nodes["a"].status, NodeStatus::Succeeded);
+    assert_eq!(state.nodes["b"].status, NodeStatus::Succeeded);
+    // The note went after node a ended, before node b.
+    assert_eq!(
+        received(dir),
+        [
+            "set up FAKE_QUESTION FAKE_SLOW",
+            "jest",
+            "early note",
+            "second"
+        ]
+    );
+    kill_sessions(&t.app, &run_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_process_holding_the_pipes_does_not_hang_the_turn() {
+    let nodes = vec![node(
+        "a",
+        0.0,
+        0.0,
+        json!({ "prompt": "serve FAKE_BACKGROUND" }),
+    )];
+    let t = trial(nodes, &[]);
+    let dir = t.tmp.path();
+    let started = std::time::Instant::now();
+    let (run_id, state) = run(&t.app, dir, RunTarget::All, &t.rec).await;
+    assert_eq!(state.nodes["a"].status, NodeStatus::Succeeded, "{state:#?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the turn ended though a grandchild held stdout"
+    );
+    kill_sessions(&t.app, &run_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn failures_and_denied_approvals_are_reported() {
     let nodes = vec![
         node("a", 0.0, 0.0, json!({ "prompt": "try FAKE_APPROVAL" })),

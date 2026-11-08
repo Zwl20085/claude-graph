@@ -50,6 +50,9 @@ pub enum Answered {
     Changed,
     /// The same dialog still shows with the same highlighted row.
     Unchanged,
+    /// No dialog was parsed on screen before the keys (a dialog known from
+    /// the transcript only): whether they landed cannot be told.
+    Unknown,
 }
 
 /// Why an answer was not sent.
@@ -190,12 +193,17 @@ pub async fn answer<I: DialogIo + Send>(
     style: &DialogStyle,
     plain_prompt: bool,
 ) -> Result<Answered, AnswerError> {
-    let before = io.dialog().unwrap_or_else(|| d.clone());
+    let seen = io.dialog();
+    let blind = seen.is_none();
+    let before = seen.unwrap_or_else(|| d.clone());
     match answer {
         PromptAnswer::Choice(i) if d.multi => choose_many(io, d, &[*i]).await?,
         PromptAnswer::Choice(i) => choose(io, d, *i, style).await?,
         PromptAnswer::Choices(list) => choose_many(io, d, list).await?,
         PromptAnswer::Text(t) => type_text(io, d, t, style, plain_prompt).await?,
+    }
+    if blind {
+        return Ok(Answered::Unknown);
     }
     let mut waited = Duration::ZERO;
     loop {

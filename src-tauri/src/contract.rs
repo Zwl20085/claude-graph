@@ -392,8 +392,13 @@ pub struct TerminalSession {
     /// Nodes of the session in the order they are sent.
     pub node_ids: Vec<String>,
     pub status: SessionStatus,
-    /// Process id while the Claude Code process is alive; `None` once it is gone.
+    /// Process id while the session's process is alive; `None` once it is
+    /// gone, and always for chained sessions (one process per message).
     pub pid: Option<u32>,
+    /// The session takes messages: its process (pty) or its task (chained)
+    /// is alive. Missing in older run.json files: `false`.
+    #[serde(default)]
+    pub alive: bool,
     /// Node whose message was sent last and has not finished.
     pub current_node: Option<String>,
     /// Harness profile id the session runs. Missing in older run.json files: `claude`.
@@ -623,12 +628,23 @@ pub enum TrustKind {
     AbsoluteWorkingDir,
     /// Informational only: `settings.claude_bin` in graph.json is ignored.
     ClaudeBinInGraph,
+    /// A node prompt starting with `!`: typed into Claude Code it is a shell
+    /// command (bash mode).
+    ShellPrompt,
+    /// Informational: a node prompt starting with `/` (a slash command).
+    SlashPrompt,
+    /// The graph folder (or a node's working folder) ships Claude Code
+    /// project settings: `.claude/settings*.json` or `.mcp.json`.
+    ProjectSettings,
+    /// The graph picks a harness profile of this machine with its own args
+    /// or env (built-ins without changes are exempt).
+    CustomHarness,
 }
 
 impl TrustKind {
     /// Informational items never make a graph untrusted on their own.
     pub fn is_informational(self) -> bool {
-        self == TrustKind::ClaudeBinInGraph
+        matches!(self, TrustKind::ClaudeBinInGraph | TrustKind::SlashPrompt)
     }
 }
 

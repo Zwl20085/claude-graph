@@ -278,6 +278,8 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
     const showRun = (rs: RunState): void => {
       const ran = get().ranNodeIds;
       set({ runState: rs, ranNodeIds: ran === null ? null : unionIds(ran, Object.keys(rs.nodes)) });
+      // Prompts of a waiting node show after a reload or an open too, not only on the next run:state.
+      void get().syncSessionPrompts(rs);
       if (bufferedEvents.some((e) => e.run_id === rs.run_id)) {
         const mine = bufferedEvents.filter((e) => e.run_id === rs.run_id);
         bufferedEvents = bufferedEvents.filter((e) => e.run_id !== rs.run_id);
@@ -341,12 +343,12 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
     const closeNow = (): void => {
       epoch += 1;
       dropTrustRequest();
-      set({ ...CLOSED });
+      set({ ...CLOSED, promptAnswering: [] });
     };
 
     const enter = (dir: string, graph: Graph): void => {
       epoch += 1;
-      set({ ...CLOSED, graph, dir });
+      set({ ...CLOSED, promptAnswering: [], graph, dir });
       entered = loadLatestRun(dir, epoch);
       void loadRanNodeIds(dir, epoch);
       if (graph.settings.claude_bin !== null) pushToast('info', `graph.json sets claude_bin: ${IGNORED_CLAUDE_BIN_TEXT}.`);
@@ -605,16 +607,13 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
           return;
         }
         const { dir, runState, startingRun } = get();
-        if (acceptsRunState(rs, dir, runState)) {
-          showRun(rs);
-          void get().syncSessionPrompts(rs);
-        }
+        if (acceptsRunState(rs, dir, runState)) showRun(rs);
         else if (startingRun) bufferedStates = new Map(bufferedStates).set(rs.run_id, rs);
       },
       appendEvent: (ev) => {
         const { runState, startingRun } = get();
         if (answerFailed(ev, get().sessionPrompts, get().promptAnswering)) {
-          set({ promptAnswering: null });
+          get().releaseAnswers(ev.run_id, ev.node_id);
           pushToast('warning', ev.text, ev.node_id);
         }
         if (ev.run_id === runState?.run_id) addLine(ev);

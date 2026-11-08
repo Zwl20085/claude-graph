@@ -45,6 +45,7 @@ function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
           <span
             className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[#38bdf8] text-[11px] font-bold text-black"
             title="This node asked you something: answer it in the Messages tab."
+            role="img"
             aria-label="needs you"
           >
             ?

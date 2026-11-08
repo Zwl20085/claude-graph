@@ -37,6 +37,10 @@ pub(super) enum Pending {
         /// The dialog as last parsed from the screen.
         screen: Option<Box<ScreenDialog>>,
         sig: String,
+        /// The transcript's tool call behind the dialog, when known.
+        tool_id: Option<String>,
+        /// Questions of the AskUserQuestion call (1 for other dialogs).
+        questions: usize,
     },
     Reply(ReplyQuestion),
 }
@@ -66,16 +70,46 @@ pub(super) struct Found {
     pub prompt: DialogPrompt,
     pub screen: Option<ScreenDialog>,
     pub sig: String,
+    /// The transcript's tool call behind the dialog, when known.
+    pub tool_id: Option<String>,
+    /// Questions of the AskUserQuestion call (1 for other dialogs).
+    pub questions: usize,
 }
 
+impl Found {
+    /// `old` (a pending dialog) shows the same dialog: same question and
+    /// labels, and not another tool call (unknown on either side matches).
+    pub(super) fn same_as(&self, old: &Pending) -> bool {
+        match old {
+            Pending::Dialog { sig, tool_id, .. } => {
+                *sig == self.sig
+                    && match (tool_id, &self.tool_id) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => true,
+                    }
+            }
+            Pending::Reply(_) => false,
+        }
+    }
+}
+
+fn ask_questions(input: &Value) -> usize {
+    input
+        .get("questions")
+        .and_then(Value::as_array)
+        .map_or(1, |q| q.len().max(1))
+}
+
+/// The AskUserQuestion entry for the screen's `question`; with `None` (no
+/// screen) the first. A screen question the call does not hold: `None`.
 fn ask_question<'a>(input: &'a Value, question: Option<&str>) -> Option<&'a Value> {
     let qs = input.get("questions")?.as_array()?;
-    question
-        .and_then(|q| {
-            qs.iter()
-                .find(|x| x.get("question").and_then(Value::as_str) == Some(q))
-        })
-        .or_else(|| qs.first())
+    match question {
+        Some(q) => qs
+            .iter()
+            .find(|x| x.get("question").and_then(Value::as_str) == Some(q)),
+        None => qs.first(),
+    }
 }
 
 fn str_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -116,6 +150,7 @@ pub(super) fn found(
             .collect();
         let question = str_of(q, "question").unwrap_or("").to_string();
         let sig = format!("transcript\u{1f}{}\u{1f}{}", tool.id, question);
+        let questions = ask_questions(&tool.input);
         return Some(Found {
             prompt: DialogPrompt {
                 id: String::new(),
@@ -133,6 +168,8 @@ pub(super) fn found(
             },
             screen: None,
             sig,
+            tool_id: Some(tool.id.clone()),
+            questions,
         });
     };
     let mut prompt = DialogPrompt {
@@ -146,8 +183,10 @@ pub(super) fn found(
         allows_text: sd.text_option.is_some(),
         source: PromptSource::Screen,
     };
+    let mut questions = 1;
     match tool {
         Some(t) if t.name == ASK_TOOL => {
+            questions = ask_questions(&t.input);
             if let Some(q) = ask_question(&t.input, Some(&sd.question)) {
                 prompt.kind = DialogKind::Choice;
                 prompt.source = PromptSource::Transcript;
@@ -181,6 +220,8 @@ pub(super) fn found(
         prompt,
         screen: Some(sd),
         sig,
+        tool_id: tool.map(|t| t.id.clone()),
+        questions,
     })
 }
 
@@ -266,10 +307,24 @@ impl Session {
         });
     }
 
-    /// The next prompt id of `node_id` (`<node>-p<n>`).
+    /// The next prompt id of `node_id` (`<node>-<sid>-p<n>`: unique in the
+    /// run even when the node runs again in another session).
     pub(super) fn next_prompt_id(&mut self, node_id: &str) -> String {
         self.prompt_seq += 1;
-        format!("{node_id}-p{}", self.prompt_seq)
+        format!("{node_id}-{}-p{}", self.t.plan.sid, self.prompt_seq)
+    }
+
+    /// The pending prompt changed (more detail known): publish it again
+    /// without a new record or event.
+    pub(super) fn republish_prompt(&mut self, node_id: &str, pending: &Pending) {
+        let sp = SessionPrompt {
+            run_id: self.t.ctx.run_id.clone(),
+            sid: self.t.plan.sid.clone(),
+            node_id: node_id.to_string(),
+            prompt: pending.prompt(),
+        };
+        self.t.shared.set_pending(Some(sp.clone()));
+        self.t.ctx.emitter.session_prompt(&sp);
     }
 
     /// The node waits for the user: publish `pending`, record it.
@@ -430,6 +485,68 @@ mod tests {
         let bash = tool("Bash", json!({"command": "ls"}));
         assert!(found(None, Some(&bash), true).is_none());
         assert!(found(None, None, true).is_none());
+    }
+
+    #[test]
+    fn another_tool_call_with_the_same_labels_is_another_dialog() {
+        let old_for = |tool_id: Option<&str>| {
+            let f = found(
+                Some(screen(&["Yes", "No"], DialogKind::Permission)),
+                None,
+                false,
+            )
+            .unwrap();
+            Pending::Dialog {
+                prompt: f.prompt,
+                screen: None,
+                sig: f.sig,
+                tool_id: tool_id.map(str::to_string),
+                questions: 1,
+            }
+        };
+        let push = tool("Bash", json!({"command": "git push --force"}));
+        let mut now = found(
+            Some(screen(&["Yes", "No"], DialogKind::Permission)),
+            Some(&push),
+            false,
+        )
+        .unwrap();
+        now.tool_id = Some("t2".into());
+        assert!(!now.same_as(&old_for(Some("t1"))), "git status vs git push");
+        assert!(now.same_as(&old_for(Some("t2"))));
+        assert!(now.same_as(&old_for(None)), "the transcript caught up");
+        let other = found(
+            Some(screen(&["Yes", "No", "Maybe"], DialogKind::Permission)),
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(!other.same_as(&old_for(None)));
+    }
+
+    #[test]
+    fn a_screen_question_the_call_does_not_hold_gets_no_details() {
+        let two = json!({"questions": [
+            {"question": "First?", "options": [{"label": "A", "description": "a"}]},
+            {"question": "A or B?", "options": [{"label": "A", "description": "second q"}]}]});
+        let t = tool(ASK_TOOL, two);
+        let f = found(
+            Some(screen(&["A", "B"], DialogKind::Choice)),
+            Some(&t),
+            false,
+        )
+        .unwrap();
+        assert_eq!(f.questions, 2);
+        assert_eq!(f.prompt.options[0].detail.as_deref(), Some("second q"));
+        let other = json!({"questions": [{"question": "Else?", "options": [{"label": "A", "description": "x"}]}]});
+        let t = tool(ASK_TOOL, other);
+        let f = found(
+            Some(screen(&["A", "B"], DialogKind::Choice)),
+            Some(&t),
+            false,
+        )
+        .unwrap();
+        assert_eq!(f.prompt.options[0].detail, None, "not the first question's");
     }
 
     #[test]

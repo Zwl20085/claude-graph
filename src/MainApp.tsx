@@ -16,14 +16,24 @@ installStore(store);
 // Backend events feed the store for the whole app lifetime.
 const listenFailed = (name: string) => (err: unknown) =>
   store.getState().pushToast('error', `Could not subscribe to ${name}; live run updates will be missing: ${errorMessage(err)}`);
-api.onRunState((s) => store.getState().applyRunState(s)).catch(listenFailed('run:state'));
-api.onNodeEvent((e) => store.getState().appendEvent(e)).catch(listenFailed('node:event'));
-api.onPermissionPrompt((p) => store.getState().addPermissionPrompt(p)).catch(listenFailed('permission_prompt'));
-api
-  .onPermissionAnswered((a) => typeof a?.id === 'string' && store.getState().removePermissionPrompt(a.id))
-  .catch(listenFailed('permission_answered'));
-api.onSessionPrompt((p) => store.getState().addSessionPrompt(p)).catch(listenFailed('session_prompt'));
-api.onSessionPromptCleared((c) => store.getState().clearSessionPrompt(c)).catch(listenFailed('session_prompt_cleared'));
+const subscriptions: Array<[string, Promise<() => void>]> = [
+  ['run:state', api.onRunState((s) => store.getState().applyRunState(s))],
+  ['node:event', api.onNodeEvent((e) => store.getState().appendEvent(e))],
+  ['permission_prompt', api.onPermissionPrompt((p) => store.getState().addPermissionPrompt(p))],
+  [
+    'permission_answered',
+    api.onPermissionAnswered((a) => typeof a?.id === 'string' && store.getState().removePermissionPrompt(a.id)),
+  ],
+  ['session_prompt', api.onSessionPrompt((p) => store.getState().addSessionPrompt(p))],
+  ['session_prompt_cleared', api.onSessionPromptCleared((c) => store.getState().clearSessionPrompt(c))],
+];
+subscriptions.forEach(([name, p]) => p.catch(listenFailed(name)));
+// Dev only: a hot reload of this module must not leave the old handlers subscribed.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    subscriptions.forEach(([, p]) => void p.then((unlisten) => unlisten()).catch(() => undefined));
+  });
+}
 void store.getState().init();
 // Agent-called mode: follow runs driven from a CLI in the open folder.
 installAgentWatch(store, agentApi);

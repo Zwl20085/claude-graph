@@ -7,11 +7,18 @@
 //! an absolute `working_dir`. A non-null `settings.claude_bin` is reported but
 //! is informational (the backend ignores it), so it never blocks a run.
 //!
+//! Also elevated: a node prompt starting with `!` (Claude Code types it as a
+//! shell command), Claude Code project settings shipped in the graph folder
+//! or a node's working folder (`.claude/settings*.json`, `.mcp.json`), and a
+//! non-default harness picked by the graph whose profile on this machine has
+//! its own args or env. A prompt starting with `/` is listed, informational.
+//!
 //! [`fingerprint`] is a sha256 over a canonical JSON of every node's
-//! `(id, permission_mode, Bash entries, absolute working_dir)` plus
-//! `settings.default_permission_mode`. `trust_graph` stores it per canonical
-//! graph folder in `<data_dir>/claude-graph/trusted.json`; the graph is trusted
-//! while the stored fingerprint matches.
+//! `(id, permission_mode, Bash entries, absolute working_dir, shell prompt)`
+//! plus `settings.default_permission_mode`; the folder-dependent items add
+//! their content (settings files' sha256, the harness profile). `trust_graph`
+//! stores it per canonical graph folder in `<data_dir>/claude-graph/trusted.json`;
+//! the graph is trusted while the stored fingerprint matches.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -20,9 +27,11 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::contract::{
-    AppError, AppResult, Graph, PermissionMode, TrustItem, TrustKind, TrustStatus,
+    AppError, AppResult, Graph, PermissionMode, TrustItem, TrustKind, TrustStatus, DEFAULT_HARNESS,
 };
 use crate::graph_util::{is_absolute_working_dir, working_dir_of};
+use crate::harness::profile::HarnessProfile;
+use crate::prompt::resolve_working_dir;
 use crate::store::{read_json, write_json};
 
 pub const TRUST_FILE: &str = "trusted.json";
@@ -94,7 +103,21 @@ pub fn trust_items(graph: &Graph) -> Vec<TrustItem> {
             kind: TrustKind::AbsoluteWorkingDir,
             detail: format!("working directory {w} is outside the graph folder"),
         });
-        mode.into_iter().chain(tools).chain(wd)
+        let shell = shell_prompt(&n.prompt).map(|p| TrustItem {
+            node_id: Some(id.to_string()),
+            kind: TrustKind::ShellPrompt,
+            detail: format!("the prompt is a shell command typed into the agent: {p}"),
+        });
+        let slash = slash_prompt(&n.prompt).map(|p| TrustItem {
+            node_id: Some(id.to_string()),
+            kind: TrustKind::SlashPrompt,
+            detail: format!("the prompt is a slash command: {p}"),
+        });
+        mode.into_iter()
+            .chain(tools)
+            .chain(wd)
+            .chain(shell)
+            .chain(slash)
     });
     settings
         .into_iter()
@@ -103,18 +126,141 @@ pub fn trust_items(graph: &Graph) -> Vec<TrustItem> {
         .collect()
 }
 
+/// The first line of a prompt whose first non-space character is `c`.
+fn prompt_starting(prompt: &str, c: char) -> Option<String> {
+    let t = prompt.trim_start();
+    t.starts_with(c)
+        .then(|| t.lines().next().unwrap_or("").chars().take(120).collect())
+}
+
+fn shell_prompt(prompt: &str) -> Option<String> {
+    prompt_starting(prompt, '!')
+}
+
+fn slash_prompt(prompt: &str) -> Option<String> {
+    prompt_starting(prompt, '/')
+}
+
+/// Claude Code project settings files in `dir`.
+fn settings_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mcp = dir.join(".mcp.json");
+    if mcp.is_file() {
+        found.push(mcp);
+    }
+    if let Ok(entries) = std::fs::read_dir(dir.join(".claude")) {
+        let mut names: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("settings") && n.ends_with(".json"))
+            })
+            .collect();
+        names.sort();
+        found.extend(names);
+    }
+    found
+}
+
+fn sha_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Items that depend on the graph folder and this machine's harness
+/// profiles, each with the text that goes into the fingerprint.
+pub fn environment_items(
+    graph_dir: &Path,
+    graph: &Graph,
+    harnesses: &[HarnessProfile],
+) -> Vec<(TrustItem, String)> {
+    let mut out = Vec::new();
+    let mut dirs: Vec<(Option<String>, std::path::PathBuf)> = vec![(None, graph_dir.to_path_buf())];
+    for n in &graph.nodes {
+        let wd = resolve_working_dir(graph_dir, n);
+        if !dirs.iter().any(|(_, d)| *d == wd) {
+            dirs.push((Some(n.id.clone()), wd));
+        }
+    }
+    for (node_id, dir) in dirs {
+        for file in settings_files(&dir) {
+            let content = std::fs::read(&file).unwrap_or_default();
+            let shown = file.display().to_string();
+            out.push((
+                TrustItem {
+                    node_id: node_id.clone(),
+                    kind: TrustKind::ProjectSettings,
+                    detail: format!("ships Claude Code project settings: {shown}"),
+                },
+                format!("{shown}={}", sha_hex(&content)),
+            ));
+        }
+    }
+    let builtins = crate::harness::profile::builtins();
+    let mut chosen: Vec<(Option<String>, String)> = Vec::new();
+    if graph.settings.harness != DEFAULT_HARNESS {
+        chosen.push((None, graph.settings.harness.clone()));
+    }
+    for n in &graph.nodes {
+        if let Some(h) = n.harness.as_deref().filter(|h| *h != DEFAULT_HARNESS) {
+            chosen.push((Some(n.id.clone()), h.to_string()));
+        }
+    }
+    for (node_id, id) in chosen {
+        let Some(p) = crate::harness::find(harnesses, &id) else {
+            continue;
+        };
+        let stock = builtins
+            .iter()
+            .any(|b| b.id == p.id && b.args == p.args && b.env == p.env && b.kind == p.kind);
+        if stock || (p.args.is_empty() && p.env.is_empty()) {
+            continue;
+        }
+        let profile =
+            serde_json::to_string(&(&p.kind, &p.command, &p.args, &p.env)).unwrap_or_default();
+        out.push((
+            TrustItem {
+                node_id,
+                kind: TrustKind::CustomHarness,
+                detail: format!(
+                    "uses harness {} with its own args or env on this machine",
+                    p.id
+                ),
+            },
+            format!("{id}={profile}"),
+        ));
+    }
+    out
+}
+
 #[derive(Serialize)]
 struct NodePrint {
     id: String,
     permission_mode: PermissionMode,
     bash_tools: Vec<String>,
     working_dir: Option<String>,
+    shell_prompt: Option<String>,
 }
 
 #[derive(Serialize)]
 struct GraphPrint {
     default_permission_mode: PermissionMode,
     nodes: Vec<NodePrint>,
+}
+
+/// [`fingerprint`] with the folder- and machine-dependent parts.
+pub fn fingerprint_with(graph: &Graph, extra: &[(TrustItem, String)]) -> String {
+    let mut parts: Vec<&str> = extra.iter().map(|(_, p)| p.as_str()).collect();
+    parts.sort_unstable();
+    if parts.is_empty() {
+        return fingerprint(graph);
+    }
+    sha_hex(format!("{}\u{1f}{}", fingerprint(graph), parts.join("\u{1f}")).as_bytes())
 }
 
 /// sha256 (lower-case hex) of the canonical JSON of the elevated fields.
@@ -127,6 +273,7 @@ pub fn fingerprint(graph: &Graph) -> String {
             permission_mode: n.permission_mode,
             bash_tools: bash_entries(n.allowed_tools.as_ref()),
             working_dir: absolute_wd(working_dir_of(n)),
+            shell_prompt: shell_prompt(&n.prompt).map(|_| n.prompt.clone()),
         })
         .collect();
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
@@ -158,19 +305,28 @@ fn key(graph_dir: &Path) -> String {
     graph_dir.display().to_string()
 }
 
+fn extra_of(data_dir: &Path, graph_dir: &Path, graph: &Graph) -> Vec<(TrustItem, String)> {
+    environment_items(graph_dir, graph, &crate::harness::store::list(data_dir))
+}
+
 /// Trust status of `graph` stored in canonical folder `graph_dir`.
 pub fn status(data_dir: &Path, graph_dir: &Path, graph: &Graph) -> TrustStatus {
-    let items = trust_items(graph);
+    let extra = extra_of(data_dir, graph_dir, graph);
+    let items: Vec<TrustItem> = trust_items(graph)
+        .into_iter()
+        .chain(extra.iter().map(|(i, _)| i.clone()))
+        .collect();
     let needs_consent = items.iter().any(|i| !i.kind.is_informational());
-    let trusted =
-        !needs_consent || load_store(data_dir).get(&key(graph_dir)) == Some(&fingerprint(graph));
+    let trusted = !needs_consent
+        || load_store(data_dir).get(&key(graph_dir)) == Some(&fingerprint_with(graph, &extra));
     TrustStatus { trusted, items }
 }
 
 /// Record the user's consent to the current elevated settings of `graph`.
 pub fn trust(data_dir: &Path, graph_dir: &Path, graph: &Graph) -> AppResult<()> {
+    let extra = extra_of(data_dir, graph_dir, graph);
     let mut store = load_store(data_dir);
-    store.insert(key(graph_dir), fingerprint(graph));
+    store.insert(key(graph_dir), fingerprint_with(graph, &extra));
     write_json(&data_dir.join(TRUST_FILE), &store)
 }
 
@@ -274,6 +430,71 @@ mod tests {
         assert!(st.trusted);
         assert_eq!(st.items.len(), 1);
         assert_eq!(st.items[0].kind, TrustKind::ClaudeBinInGraph);
+    }
+
+    #[test]
+    fn shell_prompts_need_consent_and_slash_prompts_are_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = graph(json!([
+            { "id": "a", "prompt": "  !curl x | sh" },
+            { "id": "b", "prompt": "/compact" },
+            { "id": "c", "prompt": "say !hi" }
+        ]));
+        let st = status(tmp.path(), Path::new("/g"), &g);
+        let kinds: Vec<(Option<&str>, TrustKind)> = st
+            .items
+            .iter()
+            .map(|i| (i.node_id.as_deref(), i.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (Some("a"), TrustKind::ShellPrompt),
+                (Some("b"), TrustKind::SlashPrompt)
+            ]
+        );
+        assert!(!st.trusted);
+        let only_slash = graph(json!([{ "id": "b", "prompt": "/compact" }]));
+        assert!(status(tmp.path(), Path::new("/g"), &only_slash).trusted);
+    }
+
+    #[test]
+    fn shipped_project_settings_need_consent_and_changes_revoke_it() {
+        let data = tempfile::tempdir().unwrap();
+        let gdir = tempfile::tempdir().unwrap();
+        let g = graph(json!([{ "id": "a" }]));
+        assert!(status(data.path(), gdir.path(), &g).trusted);
+        std::fs::create_dir_all(gdir.path().join(".claude")).unwrap();
+        std::fs::write(gdir.path().join(".claude/settings.local.json"), "{}").unwrap();
+        std::fs::write(gdir.path().join(".mcp.json"), "{}").unwrap();
+        let st = status(data.path(), gdir.path(), &g);
+        assert!(!st.trusted);
+        assert_eq!(
+            st.items
+                .iter()
+                .filter(|i| i.kind == TrustKind::ProjectSettings)
+                .count(),
+            2
+        );
+        trust(data.path(), gdir.path(), &g).unwrap();
+        assert!(status(data.path(), gdir.path(), &g).trusted);
+        std::fs::write(gdir.path().join(".mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
+        assert!(!status(data.path(), gdir.path(), &g).trusted);
+    }
+
+    #[test]
+    fn custom_harness_args_need_consent_but_stock_builtins_do_not() {
+        let mut stock = crate::harness::profile::builtins();
+        let g = graph(json!([{ "id": "a", "harness": "codex" }]));
+        let items = environment_items(Path::new("/g"), &g, &stock);
+        assert!(items.is_empty(), "{items:?}");
+        if let Some(codex) = stock.iter_mut().find(|p| p.id == "codex") {
+            codex.args = vec!["--dangerously-bypass-approvals-and-sandbox".into()];
+        }
+        let items = environment_items(Path::new("/g"), &g, &stock);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0.kind, TrustKind::CustomHarness);
+        assert_eq!(items[0].0.node_id.as_deref(), Some("a"));
     }
 
     #[test]

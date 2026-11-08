@@ -109,6 +109,12 @@ claude -p "<short instruction>" --output-format stream-json --verbose \
   without using this MCP server"), after `start`. Both end with "Enter to confirm · Esc to
   cancel".
 - Typing `text\r` into the pty submits it as a prompt; the reply's Stop hook follows.
+- Shell ("bash") mode, verified 2026-11-08 (2.1.319, Windows 11, nothing submitted): typing
+  `!echo hi` as the first characters switches the box to shell mode (the glyph becomes `!`,
+  "! for shell mode" shows); a **bracketed paste** starting with `!` does the same; a leading
+  space (` !echo hi`) does **not** (the text stays a normal prompt). The app therefore treats
+  a node prompt whose first non-space character is `!` as a trust item, and never types a
+  reply's choice label (agent text) that starts with `!`, `/` or `#`.
 - Bracketed paste `ESC[200~line one\nline two ESC[201~` followed (300 ms later) by `\r` is
   submitted as **one** prompt (both lines in the prompt box, one reply, one `stop`).
 - When the app itself runs inside a Claude Code session, the child shows "Transcript saving

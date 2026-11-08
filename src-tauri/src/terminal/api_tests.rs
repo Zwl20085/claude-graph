@@ -10,6 +10,7 @@ fn info(sid: &str, nodes: &[&str]) -> TerminalSession {
         node_ids: nodes.iter().map(|n| n.to_string()).collect(),
         status: SessionStatus::Starting,
         pid: None,
+        alive: false,
         current_node: None,
         harness: "claude".into(),
         pending_prompt: None,

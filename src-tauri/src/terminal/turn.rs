@@ -39,6 +39,18 @@ const TRANSCRIPT_QUIET: Duration = Duration::from_secs(2);
 const CLEAR_QUIET: Duration = Duration::from_millis(300);
 /// An interrupted turn (no end signal) counts after this much quiet.
 const INTERRUPT_QUIET: Duration = Duration::from_secs(2);
+/// Hook-stop harnesses: a turn whose stop line never came ends after this
+/// much quiet with an idle screen and no dialog.
+pub const STOP_INFER_QUIET: Duration = Duration::from_secs(90);
+/// Node event when a turn's end is inferred (no stop signal came).
+pub const STOP_INFERRED: &str =
+    "stop_inferred: no end-of-turn signal for 90 s and the window is idle; the turn counts as ended";
+/// Node event when an answer reached the window but no dialog was drawn to
+/// confirm it.
+pub const ANSWER_UNCONFIRMED: &str =
+    "answer_unconfirmed: the keys were sent but the window shows no dialog to confirm them; check the window";
+/// Refusal when the dialog cannot be answered safely from the app.
+pub const ANSWER_IN_WINDOW: &str = "answer this one in the window";
 /// The question of an interrupted turn.
 pub const INTERRUPTED_QUESTION: &str =
     "The turn was interrupted. What should the agent do instead?";
@@ -61,6 +73,9 @@ pub(super) struct Turn {
     mark: u64,
     /// Transcript offset where the node's first message began.
     from: u64,
+    /// Claude Code transcript length at the latest submit (the turn's
+    /// entries start there).
+    tr_since: Option<u64>,
     started: SystemTime,
     submitted: Instant,
     convo: Vec<Exchange>,
@@ -85,6 +100,7 @@ impl Turn {
             expect: typed.to_string(),
             mark,
             from,
+            tr_since: None,
             started,
             submitted: Instant::now(),
             convo: vec![Exchange {
@@ -146,12 +162,18 @@ impl Session {
             if let Some(end) = self.on_hooks(node, &mut t, lines).await {
                 return end;
             }
-            if let StopSignal::Quiet(d) = self.behavior.stop {
-                let busy = t.pending.as_ref().is_some_and(Pending::is_reply);
-                if !busy && t.submitted.elapsed() >= d && self.quiet_for(d) {
-                    if let Some(end) = self.on_stop(node, &mut t, None).await {
-                        return end;
-                    }
+            // A pending prompt (question or dialog) means the turn is not over.
+            let busy = t.pending.is_some();
+            let quiet_stop = match self.behavior.stop {
+                StopSignal::Quiet(d) => t.submitted.elapsed() >= d && self.quiet_for(d),
+                StopSignal::Hook => self.stop_inferred(&t),
+            };
+            if !busy && quiet_stop {
+                if self.behavior.stop == StopSignal::Hook {
+                    self.event(NodeEventKind::Notification, STOP_INFERRED.to_string());
+                }
+                if let Some(end) = self.on_stop(node, &mut t, None).await {
+                    return end;
                 }
             }
             self.check_interrupted(&mut t).await;
@@ -195,6 +217,7 @@ impl Session {
                 Hook::Submit => {
                     t.mark = self.output_mark();
                     t.submitted = Instant::now();
+                    t.tr_since = self.transcript_len();
                     let text = line.field("prompt");
                     if let Some(p) = t.pending.take_if(|p| p.is_reply()) {
                         let answer = QuestionAnswer {
@@ -251,6 +274,24 @@ impl Session {
         self.pty.as_ref().map_or(0, |p| p.output.mark())
     }
 
+    /// Safety net for hook-stop harnesses: [`STOP_INFER_QUIET`] of quiet
+    /// since the submit, the input box idle and no dialog drawn.
+    fn stop_inferred(&self, t: &Turn) -> bool {
+        if t.submitted.elapsed() < STOP_INFER_QUIET || !self.quiet_for(STOP_INFER_QUIET) {
+            return false;
+        }
+        let Some(pty) = self.pty.as_ref() else {
+            return false;
+        };
+        let markers = pty.output.markers();
+        pty.output.screen().idle()
+            && dialog::parse(&pty.output.rows(), &markers.idle, &markers.style).is_none()
+    }
+
+    fn transcript_len(&self) -> Option<u64> {
+        self.transcript.as_ref().map(|tr| tr.file_len())
+    }
+
     /// The end of a reply: classify its final text.
     async fn on_stop(
         &mut self,
@@ -264,10 +305,11 @@ impl Session {
             self.clear_prompt(&t.node_id, &p, answer, via, true);
         }
         self.settle().await;
+        let since = t.tr_since;
         let text = text.or_else(|| {
             let tr = self.transcript.as_mut()?;
             tr.refresh();
-            tr.last_assistant_text()
+            tr.last_assistant_text_since(since)
         });
         if let Some(last) = t.convo.last_mut() {
             last.reply = text.clone();
@@ -400,17 +442,18 @@ impl Session {
         let now = found(screen, tool.as_ref(), quiet >= TRANSCRIPT_QUIET);
         match (t.pending.take(), now) {
             (None, Some(f)) => self.open_dialog(t, f),
-            (Some(Pending::Dialog { prompt, sig, .. }), Some(f)) if f.sig == sig => {
-                let prompt = crate::contract::DialogPrompt {
-                    selected: f.prompt.selected,
-                    ..prompt
-                };
-                t.pending = Some(Pending::Dialog {
-                    prompt,
-                    screen: f.screen.map(Box::new),
-                    sig,
-                });
+            (Some(old), Some(f)) if f.same_as(&old) && self.answered_here(t, &old) => {
+                // The same dialog again after an answer from the app: a new
+                // prompt (another call with the same labels, or the answer
+                // did not take), never the old one with its old header.
+                if quiet >= OPEN_QUIET {
+                    self.close_dialog(t, &old);
+                    self.open_dialog(t, f);
+                } else {
+                    t.pending = Some(old);
+                }
             }
+            (Some(old), Some(f)) if f.same_as(&old) => self.update_dialog(t, old, f),
             (Some(old), Some(f)) => {
                 self.close_dialog(t, &old);
                 if quiet >= OPEN_QUIET {
@@ -436,8 +479,54 @@ impl Session {
             prompt,
             screen: f.screen.map(Box::new),
             sig: f.sig,
+            tool_id: f.tool_id,
+            questions: f.questions,
         };
         self.open_prompt(&t.node_id, &pending);
+        t.pending = Some(pending);
+    }
+
+    /// `old` was answered from the app (its answer is waiting to clear).
+    fn answered_here(&self, t: &Turn, old: &Pending) -> bool {
+        t.answered.as_ref().is_some_and(|(id, _)| id == old.id())
+    }
+
+    /// The same dialog redrawn: the highlighted row, and the tool details
+    /// once the transcript names the call (published again).
+    fn update_dialog(&mut self, t: &mut Turn, old: Pending, f: crate::terminal::prompts::Found) {
+        let Pending::Dialog {
+            prompt,
+            sig,
+            tool_id,
+            questions,
+            ..
+        } = old
+        else {
+            t.pending = Some(old);
+            return;
+        };
+        let learned = tool_id.is_none() && f.tool_id.is_some();
+        let prompt = if learned {
+            crate::contract::DialogPrompt {
+                id: prompt.id,
+                ..f.prompt
+            }
+        } else {
+            crate::contract::DialogPrompt {
+                selected: f.prompt.selected,
+                ..prompt
+            }
+        };
+        let pending = Pending::Dialog {
+            prompt,
+            screen: f.screen.map(Box::new),
+            sig,
+            tool_id: tool_id.or(f.tool_id),
+            questions: if learned { f.questions } else { questions },
+        };
+        if learned {
+            self.republish_prompt(&t.node_id, &pending);
+        }
         t.pending = Some(pending);
     }
 
@@ -483,9 +572,21 @@ impl Session {
                     };
                     let halted = match p {
                         Pending::Reply(q) => self.answer_reply(t, &q, &answer).await,
+                        Pending::Dialog {
+                            screen: None,
+                            questions,
+                            ..
+                        } if questions > 1 => {
+                            // Known from the transcript only: which of the
+                            // call's questions the window shows is unknown.
+                            self.event(NodeEventKind::Stderr, ANSWER_IN_WINDOW.to_string());
+                            None
+                        }
                         Pending::Dialog { prompt, screen, .. } => {
+                            let blind = screen.is_none();
                             let screen = screen.map(|b| *b).unwrap_or_else(|| synthetic(&prompt));
-                            self.answer_dialog(t, &prompt, &screen, &answer).await
+                            self.answer_dialog(t, &prompt, &screen, &answer, blind)
+                                .await
                         }
                     };
                     if let Some(end) = halted {
@@ -503,17 +604,34 @@ impl Session {
         q: &ReplyQuestion,
         a: &PromptAnswer,
     ) -> Option<End> {
+        let refuse = |s: &mut Self, why: String| {
+            s.event(NodeEventKind::Stderr, why);
+            None
+        };
         let (text, index) = match a {
             PromptAnswer::Text(s) => (s.clone(), None),
-            PromptAnswer::Choice(i) => (q.choices.get(*i)?.label.clone(), Some(*i)),
-            PromptAnswer::Choices(_) => return None,
+            PromptAnswer::Choice(i) => match q.choices.get(*i) {
+                Some(c) if crate::terminal::prompt_api::unsafe_to_type(&c.label) => {
+                    return refuse(self, crate::terminal::prompt_api::choice_refused(&c.label));
+                }
+                Some(c) => (c.label.clone(), Some(*i)),
+                None => return refuse(self, format!("no option {i}: answer not sent")),
+            },
+            PromptAnswer::Choices(_) => {
+                return refuse(self, "this question takes one answer, not several".into())
+            }
         };
         let typed = typed_for(&text);
         let shared = self.t.shared.clone();
         let _typing = shared.typing().await;
         let title = self.t.plan.title.clone();
         let (expect, ready) = (self.behavior.expect.clone(), self.behavior.ready_quiet);
-        let mut port = self.port(&t.node_id)?;
+        let Some(mut port) = self.port(&t.node_id) else {
+            return refuse(
+                self,
+                "the window is not ready for typing; answer in the window".into(),
+            );
+        };
         let delivery = Delivery::prompt_with(&typed, &title, expect, ready);
         let result = deliver(&mut port, &delivery).await;
         let carried = std::mem::take(&mut port.after_submit);
@@ -558,8 +676,12 @@ impl Session {
         prompt: &crate::contract::DialogPrompt,
         screen: &dialog::ScreenDialog,
         a: &PromptAnswer,
+        blind: bool,
     ) -> Option<End> {
-        let pty = self.pty.clone()?;
+        let Some(pty) = self.pty.clone() else {
+            self.event(NodeEventKind::Stderr, ANSWER_IN_WINDOW.to_string());
+            return None;
+        };
         let style = pty.output.markers().style.clone();
         let shared = self.t.shared.clone();
         let _typing = shared.typing().await;
@@ -567,6 +689,17 @@ impl Session {
             pty,
             kill: self.kill.clone(),
         };
+        // The dialog on screen must still be the one the user answered.
+        let on_screen = answer::DialogIo::dialog(&io);
+        if let Some(now) = &on_screen {
+            if !blind && now.signature() != screen.signature() {
+                self.event(
+                    NodeEventKind::Stderr,
+                    format!("the dialog in the window changed; {ANSWER_IN_WINDOW}"),
+                );
+                return None;
+            }
+        }
         let plain = prompt.kind == crate::contract::DialogKind::Text;
         let result = answer::answer(&mut io, screen, a, &style, plain).await;
         let (text, index) = match a {
@@ -583,7 +716,7 @@ impl Session {
             ),
         };
         match result {
-            Ok(Answered::Changed) => {
+            Ok(done @ (Answered::Changed | Answered::Unknown)) => {
                 let answer = QuestionAnswer {
                     ts: Utc::now(),
                     via: AnswerVia::App,
@@ -591,6 +724,9 @@ impl Session {
                     index,
                 };
                 t.answered = Some((prompt.id.clone(), answer));
+                if done == Answered::Unknown {
+                    self.event(NodeEventKind::Stderr, ANSWER_UNCONFIRMED.to_string());
+                }
                 None
             }
             Ok(Answered::Unchanged) => {

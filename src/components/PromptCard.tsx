@@ -5,7 +5,7 @@
  * prompt takes text, "Continue without answering" for a reply question, and
  * "Open window". A pressed button disables the card until the prompt clears.
  */
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { CircleHelp, Send, SquareTerminal } from 'lucide-react';
 import { promptLabels, promptTakesText, type PromptAnswer, type SessionPrompt } from '../types/contract';
 import { STATUS_COLORS } from '../lib/status';
@@ -15,6 +15,8 @@ import { btnCls, inputCls } from './ui';
 
 export const CONTINUE_LABEL = 'Continue without answering';
 export const CONTINUE_HINT = 'Treat the question as an offer: the node is done (status by its deliverables) and the next node starts.';
+/** Longest typed answer (the backend's `WRITE_MAX`). */
+export const ANSWER_MAX = 64 * 1024;
 const KIND_TEXT: Record<string, string> = {
   choice: 'asks you to choose',
   permission: 'asks for permission',
@@ -27,14 +29,14 @@ interface Props {
 }
 
 export function PromptCard({ prompt }: Props) {
-  const answering = useGraphStore((s) => s.promptAnswering);
+  const busy = useGraphStore((s) => s.promptAnswering.includes(prompt.prompt.id));
   const answer = useGraphStore((s) => s.answerPrompt);
   const continueNode = useGraphStore((s) => s.continueNode);
   const pushToast = useGraphStore((s) => s.pushToast);
   const [text, setText] = useState('');
   const [picked, setPicked] = useState<readonly number[]>([]);
   const p = prompt.prompt;
-  const busy = answering !== null;
+  const questionId = useId();
   const labels = promptLabels(p);
   const multi = p.type === 'dialog' && p.multi;
   const color = STATUS_COLORS.waiting;
@@ -52,9 +54,9 @@ export function PromptCard({ prompt }: Props) {
         <CircleHelp size={13} />Needs you · <span className="font-normal">{lead}</span>
       </p>
       {p.type === 'dialog' && p.header && <p className="text-[11px] text-[#9a9a9a]">{p.header}</p>}
-      <p className="whitespace-pre-wrap text-[#e5e5e5]">{p.question || '(no question text)'}</p>
+      <p id={questionId} className="whitespace-pre-wrap text-[#e5e5e5]">{p.question || '(no question text)'}</p>
       {labels.length > 0 && (
-        <div className="flex flex-col gap-1" role="group" aria-label="options">
+        <div className="flex flex-col gap-1" role="group" aria-labelledby={questionId}>
           {labels.map((c, i) =>
             multi ? (
               <label key={`${i}-${c.label}`} className="flex items-center gap-1.5" title={c.detail}>
@@ -95,6 +97,7 @@ export function PromptCard({ prompt }: Props) {
             aria-label="your answer"
             className={`${inputCls} resize-none`}
             rows={2}
+            maxLength={ANSWER_MAX}
             disabled={busy}
             value={text}
             placeholder={p.type === 'reply' ? 'Answer (sent to the session as your next message)' : 'Your own answer'}

@@ -73,14 +73,8 @@ fn assert_recovered(t: &Trial, run_id: &str, state: &RunState, steps: &[&str]) {
         running >= submitted,
         "running {running} before submit {submitted}"
     );
-    let hooks = std::fs::read_to_string(
-        t.tmp
-            .path()
-            .join("runs")
-            .join(run_id)
-            .join("sessions/s1/hooks.log"),
-    )
-    .unwrap();
+    let hooks =
+        std::fs::read_to_string(hooks_dir(t.tmp.path(), run_id, "s1").join("hooks.log")).unwrap();
     let words: Vec<&str> = hooks
         .lines()
         .map(|l| l.split_whitespace().next().unwrap_or(""))

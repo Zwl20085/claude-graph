@@ -642,8 +642,7 @@ literal rule, which would make every `from` run fail). At most `max_parallel` se
 starting/running at once; a session that is `done` no longer counts (its process stays up).
 
 **One session** (`session.rs`, `startup.rs`, `node.rs`):
-1. `runs/<run>/sessions/<sid>/hooks.json` (SessionStart/UserPromptSubmit/Stop/Notification
-   hooks that `echo start|submit|stop|notify>> "<abs>/hooks.log"`, forward slashes), `session.json`
+1. hooks.json in the session's hooks folder (see "Turn outcomes", *Hook payloads*), `session.json`
    `{ sid, title, node_ids, pid, status, started_at, finished_at }`, `transcript.log`
    (raw pty output, append).
 2. The backend opens (creates or focuses) the window `term-<run>-<sid>`, url
@@ -960,10 +959,17 @@ The facts the design rests on are in docs/CLAUDE_CLI_NOTES.md "Turn outcomes" (v
 the real CLI 2.1.319).
 
 **Signals.**
-1. *Hook payloads.* Hook commands are `"<app>" --notify "<hooks.log>" --event <word> --stdin`
-   (`launch.rs`: the word must be start/submit/stop/notify, stdin at most 4 MiB, re-serialized
-   as one line of compact JSON; the Codex form `--notify <file> [json]` is unchanged). When the
-   app binary is not a file (or a path holds a quote) the old `echo <word>` form is written.
+1. *Hook payloads.* Hook commands are `"<app>" --notify --event <word> --stdin`: no session
+   path goes into a shell string; the app resolves hooks.log from `CLAUDE_GRAPH_SESSION_DIR`,
+   set on the session process (`launch.rs`: the word must be start/submit/stop/notify, stdin at
+   most 4 MiB, re-serialized as one line of compact JSON; the Codex form `--notify <file>
+   [json]`, run without a shell, is unchanged). The app path must hold only
+   `A-Za-z0-9 _.:/\-~`; otherwise (or when it is not a file) the `echo <word>>> "<log>"` form is
+   written, and only when the log path passes the same check, else the session fails to start
+   naming the character. hooks.json/hooks.log live in `<data_dir>/claude-graph/sessions/
+   <run>-<graph hash>/<sid>/`, outside the graph folder the agents can write to
+   (`runs/<run>/sessions/<sid>/hooks.path` points there). A transcript path from a payload is
+   read only when it is a local `.jsonl` under the user's home or that sessions folder.
    Tests point `notify_exe` at the built binary (`tests/common` `fresh_app`), never the test
    binary. `HookLog` reads by byte offset. `HookLine::final_text` = Stop
    `last_assistant_message` (Claude Code) or notify `last-assistant-message` (Codex).

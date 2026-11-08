@@ -3,7 +3,7 @@
  * loaded on app start and replaced by the list every save / delete returns.
  * Failures become error toasts; save also returns its message for inline use.
  */
-import type { HarnessCheck, HarnessProfile } from '../types/contract';
+import { HARNESS_KINDS, type HarnessCheck, type HarnessProfile } from '../types/contract';
 import type { Api } from '../lib/api';
 import { BUILTIN_HARNESSES } from '../lib/harness';
 import { errorMessage } from './runHelpers';
@@ -24,20 +24,47 @@ export interface HarnessActions {
 
 type Toast = (kind: 'error' | 'success', text: string) => void;
 
+/** Shape check of one profile from the backend. */
+export function isHarnessProfile(v: unknown): v is HarnessProfile {
+  if (typeof v !== 'object' || v === null) return false;
+  const p = v as Record<string, unknown>;
+  return (
+    typeof p.id === 'string' &&
+    typeof p.label === 'string' &&
+    (HARNESS_KINDS as readonly unknown[]).includes(p.kind) &&
+    Array.isArray(p.args) &&
+    typeof p.env === 'object' &&
+    p.env !== null
+  );
+}
+
+/** The well-formed profiles of a backend list (others dropped with a warning). */
+export function validProfiles(list: unknown): HarnessProfile[] {
+  if (!Array.isArray(list)) {
+    console.warn('ignored a malformed harness list', list);
+    return [];
+  }
+  const ok = list.filter(isHarnessProfile);
+  if (ok.length !== list.length) console.warn('ignored malformed harness profiles', list.filter((p) => !isHarnessProfile(p)));
+  return ok;
+}
+
 export const INITIAL_HARNESSES: HarnessState = { harnesses: BUILTIN_HARNESSES };
 
 export function createHarnessActions(api: Api, set: (patch: Partial<HarnessState>) => void, toast: Toast): HarnessActions {
   return {
     loadHarnesses: async () => {
       try {
-        set({ harnesses: await api.listHarnesses() });
+        const list = validProfiles(await api.listHarnesses());
+        if (list.length > 0) set({ harnesses: list });
       } catch (err) {
         toast('error', `Could not load harness profiles: ${errorMessage(err)}`);
       }
     },
     saveHarness: async (profile) => {
       try {
-        set({ harnesses: await api.saveHarness(profile) });
+        const list = validProfiles(await api.saveHarness(profile));
+        if (list.length > 0) set({ harnesses: list });
         toast('success', `Saved harness ${profile.label}.`);
         return null;
       } catch (err) {
@@ -48,7 +75,8 @@ export function createHarnessActions(api: Api, set: (patch: Partial<HarnessState
     },
     deleteHarness: async (id) => {
       try {
-        set({ harnesses: await api.deleteHarness(id) });
+        const list = validProfiles(await api.deleteHarness(id));
+        if (list.length > 0) set({ harnesses: list });
         return true;
       } catch (err) {
         toast('error', `Could not delete harness ${id}: ${errorMessage(err)}`);

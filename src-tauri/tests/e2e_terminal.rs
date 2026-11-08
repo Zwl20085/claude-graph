@@ -122,11 +122,14 @@ async fn terminal_run_types_messages_in_order_and_keeps_sessions_alive() {
     )
     .unwrap();
     assert_eq!(session["status"], "done");
-    assert!(dir
+    // hooks.json lives outside the graph folder; the session folder points at it.
+    let hooks = hooks_dir(dir, &run_id, "s2");
+    assert!(hooks.join("hooks.json").is_file());
+    assert!(!dir
         .join("runs")
         .join(&run_id)
         .join("sessions/s2/hooks.json")
-        .is_file());
+        .exists());
     let log = fs::read_to_string(dir.join("GRAPH_LOG.md")).unwrap();
     assert_eq!(
         log.lines()

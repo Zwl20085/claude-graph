@@ -3,7 +3,7 @@
  * Claude Code session (`pty_write` with "\r") while that session is alive;
  * the conversation itself lives in the session window.
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Send, SquareTerminal } from 'lucide-react';
 import { sessionsOf } from '../types/contract';
 import { api } from '../lib/api';
@@ -16,6 +16,8 @@ import { openSessionWindow } from './SessionChips';
 import { btnCls, inputCls } from './ui';
 
 export const SESSION_CLOSED_TEXT = 'Session closed; rerun to talk';
+/** Composer hint while a dialog that takes no typed answer is open. */
+export const OPTIONS_ONLY_TEXT = 'this prompt takes one of its options';
 
 /** One line for the TUI: a raw newline would submit early, so line breaks become spaces. */
 export function terminalLine(text: string): string {
@@ -34,10 +36,28 @@ export function TerminalMessages({ nodeId }: { nodeId: string }) {
   const hint = alive && session ? `Typed into the Claude Code window “${session.title || session.sid}”.` : SESSION_CLOSED_TEXT;
   const toast = (text: string): void => pushToast('error', text);
 
+  const answerPrompt = useGraphStore((s) => s.answerPrompt);
+  const dialog = pending !== null && pending.prompt.type === 'dialog' ? pending.prompt : null;
+  // Keys typed into an open dialog would pick its highlighted option: only a
+  // dialog with a free-text option takes the composer's text (as its answer).
+  const blocked = dialog !== null && !dialog.allows_text;
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const pendingId = pending?.prompt.id ?? null;
+  const hadPending = useRef(pendingId);
+  useEffect(() => {
+    // The card went away (answered): keep the keyboard in the Messages tab.
+    if (hadPending.current !== null && pendingId === null) composerRef.current?.focus();
+    hadPending.current = pendingId;
+  }, [pendingId]);
+
   const send = async (): Promise<void> => {
     const line = terminalLine(draft);
-    if (line === '' || !alive || !session || runId === null) return;
+    if (line === '' || !alive || !session || runId === null || blocked) return;
     setDraft('');
+    if (dialog !== null && pending !== null) {
+      if (!(await answerPrompt(pending, { text: line }))) setDraft(line);
+      return;
+    }
     try {
       await api.ptyWrite(runId, session.sid, `${line}\r`);
       setSent((list) => [...list, line]);
@@ -49,7 +69,7 @@ export function TerminalMessages({ nodeId }: { nodeId: string }) {
 
   return (
     <div className="flex h-full flex-col gap-2">
-      {pending && <PromptCard prompt={pending} />}
+      {pending && <PromptCard key={pending.prompt.id} prompt={pending} />}
       <div className="min-h-0 flex-1 space-y-2 overflow-auto">
         {sent.length === 0 && <p className="text-[12px] text-[#777]">The conversation is in the session window.</p>}
         {sent.map((text, i) => (
@@ -59,7 +79,7 @@ export function TerminalMessages({ nodeId }: { nodeId: string }) {
         ))}
       </div>
       <p className="text-[11px] text-[#9a9a9a]" role="status">
-        {hint}
+        {blocked ? `A dialog is open: ${OPTIONS_ONLY_TEXT}.` : hint}
       </p>
       {alive && session && runId !== null && (
         <button
@@ -75,9 +95,10 @@ export function TerminalMessages({ nodeId }: { nodeId: string }) {
           aria-label="message to this node"
           className={`${inputCls} resize-none`}
           rows={3}
-          disabled={!alive}
+          ref={composerRef}
+          disabled={!alive || blocked}
           value={draft}
-          placeholder={alive ? 'Type into the session (Ctrl+Enter to send)' : SESSION_CLOSED_TEXT}
+          placeholder={blocked ? OPTIONS_ONLY_TEXT : alive ? 'Type into the session (Ctrl+Enter to send)' : SESSION_CLOSED_TEXT}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -86,7 +107,7 @@ export function TerminalMessages({ nodeId }: { nodeId: string }) {
             }
           }}
         />
-        <button className={`${btnCls} self-end bg-[#3b82f6] text-white`} disabled={!alive || draft.trim() === ''} onClick={() => void send()}>
+        <button className={`${btnCls} self-end bg-[#3b82f6] text-white`} disabled={!alive || blocked || draft.trim() === ''} onClick={() => void send()}>
           <Send size={13} />Send
         </button>
       </div>

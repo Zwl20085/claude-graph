@@ -116,7 +116,7 @@ fn check_common(dir: &Path, run_id: &str, state: &RunState, rec: &Recorder) -> S
     assert_eq!(node.status, NodeStatus::Succeeded, "{:?}", node.reason);
     assert!(texts.iter().any(|t| t == "submitted"), "{texts:?}");
     let hooks =
-        std::fs::read_to_string(dir.join("runs").join(run_id).join("sessions/s1/hooks.log"))
+        std::fs::read_to_string(common::term::hooks_dir(dir, run_id, "s1").join("hooks.log"))
             .unwrap_or_default();
     println!("hooks.log:\n{hooks}");
     assert!(hooks.lines().any(|l| l.starts_with("stop")), "{hooks}");

@@ -84,6 +84,19 @@ impl Pty {
                 pixel_height: 0,
             })
             .map_err(|e| fail("could not open a pseudo terminal", e.to_string()))?;
+        if crate::claude_bin::is_batch_file(&spec.program) {
+            if let Err(c) = crate::claude_bin::batch_args_safe(&spec.args) {
+                return Err(AppError::new(
+                    "spawn_failed",
+                    format!(
+                        "{} is a batch file and an argument holds {c:?}, which cmd.exe would \
+                         interpret; point the harness at the program's .exe (or node and its \
+                         script) instead of the .cmd/.bat shim",
+                        spec.program.display()
+                    ),
+                ));
+            }
+        }
         let mut cmd = CommandBuilder::new(&spec.program);
         cmd.args(&spec.args);
         cmd.cwd(&spec.cwd);

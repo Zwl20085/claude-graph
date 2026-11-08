@@ -50,13 +50,21 @@ pub async fn run(
     (run_id, finish(join).await)
 }
 
-pub fn received(dir: &Path, run_id: &str, sid: &str) -> Vec<String> {
-    let path = dir
+/// The session's hooks folder (outside the graph folder), from the pointer
+/// file the session leaves in `runs/<run>/sessions/<sid>/hooks.path`.
+pub fn hooks_dir(dir: &Path, run_id: &str, sid: &str) -> std::path::PathBuf {
+    let pointer = dir
         .join("runs")
         .join(run_id)
         .join("sessions")
         .join(sid)
-        .join("fake-received.log");
+        .join("hooks.path");
+    let text = fs::read_to_string(&pointer).unwrap_or_default();
+    std::path::PathBuf::from(text.trim())
+}
+
+pub fn received(dir: &Path, run_id: &str, sid: &str) -> Vec<String> {
+    let path = hooks_dir(dir, run_id, sid).join("fake-received.log");
     fs::read_to_string(path)
         .unwrap_or_default()
         .lines()

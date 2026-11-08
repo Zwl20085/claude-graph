@@ -412,6 +412,7 @@ impl AppState {
             emitter,
             harnesses,
             notify_exe: self.notify_exe.clone(),
+            hooks_root: self.data_dir.join("sessions"),
             approval: None,
         });
         self.close_earlier_sessions(&ctx, &plans);
@@ -467,6 +468,7 @@ impl AppState {
             emitter,
             harnesses,
             notify_exe: self.notify_exe.clone(),
+            hooks_root: self.data_dir.join("sessions"),
             approval,
         });
         let state = initial_state(&ctx, &sched);
@@ -658,6 +660,7 @@ impl AppState {
             emitter,
             harnesses: self.harnesses(),
             notify_exe: self.notify_exe.clone(),
+            hooks_root: self.data_dir.join("sessions"),
             approval,
         });
         let run_loop = RunLoop::new(ctx, sched, state);

@@ -53,7 +53,7 @@ describe('PromptCard', () => {
     expect(() => button(CONTINUE_LABEL)).toThrow();
     await click(button('jest'));
     expect(answerPrompt).toHaveBeenCalledWith('R1', 's1', 'a-p1', { choice: 1 });
-    expect(store.getState().promptAnswering).toBe('a-p1');
+    expect(store.getState().promptAnswering).toEqual(['a-p1']);
     expect(button('vitest').disabled).toBe(true);
   });
 

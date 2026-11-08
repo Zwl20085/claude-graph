@@ -122,7 +122,9 @@ async fn run_once(
 
 fn report(dir: &std::path::Path, run_id: &str, rec: &Recorder, state: &RunState) -> Vec<String> {
     let session_dir = dir.join("runs").join(run_id).join("sessions").join("s1");
-    let hooks = std::fs::read_to_string(session_dir.join("hooks.log")).unwrap_or_default();
+    let hooks =
+        std::fs::read_to_string(common::term::hooks_dir(dir, run_id, "s1").join("hooks.log"))
+            .unwrap_or_default();
     let transcript =
         std::fs::read_to_string(session_dir.join("transcript.log")).unwrap_or_default();
     let plain = plain_tail(&transcript, 1500);
@@ -290,7 +292,7 @@ async fn real_claude_dialog_and_question_outcomes() {
         println!("--- {id} reply.md ---\n{reply}--- {id} questions.jsonl ---\n{questions}");
     }
     let hooks =
-        std::fs::read_to_string(dir.join("runs").join(&run_id).join("sessions/s1/hooks.log"))
+        std::fs::read_to_string(common::term::hooks_dir(dir, &run_id, "s1").join("hooks.log"))
             .unwrap_or_default();
     println!(
         "--- hooks.log (words) ---\n{}",

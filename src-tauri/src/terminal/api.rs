@@ -57,6 +57,8 @@ pub struct SessionShared {
     actions_rx: Mutex<Option<mpsc::UnboundedReceiver<PromptAction>>>,
     /// The window of a session without a pty (chained headless, dsh).
     view: Mutex<Option<Arc<View>>>,
+    /// The session's hooks folder (hooks.log), once created.
+    hooks_dir: Mutex<Option<PathBuf>>,
 }
 
 /// What the user decided about the session's pending prompt.
@@ -81,6 +83,7 @@ impl SessionShared {
             actions,
             actions_rx: Mutex::new(Some(actions_rx)),
             view: Mutex::new(None),
+            hooks_dir: Mutex::new(None),
             run_id: run_id.to_string(),
             graph_dir: graph_dir.to_path_buf(),
             info: Mutex::new(info),
@@ -115,6 +118,15 @@ impl SessionShared {
         self.actions
             .send(action)
             .map_err(|_| AppError::new("not_found", "the session has ended"))
+    }
+
+    pub fn set_hooks_dir(&self, dir: PathBuf) {
+        *lock(&self.hooks_dir) = Some(dir);
+    }
+
+    /// The session's hooks folder (`None` before the session started).
+    pub fn hooks_dir(&self) -> Option<PathBuf> {
+        lock(&self.hooks_dir).clone()
     }
 
     pub fn set_view(&self, view: Arc<View>) {

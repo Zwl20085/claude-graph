@@ -25,12 +25,16 @@ export const SESSION_COLORS: Record<SessionStatus, string> = {
 };
 
 /**
- * A session whose Claude Code process is still there to type into: starting
- * or running, or done while its process lives (`pid` is null once it is gone).
+ * A session still there to type into: starting or running, or done while it
+ * takes messages (`alive`; payloads without it: while its process has a pid).
  */
-export function isSessionAlive(s: Pick<TerminalSession, 'status' | 'pid'> | null | undefined): boolean {
+export function isSessionAlive(
+  s: Pick<TerminalSession, 'status' | 'pid' | 'alive'> | null | undefined,
+): boolean {
   if (s === null || s === undefined) return false;
-  return s.status === 'starting' || s.status === 'running' || (s.status === 'done' && s.pid !== null);
+  if (s.status === 'starting' || s.status === 'running') return true;
+  if (s.status !== 'done') return false;
+  return s.alive === undefined ? s.pid !== null : s.alive;
 }
 
 /** The session that contains `nodeId`, or null. */
