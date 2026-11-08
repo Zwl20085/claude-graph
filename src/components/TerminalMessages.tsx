@@ -10,6 +10,8 @@ import { api } from '../lib/api';
 import { isSessionAlive, sessionOfNode } from '../lib/sessions';
 import { useGraphStore } from '../store/graphStore';
 import { errorMessage } from '../store/runHelpers';
+import { promptOfNode } from '../store/promptSlice';
+import { PromptCard } from './PromptCard';
 import { openSessionWindow } from './SessionChips';
 import { btnCls, inputCls } from './ui';
 
@@ -23,6 +25,7 @@ export function terminalLine(text: string): string {
 export function TerminalMessages({ nodeId }: { nodeId: string }) {
   const runState = useGraphStore((s) => s.runState);
   const pushToast = useGraphStore((s) => s.pushToast);
+  const pending = useGraphStore((s) => promptOfNode(s.sessionPrompts, s.runState, nodeId));
   const [draft, setDraft] = useState('');
   const [sent, setSent] = useState<readonly string[]>([]);
   const session = sessionOfNode(sessionsOf(runState), nodeId);
@@ -46,6 +49,7 @@ export function TerminalMessages({ nodeId }: { nodeId: string }) {
 
   return (
     <div className="flex h-full flex-col gap-2">
+      {pending && <PromptCard prompt={pending} />}
       <div className="min-h-0 flex-1 space-y-2 overflow-auto">
         {sent.length === 0 && <p className="text-[12px] text-[#777]">The conversation is in the session window.</p>}
         {sent.map((text, i) => (

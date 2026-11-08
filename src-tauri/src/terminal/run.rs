@@ -80,6 +80,7 @@ fn session_info(p: &SessionPlan) -> TerminalSession {
         pid: None,
         current_node: None,
         harness: p.harness.clone(),
+        pending_prompt: None,
     }
 }
 
@@ -334,6 +335,7 @@ impl TerminalLoop {
             NodeStatus::Pending
             | NodeStatus::Queued
             | NodeStatus::Running
+            | NodeStatus::Waiting
             | NodeStatus::Failed
             | NodeStatus::Blocked
             | NodeStatus::Cancelled => false,

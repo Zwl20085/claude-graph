@@ -25,6 +25,9 @@ const KIND_COLORS: Record<NodeEventKind | 'raw', string> = {
   permission_denied: '#f59e0b',
   permission_prompt: '#f59e0b',
   permission_answered: '#f59e0b',
+  question: '#38bdf8',
+  dialog: '#38bdf8',
+  answer: '#38bdf8',
   raw: '#6b7280',
 };
 /** Kinds whose text is shown in amber too (permission traffic). */
@@ -33,6 +36,9 @@ const KIND_LABELS: Partial<Record<NodeEventKind, string>> = {
   permission_denied: 'DENIED',
   permission_prompt: 'ASK',
   permission_answered: 'ANSWER',
+  question: 'ASKS',
+  dialog: 'DIALOG',
+  answer: 'REPLY',
 };
 /** Column label of a line kind (default: the kind itself). */
 export function kindLabel(kind: NodeEventKind): string {

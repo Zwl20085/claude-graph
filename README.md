@@ -92,12 +92,36 @@ Code does everything else.
   tells the app when a turn is over. Then the next node's prompt goes in. No reply parsing,
   no `## Status:` lines, no flags you did not set: permission prompts, skills, hooks and
   the model come from your own Claude Code settings. When Claude asks you something, the
-  app notifies you and the window is right there.
+  app pauses that chain and shows the question (next section).
 - **Done means the files exist.** After the turn, a node with required deliverables is
   `succeeded` when they exist and `failed` otherwise; with `stop_on_failure` the chain
   stops there. Nothing else is judged.
 - **Still in the folder.** Each session keeps a raw transcript, its hooks file and the
   node timings under `runs/<run-id>/sessions/<sid>/`, next to the briefs and deliverables.
+
+### When the agent asks you something
+
+A turn can end in three ways, and the app tells them apart after every message it types:
+
+| Outcome | How the app sees it | The node | The chain |
+|---|---|---|---|
+| **done** | The turn ended (Stop hook / Codex notify) and the reply does not end with a question | `succeeded` or `failed` by its deliverables | goes on |
+| **question** | The turn ended and the reply's last lines ask you something (a `?`, "Should I…", "Let me know…", a numbered list of options) | `needs you` (blue) | paused until you answer |
+| **dialog** | The turn is still running and Claude Code shows a choice list or a permission prompt ("Do you want to proceed?", AskUserQuestion) | `needs you` | paused by the dialog itself |
+
+A toast says "Node X needs you"; **Show** selects the node, and its **Messages** tab shows the
+question with one button per option, a box for your own answer, and **Open window**. A dialog
+is answered with the keys Claude Code expects (verified with the real CLI); a question is
+answered by typing your answer into the session as the next message, and the node's turn
+continues. You can also answer directly in the window: the app notices and carries on.
+
+**Continue without answering** ends a node that asked a question as if the question were an
+offer: its status comes from its deliverables and the next node starts. The rule for offers
+is conservative on purpose: a reply that ends with "Want me to also add tests?" pauses the
+node, unless the node declares deliverables and they were all written; then the question
+counts as an offer, the node is `succeeded` and the chain goes on (the question is still
+listed in the Results tab, and you can reply in Messages). Every question and dialog, and how
+it was answered, is recorded in `runs/<run>/<node>/questions.jsonl`.
 
 Switch to **headless engine (advanced)** in the settings to get the one-process-per-node
 scheduler described next: explicit model, permission mode and tool list per node,

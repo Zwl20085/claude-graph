@@ -11,7 +11,7 @@ use std::time::Duration;
 use claude_graph_lib::claude_bin::ENV_CLAUDE_BIN;
 use claude_graph_lib::contract::{
     AppResult, AssistantState, Graph, NodeEvent, NodeEventKind, PermissionAnswered,
-    PermissionPrompt, PtyData, RunState,
+    PermissionPrompt, PtyData, RunState, SessionPrompt, SessionPromptCleared,
 };
 use claude_graph_lib::events::{Emitter, WindowSpec};
 use claude_graph_lib::run_api::{abs, AppState};
@@ -64,6 +64,10 @@ pub struct Recorder {
     pub prompts: Mutex<Vec<PermissionPrompt>>,
     /// "Ask me in the app": ids of `permission_answered` events.
     pub answered: Mutex<Vec<String>>,
+    /// Terminal mode: `session_prompt` events.
+    pub session_prompts: Mutex<Vec<SessionPrompt>>,
+    /// Terminal mode: `session_prompt_cleared` events.
+    pub cleared: Mutex<Vec<SessionPromptCleared>>,
 }
 
 impl Emitter for Recorder {
@@ -92,6 +96,12 @@ impl Emitter for Recorder {
     fn permission_answered(&self, answered: &PermissionAnswered) {
         self.answered.lock().unwrap().push(answered.id.clone());
     }
+    fn session_prompt(&self, prompt: &SessionPrompt) {
+        self.session_prompts.lock().unwrap().push(prompt.clone());
+    }
+    fn session_prompt_cleared(&self, cleared: &SessionPromptCleared) {
+        self.cleared.lock().unwrap().push(cleared.clone());
+    }
 }
 
 impl Recorder {
@@ -115,9 +125,11 @@ pub async fn finish(join: JoinHandle<RunState>) -> RunState {
 
 /// An app state with its own temp data folder (no user settings, no trust
 /// records), so tests never read or write the real app data.
+/// Hook commands and Codex's notify run the built app binary (never the
+/// test binary, which `current_exe` would name).
 pub fn fresh_app() -> AppState {
     let data = tempfile::tempdir().unwrap().keep();
-    AppState::new(data)
+    AppState::new(data).with_notify_exe(PathBuf::from(env!("CARGO_BIN_EXE_claude-graph")))
 }
 
 /// [`fresh_app`] that has already trusted the graph saved in `dir`.

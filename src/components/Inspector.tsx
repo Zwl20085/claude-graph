@@ -19,6 +19,21 @@ export const ID_HINT = 'Follows the title until you edit it, or until the node h
 export const BLOCKED_TEXT =
   'This node stopped and asked you something. Read its reply and answer in the Messages tab; a DONE reply will mark it succeeded.';
 
+export const WAITING_TEXT = 'This node asked you something. Answer it in the Messages tab (or in its window).';
+
+/** Shown while the selected node waits for the user in the shown run. */
+function WaitingBanner({ onOpenMessages }: { onOpenMessages: () => void }) {
+  const color = STATUS_COLORS.waiting;
+  return (
+    <div role="status" aria-label="node needs you" className="space-y-1 rounded border px-2 py-1.5 text-[12px]" style={{ borderColor: color, color }}>
+      <p>{WAITING_TEXT}</p>
+      <button className={`${btnCls} border`} style={{ borderColor: color }} onClick={onOpenMessages} aria-label="open Messages to answer">
+        Answer in Messages
+      </button>
+    </div>
+  );
+}
+
 /** Shown while the selected node is blocked in the shown run. */
 function BlockedBanner({ onOpenMessages }: { onOpenMessages: () => void }) {
   const color = STATUS_COLORS.blocked;
@@ -77,6 +92,7 @@ export function Inspector() {
   const node = useGraphStore((s) => s.graph?.nodes.find((n) => n.id === s.selectedNodeId) ?? null);
   const setTitle = useGraphStore((s) => s.setTitle);
   const blocked = useGraphStore((s) => node !== null && s.runState?.nodes[node.id]?.status === 'blocked');
+  const waiting = useGraphStore((s) => node !== null && s.runState?.nodes[node.id]?.status === 'waiting');
   const [tab, setTab] = useState<Tab>('Prompt');
   const [previewOpen, setPreviewOpen] = useState(false);
 
@@ -96,6 +112,7 @@ export function Inspector() {
         />
         <IdField key={node.id} node={node} />
         {blocked && <BlockedBanner onOpenMessages={() => setTab('Messages')} />}
+        {waiting && tab !== 'Messages' && <WaitingBanner onOpenMessages={() => setTab('Messages')} />}
       </div>
       <div className="flex border-b border-[#3c3c3c] text-[12px]" role="tablist" aria-label="Node editor">
         {TABS.map((t) => (

@@ -17,11 +17,14 @@ import type {
   PermissionAnswer,
   PermissionAnswered,
   PermissionPrompt,
+  PromptAnswer,
   PtyData,
   PtyReplay,
   RunState,
   RunSummary,
   RunTarget,
+  SessionPrompt,
+  SessionPromptCleared,
   TerminalSession,
   TrustStatus,
 } from '../types/contract';
@@ -77,6 +80,12 @@ export interface Api {
   answerPermission: (answer: PermissionAnswer) => Promise<void>;
   onPermissionPrompt: (handler: (prompt: PermissionPrompt) => void) => Promise<Unlisten>;
   onPermissionAnswered: (handler: (answered: PermissionAnswered) => void) => Promise<Unlisten>;
+  // Turn outcomes (TURN_CONTRACT).
+  answerPrompt: (run_id: string, sid: string, prompt_id: string, answer: PromptAnswer) => Promise<void>;
+  continueNode: (run_id: string, sid: string, node_id: string) => Promise<void>;
+  listSessionPrompts: (run_id: string) => Promise<SessionPrompt[]>;
+  onSessionPrompt: (handler: (prompt: SessionPrompt) => void) => Promise<Unlisten>;
+  onSessionPromptCleared: (handler: (cleared: SessionPromptCleared) => void) => Promise<Unlisten>;
 }
 
 /** True when running inside a Tauri WebView. */
@@ -91,6 +100,7 @@ export function selectApi(win: unknown = globalThis): { api: Api; mock: boolean 
   return {
     api: createMockIpc({
       broadcast: true,
+      simulatePrompts: true,
       exampleRunMode: 'as_file',
       openWindow: typeof open === 'function' ? (url, target) => void open.call(globalThis, url, target) : undefined,
     }),

@@ -120,6 +120,10 @@ pub struct Finished<'a> {
     pub finished_at: DateTime<Utc>,
     /// Transcript span of the turn (`from`, `to`), if the message was submitted.
     pub transcript: Option<(u64, u64)>,
+    /// Questions and dialogs of the node (questions.jsonl records).
+    pub questions: usize,
+    /// The node waited for the user at least once.
+    pub waited_for_user: bool,
 }
 
 /// summary.json and the GRAPH_LOG line (cost `-`).
@@ -142,6 +146,8 @@ pub fn record(ctx: &RunCtx, f: &Finished<'_>) -> AppResult<()> {
         permission_denials: Vec::new(),
         transcript_from: f.transcript.map(|t| t.0),
         transcript_to: f.transcript.map(|t| t.1),
+        questions: f.questions,
+        waited_for_user: f.waited_for_user,
     };
     let path: PathBuf = node_run_dir(&ctx.graph_dir, &ctx.run_id, f.node_id).join(SUMMARY_FILE);
     write_json(&path, &summary)?;

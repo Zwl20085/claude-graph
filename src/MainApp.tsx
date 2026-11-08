@@ -20,6 +20,8 @@ api.onPermissionPrompt((p) => store.getState().addPermissionPrompt(p)).catch(lis
 api
   .onPermissionAnswered((a) => typeof a?.id === 'string' && store.getState().removePermissionPrompt(a.id))
   .catch(listenFailed('permission_answered'));
+api.onSessionPrompt((p) => store.getState().addSessionPrompt(p)).catch(listenFailed('session_prompt'));
+api.onSessionPromptCleared((c) => store.getState().clearSessionPrompt(c)).catch(listenFailed('session_prompt_cleared'));
 void store.getState().init();
 
 export default function MainApp() {

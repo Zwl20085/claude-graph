@@ -12,6 +12,7 @@ fn info(sid: &str, nodes: &[&str]) -> TerminalSession {
         pid: None,
         current_node: None,
         harness: "claude".into(),
+        pending_prompt: None,
     }
 }
 

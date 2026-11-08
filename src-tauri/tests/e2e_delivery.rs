@@ -81,7 +81,10 @@ fn assert_recovered(t: &Trial, run_id: &str, state: &RunState, steps: &[&str]) {
             .join("sessions/s1/hooks.log"),
     )
     .unwrap();
-    let words: Vec<&str> = hooks.lines().map(str::trim).collect();
+    let words: Vec<&str> = hooks
+        .lines()
+        .map(|l| l.split_whitespace().next().unwrap_or(""))
+        .collect();
     assert_eq!(words, ["start", "submit", "stop"]);
 }
 

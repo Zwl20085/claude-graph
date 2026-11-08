@@ -14,6 +14,8 @@ import {
   EVENT_PERMISSION_PROMPT,
   EVENT_PTY_DATA,
   EVENT_RUN_STATE,
+  EVENT_SESSION_PROMPT,
+  EVENT_SESSION_PROMPT_CLEARED,
   isAppError,
   type AppError,
   type AppSettings,
@@ -29,11 +31,14 @@ import {
   type PermissionAnswer,
   type PermissionAnswered,
   type PermissionPrompt,
+  type PromptAnswer,
   type PtyData,
   type PtyReplay,
   type RunState,
   type RunSummary,
   type RunTarget,
+  type SessionPrompt,
+  type SessionPromptCleared,
   type TerminalSession,
   type TrustStatus,
 } from '../types/contract';
@@ -209,3 +214,26 @@ export const onPermissionPrompt = (handler: (prompt: PermissionPrompt) => void):
 /** Subscribe to `permission_answered`. */
 export const onPermissionAnswered = (handler: (answered: PermissionAnswered) => void): Promise<UnlistenFn> =>
   listen<PermissionAnswered>(EVENT_PERMISSION_ANSWERED, (e) => handler(e.payload));
+
+// ---------------------------------------------------------------------------
+// Turn outcomes (TURN_CONTRACT): questions and dialogs a terminal session waits on
+// ---------------------------------------------------------------------------
+
+/** Answer the pending prompt `prompt_id` of session `sid` (not_found when already gone, invalid_input when the answer does not fit). */
+export const answerPrompt = (run_id: string, sid: string, prompt_id: string, answer: PromptAnswer): Promise<void> =>
+  call('answer_prompt', { run_id, sid, prompt_id, answer });
+
+/** A node waiting on a reply question is done without an answer (status by deliverables). */
+export const continueNode = (run_id: string, sid: string, node_id: string): Promise<void> =>
+  call('continue_node', { run_id, sid, node_id });
+
+/** The prompts the live sessions of a run wait on. */
+export const listSessionPrompts = (run_id: string): Promise<SessionPrompt[]> => call('list_session_prompts', { run_id });
+
+/** Subscribe to `session_prompt`. */
+export const onSessionPrompt = (handler: (prompt: SessionPrompt) => void): Promise<UnlistenFn> =>
+  listen<SessionPrompt>(EVENT_SESSION_PROMPT, (e) => handler(e.payload));
+
+/** Subscribe to `session_prompt_cleared`. */
+export const onSessionPromptCleared = (handler: (cleared: SessionPromptCleared) => void): Promise<UnlistenFn> =>
+  listen<SessionPromptCleared>(EVENT_SESSION_PROMPT_CLEARED, (e) => handler(e.payload));

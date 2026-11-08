@@ -448,6 +448,38 @@ pub async fn open_session_window(
     term::open_session_window(state.terminals(), &*emitter(&app), &run_id, &sid)
 }
 
+/// Terminal mode: answer the question or dialog a session waits on.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn answer_prompt(
+    state: State<'_, AppState>,
+    run_id: String,
+    sid: String,
+    prompt_id: String,
+    answer: crate::contract::PromptAnswer,
+) -> AppResult<()> {
+    crate::terminal::prompt_api::answer_prompt(state.terminals(), &run_id, &sid, &prompt_id, answer)
+}
+
+/// Terminal mode: a node waiting on a reply question is done without an answer.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn continue_node(
+    state: State<'_, AppState>,
+    run_id: String,
+    sid: String,
+    node_id: String,
+) -> AppResult<()> {
+    crate::terminal::prompt_api::continue_node(state.terminals(), &run_id, &sid, &node_id)
+}
+
+/// Terminal mode: the prompts the live sessions of a run wait on.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_session_prompts(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> AppResult<Vec<crate::contract::SessionPrompt>> {
+    crate::terminal::prompt_api::list_session_prompts(state.terminals(), &run_id)
+}
+
 /// "Ask me in the app": the prompts waiting for the user, oldest first.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_permission_prompts(

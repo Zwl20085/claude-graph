@@ -83,6 +83,8 @@ export function composerState(status: NodeStatus | null): ComposerState {
   switch (status) {
     case 'running':
       return { enabled: true, hint: 'Delivered after the current turn finishes.' };
+    case 'waiting':
+      return { enabled: true, hint: 'The node asked you something; your message is its answer.' };
     case 'blocked':
       return { enabled: true, hint: 'The node asked you something. Reply here; a DONE reply marks it succeeded.' };
     case 'succeeded':

@@ -1,7 +1,7 @@
 {
   "name": "claude-graph",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -12,6 +12,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"

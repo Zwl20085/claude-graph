@@ -130,13 +130,18 @@ async function handle(text, ctx) {
       written += 1;
     }
   }
-  out(`\r\u001b[2K\u2022 done (${written} file(s) written)\r\n\r\n  Worked for 0s\r\n\r\n${composer('')}`);
+  // FAKE_QUESTION: the reply asks the user (screen and notify payload).
+  const asks = all.includes('FAKE_QUESTION');
+  const shown = asks ? 'Which framework should I use? 1. vitest 2. jest' : `done (${written} file(s) written)`;
+  out(`\r\u001b[2K\u2022 ${shown}\r\n\r\n  Worked for 0s\r\n\r\n${composer('')}`);
   if (ctx.notify) {
     runNotify(ctx.notify, {
       type: 'agent-turn-complete',
       'thread-id': ctx.thread,
       'input-messages': [text],
-      'last-assistant-message': 'done; said "ok" & then | more\nsecond line',
+      'last-assistant-message': asks
+        ? 'Which framework should I use?\n1. vitest\n2. jest'
+        : `done (${written} file(s) written); said "ok" & then | more\nsecond line`,
     });
   }
 }

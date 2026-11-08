@@ -12,7 +12,7 @@ use crate::contract::{AppResult, NodeEvent, NodeEventKind};
 use crate::events::Emitter;
 use crate::terminal::api::{session_closed, SessionShared};
 use crate::terminal::deliver::{deliver, Delivery, Halt, Outcome, Port, NOT_SUBMITTED};
-use crate::terminal::hooks::{Hook, HookLog, HOOKS_LOG};
+use crate::terminal::hooks::{Hook, HookLine, HookLog, HOOKS_LOG};
 use crate::terminal::live::{composer_text, Composer};
 use crate::terminal::message::{one_line, Typed};
 use crate::terminal::pty::Pty;
@@ -52,7 +52,7 @@ pub(super) async fn tick(
 pub(super) struct PtyPort<'a> {
     pub pty: Arc<Pty>,
     pub hooks: &'a mut HookLog,
-    pub after_submit: Vec<Hook>,
+    pub after_submit: Vec<HookLine>,
     /// The session's dialog announcement mark ([`Port::announced`]).
     pub announced: &'a mut Option<u64>,
     pub kill: watch::Receiver<bool>,
@@ -100,13 +100,14 @@ impl Port for PtyPort<'_> {
     }
 
     fn submitted(&mut self) -> bool {
-        let hooks = self.hooks.poll().unwrap_or_else(|e| {
+        let hooks = self.hooks.poll_lines().unwrap_or_else(|e| {
             log::warn!("reading {HOOKS_LOG} failed: {e}");
             Vec::new()
         });
-        match hooks.iter().position(|h| *h == Hook::Submit) {
+        match hooks.iter().position(|h| h.hook == Hook::Submit) {
             Some(i) => {
-                self.after_submit.extend_from_slice(&hooks[i + 1..]);
+                // The submit line too: its payload names the transcript.
+                self.after_submit.extend_from_slice(&hooks[i..]);
                 true
             }
             None => false,

@@ -196,3 +196,137 @@ async fn real_claude_delivery_waits_for_dialogs_and_is_confirmed() {
     }
     assert_eq!(app.terminals().live_count(), 0, "session not killed");
 }
+
+fn turns_graph() -> Graph {
+    serde_json::from_value(serde_json::json!({
+        "version": 1,
+        "name": "real-turns",
+        "settings": { "max_parallel": 1, "default_permission_mode": "claude_settings" },
+        "nodes": [
+            { "id": "ask", "title": "Ask", "model": "haiku", "position": { "x": 0, "y": 0 },
+              "prompt": "Use the AskUserQuestion tool to ask me whether to use A or B, then reply with my choice." },
+            { "id": "open", "title": "Open", "model": "haiku", "position": { "x": 0, "y": 100 },
+              "prompt": "Do not use any tool. Ask me one short open question about my favourite colour and end your reply with it." },
+        ],
+        "edges": [{ "id": "e1", "from": "ask", "to": "open" }],
+    }))
+    .expect("graph json")
+}
+
+/// Turn outcomes with the real CLI: AskUserQuestion becomes a `dialog`
+/// prompt answered from the app (option 2), a reply ending with a question
+/// becomes a `question` prompt, continued from the app.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "runs the real claude CLI interactively (two short haiku turns)"]
+async fn real_claude_dialog_and_question_outcomes() {
+    use claude_graph_lib::contract::{PromptAnswer, TurnPrompt};
+    use claude_graph_lib::terminal::prompt_api;
+    std::env::remove_var(ENV_CLAUDE_BIN);
+    let tmp = graph_dir(&turns_graph());
+    let dir = tmp.path();
+    let app = trusted_app(dir);
+    let rec = Arc::new(Recorder::default());
+    let t0 = Instant::now();
+    let (run_id, mut join) = app.start_by_mode(dir, RunTarget::All, rec.clone()).unwrap();
+    let mut handled = 0;
+    let state = loop {
+        assert!(t0.elapsed() < LIMIT, "run did not finish in {LIMIT:?}");
+        tokio::select! {
+            done = &mut join => break done.unwrap(),
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+        }
+        // Start-up dialogs (trust, MCP) only: the node dialogs are the app's.
+        let started = rec
+            .states
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|s| s.run_id == run_id)
+            .is_some_and(|s| s.nodes["ask"].status != NodeStatus::Queued);
+        if !started {
+            answer_dialogs(&app, &run_id).await;
+        }
+        let prompts = rec.session_prompts.lock().unwrap().clone();
+        for p in prompts.iter().skip(handled) {
+            handled += 1;
+            println!(
+                "[{:?}] prompt on {}: {}",
+                t0.elapsed(),
+                p.node_id,
+                serde_json::to_string(&p.prompt).unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            let terms = app.terminals();
+            let sent = match &p.prompt {
+                TurnPrompt::Dialog(d) => {
+                    let b = d.options.iter().position(|o| o.label == "B").unwrap_or(1);
+                    prompt_api::answer_prompt(
+                        terms,
+                        &run_id,
+                        &p.sid,
+                        &d.id,
+                        PromptAnswer::Choice(b),
+                    )
+                }
+                TurnPrompt::Reply(_) => {
+                    prompt_api::continue_node(terms, &run_id, &p.sid, &p.node_id)
+                }
+            };
+            println!("  answered: {sent:?}");
+        }
+    };
+    for id in ["ask", "open"] {
+        let reply =
+            std::fs::read_to_string(dir.join("runs").join(&run_id).join(id).join("reply.md"))
+                .unwrap_or_default();
+        let questions = std::fs::read_to_string(
+            dir.join("runs")
+                .join(&run_id)
+                .join(id)
+                .join("questions.jsonl"),
+        )
+        .unwrap_or_default();
+        println!("--- {id} reply.md ---\n{reply}--- {id} questions.jsonl ---\n{questions}");
+    }
+    let hooks =
+        std::fs::read_to_string(dir.join("runs").join(&run_id).join("sessions/s1/hooks.log"))
+            .unwrap_or_default();
+    println!(
+        "--- hooks.log (words) ---\n{}",
+        hooks
+            .lines()
+            .map(|l| l.split_whitespace().next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    println!(
+        "run {run_id}: {:?}; nodes {:?}",
+        state.status,
+        state
+            .nodes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.status))
+            .collect::<Vec<_>>()
+    );
+    let prompts = rec.session_prompts.lock().unwrap().clone();
+    assert!(
+        prompts.iter().any(|p| p.node_id == "ask" && matches!(&p.prompt, TurnPrompt::Dialog(d) if d.options.iter().any(|o| o.label == "B"))),
+        "no AskUserQuestion dialog: {prompts:?}"
+    );
+    assert!(
+        prompts
+            .iter()
+            .any(|p| p.node_id == "open" && matches!(p.prompt, TurnPrompt::Reply(_))),
+        "no reply question: {prompts:?}"
+    );
+    assert_eq!(state.nodes["ask"].status, NodeStatus::Succeeded);
+    assert_eq!(state.nodes["open"].status, NodeStatus::Succeeded);
+    let ask = std::fs::read_to_string(dir.join("runs").join(&run_id).join("ask/reply.md")).unwrap();
+    assert!(ask.contains('B'), "{ask}");
+    app.cancel_run(&run_id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while app.terminals().live_count() > 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

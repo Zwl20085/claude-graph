@@ -37,6 +37,7 @@ import * as ops from '../lib/graphOps';
 import { isRunActive } from '../lib/status';
 import { createHarnessActions, INITIAL_HARNESSES, type HarnessActions, type HarnessState } from './harnessSlice';
 import { createPermissionActions, INITIAL_PERMISSIONS, type PermissionActions, type PermissionState } from './permissionSlice';
+import { answerFailed, createPromptActions, INITIAL_PROMPTS, type PromptActions, type PromptState } from './promptSlice';
 import {
   acceptsRunState,
   addDenial,
@@ -64,6 +65,8 @@ export interface Toast {
   id: number;
   kind: ToastKind;
   text: string;
+  /** A toast about a node: it offers "Show", which selects the node. */
+  nodeId?: string;
 }
 export type ClaudeState = { kind: 'checking' } | { kind: 'ok'; check: ClaudeCheck } | { kind: 'error'; message: string };
 
@@ -131,11 +134,18 @@ export interface GraphActions {
   applyRunState: (rs: unknown) => void;
   appendEvent: (ev: NodeEvent) => void;
   clearEvents: (nodeId: string) => void;
-  pushToast: (kind: ToastKind, text: string) => void;
+  pushToast: (kind: ToastKind, text: string, nodeId?: string) => void;
   dismissToast: (id: number) => void;
 }
 
-export type GraphStore = GraphState & GraphActions & HarnessState & HarnessActions & PermissionState & PermissionActions;
+export type GraphStore = GraphState &
+  GraphActions &
+  HarnessState &
+  HarnessActions &
+  PermissionState &
+  PermissionActions &
+  PromptState &
+  PromptActions;
 
 const CLOSED: Pick<
   GraphState,
@@ -197,9 +207,10 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
     let bufferedStates = new Map<string, RunState>();
     let bufferedEvents: NodeEvent[] = [];
 
-    const pushToast = (kind: ToastKind, text: string): void => {
+    const pushToast = (kind: ToastKind, text: string, nodeId?: string): void => {
       toastSeq += 1;
-      set({ toasts: [...get().toasts, { id: toastSeq, kind, text }] });
+      const toast: Toast = nodeId === undefined ? { id: toastSeq, kind, text } : { id: toastSeq, kind, text, nodeId };
+      set({ toasts: [...get().toasts, toast] });
     };
 
     const doSave = async (): Promise<boolean> => {
@@ -374,6 +385,8 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
       ...createHarnessActions(api, set, pushToast),
       ...INITIAL_PERMISSIONS,
       ...createPermissionActions(api, set, get, pushToast),
+      ...INITIAL_PROMPTS,
+      ...createPromptActions(api, set, get, pushToast),
       saving: false,
       startingRun: false,
       claude: { kind: 'checking' },
@@ -592,11 +605,18 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
           return;
         }
         const { dir, runState, startingRun } = get();
-        if (acceptsRunState(rs, dir, runState)) showRun(rs);
+        if (acceptsRunState(rs, dir, runState)) {
+          showRun(rs);
+          void get().syncSessionPrompts(rs);
+        }
         else if (startingRun) bufferedStates = new Map(bufferedStates).set(rs.run_id, rs);
       },
       appendEvent: (ev) => {
         const { runState, startingRun } = get();
+        if (answerFailed(ev, get().sessionPrompts, get().promptAnswering)) {
+          set({ promptAnswering: null });
+          pushToast('warning', ev.text, ev.node_id);
+        }
         if (ev.run_id === runState?.run_id) addLine(ev);
         else if (startingRun) bufferedEvents = [...bufferedEvents, ev].slice(-LOG_CAP);
       },

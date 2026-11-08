@@ -106,7 +106,12 @@ async fn terminal_run_types_messages_in_order_and_keeps_sessions_alive() {
     );
     assert!(from < to, "{from}..{to}");
     let c_reply = fs::read_to_string(dir.join("runs").join(&run_id).join("c/reply.md")).unwrap();
-    assert!(c_reply.starts_with("> line one\n\n") && c_reply.contains("you said: line one"));
+    // The exact final text (Stop payload), every message line quoted.
+    assert!(
+        c_reply.starts_with("> line one\n> line two\n\n"),
+        "{c_reply}"
+    );
+    assert!(c_reply.contains("you said: line one"), "{c_reply}");
     let session: Value = serde_json::from_str(
         &fs::read_to_string(
             dir.join("runs")

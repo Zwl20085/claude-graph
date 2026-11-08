@@ -41,6 +41,15 @@ function BriefNodeView({ data, selected }: NodeProps<BriefFlowNode>) {
     >
       <div className="flex items-center gap-2 px-2 py-1" style={{ background: color }}>
         <span className="flex-1 truncate text-[13px] font-semibold text-white">{node.title || node.id}</span>
+        {status === 'waiting' && (
+          <span
+            className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[#38bdf8] text-[11px] font-bold text-black"
+            title="This node asked you something: answer it in the Messages tab."
+            aria-label="needs you"
+          >
+            ?
+          </span>
+        )}
         {harnessLabel !== null && (
           <span
             className="max-w-[110px] truncate rounded bg-black/40 px-1.5 text-[10px] text-white"

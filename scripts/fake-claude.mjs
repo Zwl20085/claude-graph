@@ -58,12 +58,15 @@
 // (the first leaves the text in the box); `--fake-dialog-ms=<n>` shows a
 // "Do you trust the files in this folder? Enter to confirm · Esc to exit"
 // dialog for n ms after SessionStart, discarding input, then the input box.
-import { execSync, spawn } from 'node:child_process';
+// The interactive mode lives in fake-claude-tty.mjs (hook payloads, the fake
+// transcript JSONL, and the turn-outcome markers FAKE_QUESTION, FAKE_DIALOG,
+// FAKE_PERMISSION, FAKE_OFFER).
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { createInterface } from 'node:readline';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 import { startAsk } from './fake-ask.mjs';
+import { interactive } from './fake-claude-tty.mjs';
 
 const VERSION = '2.1.0 (fake-claude)';
 const SCHEDULER_PREFIX = 'You are the work scheduler';
@@ -122,7 +125,7 @@ async function main() {
     return 0;
   }
   if (!process.argv.includes('-p')) {
-    return interactive();
+    return interactive({ findDeliverablesDir, findDeliverables, safeJoin });
   }
   const started = Date.now();
   const prompt = await readStdin();
@@ -360,127 +363,6 @@ async function scheduler(prompt, sessionId, started) {
     modelUsage: {},
     permission_denials: denials,
   });
-}
-
-/** argv plus the switches in `fake-claude-args.txt` in the cwd. */
-function interactiveArgs() {
-  let extra = [];
-  try {
-    extra = readFileSync(join(process.cwd(), 'fake-claude-args.txt'), 'utf8').split(/\s+/).filter(Boolean);
-  } catch {
-    // no file: argv only
-  }
-  return [...process.argv, ...extra];
-}
-
-const BOX = '\n>\u00a0';
-
-/** Interactive mode: see the header comment. */
-async function interactive() {
-  const args = interactiveArgs();
-  const dialogMs = Number(args.find((a) => a.startsWith('--fake-dialog-ms='))?.split('=')[1] ?? 0) || 0;
-  const state = {
-    swallow: args.includes('--fake-swallow-first'),
-    dropEnter: args.includes('--fake-drop-enter'),
-    held: null,
-    dialogUntil: 0,
-  };
-  const settingsPath = argValue('--settings');
-  const settings = settingsPath ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {};
-  const runHooks = (event) => {
-    for (const matcher of settings?.hooks?.[event] ?? []) {
-      for (const h of matcher.hooks ?? []) {
-        if (h.type === 'command') execSync(h.command, { stdio: 'ignore', windowsHide: true });
-      }
-    }
-  };
-  const received = join(settingsPath ? dirname(settingsPath) : process.cwd(), 'fake-received.log');
-  const out = (text) => process.stdout.write(text.replace(/\r?\n/g, '\r\n'));
-  out(`fake-claude ${VERSION} interactive (cwd ${process.cwd()})\n  ? for shortcuts`);
-  if (!process.argv.includes('--fake-no-start')) runHooks('SessionStart');
-  if (dialogMs > 0) {
-    state.dialogUntil = Date.now() + dialogMs;
-    out('\n\nDo you trust the files in this folder?\n\n \u276f Yes, proceed\n   No, exit\n\nEnter to confirm \u00b7 Esc to exit\n');
-    setTimeout(() => out(BOX), dialogMs);
-  } else {
-    out(BOX);
-  }
-  const PASTE_START = '\u001b[200~';
-  const PASTE_END = '\u001b[201~';
-  let paste = null;
-  const rl = createInterface({ input: process.stdin, terminal: false, crlfDelay: Infinity });
-  for await (const raw of rl) {
-    let line = raw.replace(/\r$/, '');
-    if (Date.now() < state.dialogUntil) continue; // the dialog eats input
-    if (line.includes('\u0015')) line = line.slice(line.lastIndexOf('\u0015') + 1);
-    if (paste === null && line.includes(PASTE_START)) {
-      paste = [];
-      line = line.replace(PASTE_START, '');
-    }
-    if (paste !== null) {
-      const end = line.includes(PASTE_END);
-      paste.push(line.replace(PASTE_END, ''));
-      if (!end) continue;
-      line = paste.join('\n');
-      paste = null;
-    }
-    const text = accept(line.trim(), state, out);
-    if (text !== null) await answer(text, runHooks, received, out);
-  }
-  return 0;
-}
-
-/** The prompt an input line submits, or null (swallowed, held, empty). */
-function accept(text, state, out) {
-  if (state.swallow) {
-    state.swallow = false;
-    out(BOX);
-    return null;
-  }
-  if (state.dropEnter && text) {
-    state.held = text;
-    out(`${BOX}${text.split('\n')[0]}`);
-    return null;
-  }
-  const held = state.held;
-  state.held = null;
-  if (!text && held === null) {
-    out(BOX);
-    return null;
-  }
-  return text || held;
-}
-
-async function answer(text, runHooks, received, out) {
-  const model = text.match(/^\/model\s+(\S+)/);
-  if (model) {
-    out(`\nSet model to ${model[1]}${BOX}`);
-    return;
-  }
-  runHooks('UserPromptSubmit');
-  appendFileSync(received, `${text.replace(/\n/g, '\\n')}\n`, 'utf8');
-  const briefPath = text.match(/read the brief at (.+?brief\.md)/)?.[1];
-  const brief = briefPath ? readFileSync(briefPath, 'utf8') : '';
-  const all = `${text}\n${brief}`;
-  if (all.includes('FAKE_NOTIFY')) runHooks('Notification');
-  const sleepMs = Number(all.match(/FAKE_SLEEP_MS=(\d+)/)?.[1] ?? 0);
-  if (sleepMs > 0) await sleep(sleepMs);
-  const exitCode = all.match(/FAKE_EXIT=(\d+)/)?.[1];
-  if (exitCode !== undefined) process.exit(Number(exitCode));
-  let written = 0;
-  if (brief && !all.includes('FAKE_FAIL')) {
-    const dir = findDeliverablesDir(brief);
-    for (const d of findDeliverables(brief)) {
-      const target = dir ? safeJoin(dir, d.path) : null;
-      if (!target) continue;
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, `# ${d.path}\n\nStub written by fake-claude (interactive).\n`, 'utf8');
-      written += 1;
-    }
-  }
-  out(`\nyou said: ${text.split('\n')[0]}\nok (${written} file(s) written)\n`);
-  runHooks('Stop');
-  out(BOX);
 }
 
 main().then(

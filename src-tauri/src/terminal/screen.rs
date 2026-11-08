@@ -6,6 +6,8 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 
+use crate::terminal::dialog::DialogStyle;
+
 /// Screen text (lowercase, escapes removed) of a dialog that waits for the
 /// user: Claude Code's workspace-trust and new-MCP-server dialogs and their
 /// "Enter to confirm · Esc to cancel" footer.
@@ -33,6 +35,8 @@ pub const IDLE_MARKERS: [&str; 3] = ["\u{276f}\u{a0}", ">\u{a0}", "? for shortcu
 pub struct Markers {
     pub idle: Vec<String>,
     pub dialog: Vec<String>,
+    /// How the CLI draws an interactive prompt during a turn.
+    pub style: DialogStyle,
 }
 
 impl Markers {
@@ -44,6 +48,7 @@ impl Markers {
                 Arc::new(Markers {
                     idle: IDLE_MARKERS.iter().map(|m| m.to_string()).collect(),
                     dialog: DIALOG_MARKERS.iter().map(|m| m.to_string()).collect(),
+                    style: DialogStyle::claude(),
                 })
             })
             .clone()
@@ -60,7 +65,13 @@ impl Markers {
         Markers {
             idle: clean(idle),
             dialog: clean(dialog),
+            style: DialogStyle::generic(),
         }
+    }
+
+    /// The same markers with another dialog style.
+    pub fn with_style(self, style: DialogStyle) -> Markers {
+        Markers { style, ..self }
     }
 }
 

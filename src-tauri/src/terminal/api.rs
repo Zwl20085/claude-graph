@@ -12,9 +12,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use std::time::Duration;
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
-use crate::contract::{AppError, AppResult, PtyReplay, TerminalSession};
+use crate::contract::{
+    AppError, AppResult, PromptAnswer, PtyReplay, SessionPrompt, TerminalSession, TurnPrompt,
+};
 use crate::events::{Emitter, WindowSpec};
 use crate::prompt::display_dir;
 use crate::run_store::{check_id, read_run_state};
@@ -47,11 +49,31 @@ pub struct SessionShared {
     typing: tokio::sync::Mutex<()>,
     /// How the harness confirms a typed message, and its readiness quiet.
     delivery: Mutex<(Expect, Duration)>,
+    /// The question or dialog the session waits on.
+    pending: Mutex<Option<SessionPrompt>>,
+    /// Answers and "continue" for the session task.
+    actions: mpsc::UnboundedSender<PromptAction>,
+    actions_rx: Mutex<Option<mpsc::UnboundedReceiver<PromptAction>>>,
+}
+
+/// What the user decided about the session's pending prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptAction {
+    Answer {
+        prompt_id: String,
+        answer: PromptAnswer,
+    },
+    /// Mark the node waiting on a reply question done.
+    Continue { node_id: String },
 }
 
 impl SessionShared {
     pub fn new(run_id: &str, graph_dir: &Path, info: TerminalSession) -> Arc<Self> {
+        let (actions, actions_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
+            pending: Mutex::new(None),
+            actions,
+            actions_rx: Mutex::new(Some(actions_rx)),
             run_id: run_id.to_string(),
             graph_dir: graph_dir.to_path_buf(),
             info: Mutex::new(info),
@@ -70,6 +92,27 @@ impl SessionShared {
 
     pub fn delivery(&self) -> (Expect, Duration) {
         lock(&self.delivery).clone()
+    }
+
+    /// The prompt the session waits on.
+    pub fn pending(&self) -> Option<SessionPrompt> {
+        lock(&self.pending).clone()
+    }
+
+    pub fn set_pending(&self, prompt: Option<SessionPrompt>) {
+        *lock(&self.pending) = prompt;
+    }
+
+    /// Hand an answer to the session task.
+    pub fn act(&self, action: PromptAction) -> AppResult<()> {
+        self.actions
+            .send(action)
+            .map_err(|_| AppError::new("not_found", "the session has ended"))
+    }
+
+    /// The receiving end of [`SessionShared::act`] (once, for the task).
+    pub fn take_actions(&self) -> Option<mpsc::UnboundedReceiver<PromptAction>> {
+        lock(&self.actions_rx).take()
     }
 
     pub fn info(&self) -> TerminalSession {
@@ -161,6 +204,11 @@ impl Terminals {
             .ok_or_else(|| AppError::new("not_found", format!("no session {sid} in run {run_id}")))
     }
 
+    /// Every registered session of `run_id`.
+    pub fn all_of(&self, run_id: &str) -> Vec<Arc<SessionShared>> {
+        lock(&self.runs).get(run_id).cloned().unwrap_or_default()
+    }
+
     pub fn sessions(&self, run_id: &str) -> Option<Vec<TerminalSession>> {
         lock(&self.runs)
             .get(run_id)
@@ -226,6 +274,15 @@ impl Terminals {
         let session = self
             .session_of_node(run_id, node_id)
             .ok_or_else(|| AppError::new("not_found", format!("node {node_id} has no session")))?;
+        // A reply question of this node waits: the message is its answer.
+        if let Some(p) = session.pending().filter(|p| p.node_id == node_id) {
+            if let TurnPrompt::Reply(q) = &p.prompt {
+                return session.act(PromptAction::Answer {
+                    prompt_id: q.id.clone(),
+                    answer: PromptAnswer::Text(text.to_string()),
+                });
+            }
+        }
         spawn_followup(session, emitter, node_id, text)
     }
 }

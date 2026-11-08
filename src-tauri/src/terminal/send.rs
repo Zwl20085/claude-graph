@@ -1,26 +1,27 @@
 //! One node of a session: prepare its message, deliver it with the verified
-//! procedure ([`super::deliver`]), then wait for the reply's Stop hook.
+//! procedure ([`super::deliver`]), then follow its turn ([`super::turn`]:
+//! done, a question, or a dialog on the way).
 //!
-//! The node stays `queued` (event "delivering message…") until Claude Code
-//! confirms the prompt with the `submit` hook; only then is it `running`. A
-//! message that is not taken after the last cycle fails the node with
-//! [`NOT_SUBMITTED`]; the session goes on unless `stop_on_failure`.
+//! The node stays `queued` (event "delivering message…") until the CLI
+//! confirms the prompt; only then is it `running`. A message that is not
+//! taken after the last cycle fails the node with [`NOT_SUBMITTED`]; the
+//! session goes on unless `stop_on_failure`.
 
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 
 use crate::contract::{Model, Node, NodeEventKind, NodeStatus};
-use crate::harness::adapter::StopSignal;
 use crate::run_store::node_run_dir;
 use crate::runner::model_flag;
 use crate::terminal::deliver::{deliver, Delivery, Halt, Outcome, NOT_SUBMITTED};
-use crate::terminal::hooks::{Hook, HookLine};
+use crate::terminal::hooks::HookLine;
 use crate::terminal::message::Typed;
-use crate::terminal::node::{evaluate, prepare};
+use crate::terminal::node::prepare;
 use crate::terminal::port::{PtyPort, Tick};
 use crate::terminal::reply::write_reply;
-use crate::terminal::session::{End, Session, CANCELLED, POLL};
+use crate::terminal::session::{End, NodeEnd, Session, CANCELLED};
+use crate::terminal::turn::Turn;
 use crate::terminal::{session_dir, TRANSCRIPT_FILE};
 
 /// Node event while the message is on its way.
@@ -30,8 +31,6 @@ const SETTLE_QUIET: Duration = Duration::from_millis(250);
 /// … but at most this long, so the reply's last redraw is in the transcript.
 const SETTLE_MAX: Duration = Duration::from_millis(1500);
 const SETTLE_STEP: Duration = Duration::from_millis(100);
-
-type NodeEnd = (NodeStatus, Option<String>, Option<End>);
 
 impl Session {
     pub(super) async fn run_node(&mut self, id: &str, started_at: DateTime<Utc>) -> NodeEnd {
@@ -60,18 +59,25 @@ impl Session {
             NodeEventKind::Text,
             format!("sent node {id} to window {title}"),
         );
-        let end = self
-            .wait_stop(node, SystemTime::from(started_at), carried, typed.text())
-            .await;
-        if end.2.is_none() {
-            self.settle().await;
+        let mark = self.pty.as_ref().map_or(0, |p| p.output.mark());
+        let turn = Turn::new(
+            id,
+            typed.text(),
+            from,
+            mark,
+            SystemTime::from(started_at),
+            carried,
+        );
+        let end = self.turn(node, turn).await;
+        if self.span.is_none() {
+            // Cut short (kill, exit) before any reply was written.
+            self.span = self.save_reply(id, typed.text(), from).await;
         }
-        self.span = self.save_reply(id, typed.text(), from).await;
         end
     }
 
     /// Wait (bounded) for the output to go quiet after the Stop hook.
-    async fn settle(&mut self) {
+    pub(super) async fn settle(&mut self) {
         let t0 = Instant::now();
         while !self.quiet_for(SETTLE_QUIET) && t0.elapsed() < SETTLE_MAX {
             if !matches!(self.tick(SETTLE_STEP).await, Tick::Poll) {
@@ -83,7 +89,7 @@ impl Session {
     /// reply.md / result.md of the turn from transcript offset `from` to now
     /// (written on a blocking thread: the transcript is replayed); returns
     /// the span (also when writing failed: it is logged).
-    async fn save_reply(&self, id: &str, prompt: &str, from: u64) -> Option<(u64, u64)> {
+    pub(super) async fn save_reply(&self, id: &str, prompt: &str, from: u64) -> Option<(u64, u64)> {
         let pty = self.pty.as_ref()?;
         let to = pty.output.transcript_len();
         let sizes = pty.sizes();
@@ -104,23 +110,10 @@ impl Session {
         Some((from, to))
     }
 
-    /// `/model` (if the node sets one) and the message. `Some((hooks seen
-    /// right after the submit line, transcript length when the message's
-    /// delivery began))` once submitted, `None` if never taken.
-    async fn deliver_node(
-        &mut self,
-        id: &str,
-        node: &Node,
-        typed: &Typed,
-    ) -> Result<Option<(Vec<Hook>, u64)>, Halt> {
-        let shared = self.t.shared.clone();
-        let _typing = shared.typing().await;
-        self.poll_hooks(); // hooks of earlier, user-typed prompts do not count
-        let Some(pty) = self.pty.clone() else {
-            return Err(Halt::Exited(u32::MAX));
-        };
-        let title = self.t.plan.title.clone();
-        let mut port = PtyPort {
+    /// A delivery port on the session's pty for node `node_id`'s events.
+    pub(super) fn port(&mut self, node_id: &str) -> Option<PtyPort<'_>> {
+        let pty = self.pty.clone()?;
+        Some(PtyPort {
             pty,
             hooks: &mut self.hooks,
             after_submit: Vec::new(),
@@ -128,9 +121,30 @@ impl Session {
             kill: self.kill.clone(),
             emitter: self.t.ctx.emitter.clone(),
             run_id: self.t.ctx.run_id.clone(),
-            node_id: id.to_string(),
+            node_id: node_id.to_string(),
+        })
+    }
+
+    /// `/model` (if the node sets one) and the message. `Some((hook lines
+    /// from the submit line on, transcript length when the message's delivery
+    /// began))` once submitted, `None` if never taken.
+    async fn deliver_node(
+        &mut self,
+        id: &str,
+        node: &Node,
+        typed: &Typed,
+    ) -> Result<Option<(Vec<HookLine>, u64)>, Halt> {
+        let shared = self.t.shared.clone();
+        let _typing = shared.typing().await;
+        self.poll_hooks(); // hooks of earlier, user-typed prompts do not count
+        let title = self.t.plan.title.clone();
+        let label = self.behavior.label.clone();
+        let types_model = self.behavior.types_model;
+        let (expect, ready) = (self.behavior.expect.clone(), self.behavior.ready_quiet);
+        let Some(mut port) = self.port(id) else {
+            return Err(Halt::Exited(u32::MAX));
         };
-        let model = model_flag(node.model, Model::Inherit).filter(|_| self.behavior.types_model);
+        let model = model_flag(node.model, Model::Inherit).filter(|_| types_model);
         if let Some(m) = model {
             let line = Typed::Line(format!("/model {m}"));
             if deliver(&mut port, &Delivery::model(&line, m, &title)).await?
@@ -139,68 +153,15 @@ impl Session {
                 use crate::terminal::deliver::Port as _;
                 port.event(
                     NodeEventKind::Stderr,
-                    format!(
-                        "warning: {} did not confirm /model {m}; continuing",
-                        self.behavior.label
-                    ),
+                    format!("warning: {label} did not confirm /model {m}; continuing"),
                 );
             }
         }
         let from = port.pty.output.transcript_len();
-        let b = &self.behavior;
-        let delivery = Delivery::prompt_with(typed, &title, b.expect.clone(), b.ready_quiet);
+        let delivery = Delivery::prompt_with(typed, &title, expect, ready);
         match deliver(&mut port, &delivery).await? {
             Outcome::Submitted => Ok(Some((port.after_submit, from))),
             Outcome::NotSubmitted => Ok(None),
-        }
-    }
-
-    /// Wait for the end of the reply (no timeout): the `stop` line of this
-    /// turn (a Codex notify for a side turn does not count, see
-    /// [`HookLine::stops_turn`]), or, for a quiet-mode harness, no output for
-    /// its quiet time; `notify` lines become notification events.
-    /// `carried`: hooks already read after `submit`.
-    async fn wait_stop(
-        &mut self,
-        node: &Node,
-        started: SystemTime,
-        carried: Vec<Hook>,
-        typed: &str,
-    ) -> NodeEnd {
-        let title = self.t.plan.title.clone();
-        let label = self.behavior.label.clone();
-        let submitted = Instant::now();
-        let mut lines: Vec<HookLine> = carried
-            .into_iter()
-            .map(|hook| HookLine {
-                hook,
-                payload: None,
-            })
-            .collect();
-        loop {
-            if lines.iter().any(|l| l.hook == Hook::Notify) {
-                self.event(
-                    NodeEventKind::Notification,
-                    format!("{label} is waiting for you in window {title}"),
-                );
-            }
-            let stopped = match self.behavior.stop {
-                StopSignal::Hook => lines.iter().any(|l| l.stops_turn(typed)),
-                StopSignal::Quiet(d) => submitted.elapsed() >= d && self.quiet_for(d),
-            };
-            if stopped {
-                let (status, reason) = evaluate(&self.t.ctx, node, started);
-                return (status, reason, None);
-            }
-            match self.tick(POLL).await {
-                Tick::Killed => return ended(End::Cancelled),
-                Tick::Exited(code) => return ended(End::Exited(code)),
-                Tick::Poll => {}
-            }
-            lines = self.hooks.poll_lines().unwrap_or_else(|e| {
-                log::warn!("reading hooks.log failed: {e}");
-                Vec::new()
-            });
         }
     }
 }

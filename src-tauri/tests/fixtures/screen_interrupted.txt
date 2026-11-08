@@ -1,0 +1,39 @@
+ ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Haiku 5.5 · Claude Team
+ ▝▝   ▝▝   ~\AppData\Local\Temp\claude\135f5f3505e93bfe\33c53c65-4c3e-4189-8b94-e1a095ba3086\scratchpad\probe-out\w…
+
+
+❯ Use the AskUserQuestion tool once with multiSelect true to ask which of X, Y, Z I want, then reply with my choices.
+
+● User answered Claude's questions:
+  ⎿  · Which of X, Y, Z do you want? (Select all that apply.) → X
+
+● You chose X. The question was multi-select, but only X was picked, so Y and Z are not selected.
+
+✻ Cooked for 4s · done 1:14
+
+❯ Use the AskUserQuestion tool to ask me whether to use A or B, then reply with my choice.
+
+● User answered Claude's questions:
+  ⎿  · Do you want to use A or B? → neither, use C
+
+● You picked neither A nor B. You want to use C.
+
+✻ Cooked for 2s · done 1:14
+
+❯ Run this exact bash command and nothing else: mkdir probe_perm_two
+
+● Bash(mkdir probe_perm_two)
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Cooked for 3s · done 1:15
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  [Haiku 5.5 | Team] │ work-p2-20708                                                                ◐ medium · /effort
+  Context █░░░░░░░░░ 7% │ Usage ███░░░░░░░ 33% (resets in 15m)
+  ⏸ manual mode on
+
+
+

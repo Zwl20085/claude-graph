@@ -223,6 +223,10 @@ pub fn summarize_run(state: &RunState) -> RunSummary {
                 cancelled: c.cancelled + 1,
                 ..c
             },
+            NodeStatus::Waiting => StatusCounts {
+                waiting: c.waiting + 1,
+                ..c
+            },
         });
     let costs: Vec<f64> = state.nodes.values().filter_map(|n| n.cost_usd).collect();
     RunSummary {
@@ -320,6 +324,7 @@ pub fn read_node_result(dir: &Path, run_id: &str, node_id: &str) -> AppResult<No
         result_md: read_result_md(dir, run_id, node_id)?,
         summary: read_summary(dir, run_id, node_id)?,
         events_tail,
+        questions: crate::terminal::questions::read(&node_run_dir(dir, run_id, node_id)),
     })
 }
 

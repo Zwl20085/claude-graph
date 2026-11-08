@@ -1,0 +1,43 @@
+{
+  "dialog": {
+    "run_id": "20261108T010000Z",
+    "sid": "s1",
+    "node_id": "pick",
+    "prompt": {
+      "type": "dialog",
+      "id": "pick-d1",
+      "kind": "choice",
+      "question": "Which option do you want: A or B?",
+      "header": "A or B",
+      "options": [
+        { "index": 0, "label": "A", "detail": "Choose option A." },
+        { "index": 1, "label": "B", "detail": "Choose option B." },
+        { "index": 2, "label": "Type something." }
+      ],
+      "selected": 0,
+      "multi": false,
+      "allows_text": true,
+      "source": "transcript"
+    }
+  },
+  "reply": {
+    "run_id": "20261108T010000Z",
+    "sid": "s1",
+    "node_id": "pick",
+    "prompt": {
+      "type": "reply",
+      "id": "pick-q1",
+      "question": "Which framework should I use?",
+      "choices": [{ "label": "vitest" }, { "label": "jest", "detail": "the older one" }],
+      "reply_excerpt": "I can set up tests.\n\nWhich framework should I use?\n1. vitest\n2. jest - the older one"
+    }
+  },
+  "cleared": {
+    "run_id": "20261108T010000Z",
+    "sid": "s1",
+    "node_id": "pick",
+    "id": "pick-d1",
+    "via": "window"
+  },
+  "answers": [{ "choice": 1 }, { "choices": [0, 2] }, { "text": "use vitest" }]
+}

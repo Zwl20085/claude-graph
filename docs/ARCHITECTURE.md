@@ -951,3 +951,110 @@ tool".
   `scripts/fake-ask.mjs`, built app binary as server): allow once, deny with message, node
   scope, graph scope across app instances, cancel, failed server, assistant turn.
   `tests/real_ask.rs` (ignored, one haiku turn): a real `mkdir` allowed from the test.
+
+## Turn outcomes (terminal mode, 2026-11-08)
+
+After a node's message is submitted, the session follows the node's turn (`terminal/turn.rs`)
+and classifies it as exactly one of **done**, **question** or (while the turn runs) **dialog**.
+The facts the design rests on are in docs/CLAUDE_CLI_NOTES.md "Turn outcomes" (verified with
+the real CLI 2.1.319).
+
+**Signals.**
+1. *Hook payloads.* Hook commands are `"<app>" --notify "<hooks.log>" --event <word> --stdin`
+   (`launch.rs`: the word must be start/submit/stop/notify, stdin at most 4 MiB, re-serialized
+   as one line of compact JSON; the Codex form `--notify <file> [json]` is unchanged). When the
+   app binary is not a file (or a path holds a quote) the old `echo <word>` form is written.
+   Tests point `notify_exe` at the built binary (`tests/common` `fresh_app`), never the test
+   binary. `HookLog` reads by byte offset. `HookLine::final_text` = Stop
+   `last_assistant_message` (Claude Code) or notify `last-assistant-message` (Codex).
+2. *Transcript JSONL* (`terminal/transcript.rs`): the path from any payload's
+   `transcript_path` (absolute, `.jsonl`), re-read (last 512 KiB) only when its length
+   changes. `pending_tool`: the last assistant `tool_use` without a later `tool_result`;
+   `last_assistant_text`: the fallback final text.
+3. *Screen* (`terminal/dialog.rs`): the live vt100 rows after the last idle-box row (a row
+   that is only the prompt glyph, or holds a non-glyph idle marker), at most the last 40;
+   options = the last run numbered 1, 2, 3, ... per `DialogStyle.option` (default: optional
+   cursor glyph, number with `.` or `)`, label), continuation rows as detail, a `Submit` row
+   in the cursor order, `[ ]` / `[✔]` boxes = multi-select. It needs at least 2 options and a
+   cursor on one of them or a hint ("enter to select", "esc to cancel", "tab to", "(y/n)",
+   "do you want to proceed", ...). Question = the nearest row above ending in `?` or `:` (else
+   the nearest row); header = a `☐ h` row or the tab strip above it. A permission prompt when
+   the question or hints say "do you want to proceed", "allow", "permission" or "would you
+   like to run". `Markers` gained `style: DialogStyle` (option regex, cursor glyphs, hints,
+   free-text option labels "type something" / "other", `digits_select` (Claude: verified),
+   `interrupted` texts), so each harness kind, and a custom profile, brings its own.
+4. *Reply text* (`terminal/outcome.rs`, pure, 18 unit tests): the tail is the last 8 non-empty
+   lines outside code fences, the `## Deliverables` section and `## Status:` lines; a `?`
+   outside inline code and quotes and not followed by URL text, or a question stem, makes a
+   question; a completion marker after it wins; choices are the list after (else just above)
+   the question line.
+
+**Loop** (every 300 ms): new hook lines (a `submit` while a reply question waits = answered in
+the window, text from the payload's `prompt`; a `stop` = end of turn; a `notify` only becomes a
+notification event when nothing is pending); the quiet-mode stop of custom harnesses; the
+interruption check; the dialog check; actions from the app.
+- *Stop*: a pending dialog clears; settle (at most 1.5 s); final text = payload, else
+  transcript, else the emulated reply. reply.md = the exact texts when known (every message
+  `> ` quoted, then its reply), else the emulated screen as before. `classify`: done → the node
+  ends by its deliverables. Question → if the node declares deliverables and they were all
+  written, it is an *offer* (record `offer: true`, `question` event, node `succeeded`); else
+  the node is `waiting` on a `ReplyQuestion { id, question, choices, reply_excerpt }` (the
+  last 1200 chars).
+- *Dialog*: after 1 s of quiet, the screen dialog (enriched from a pending AskUserQuestion's
+  exact question, header and descriptions, or headed `<Tool>: <summary>` for another pending
+  tool); after 2 s with no screen match, a pending AskUserQuestion alone (its options plus
+  "Type something."). A different signature (question + labels) replaces the pending one; no
+  dialog after 300 ms of quiet (with the idle box back, or 1 s) clears it (`via: app` when the
+  app answered it, else `window`) and the node is `running` again.
+- *Interrupted*: Claude Code fires no Stop after Esc at a dialog. When the output since the last
+  submit shows "What should Claude do instead", the box is idle and 2 s are quiet, the node
+  waits on the question "The turn was interrupted. What should the agent do instead?".
+- *Actions* (`SessionShared::act`, a channel the session task drains): `Answer` to a reply
+  question = the text (or the chosen label) delivered as the next message with the usual
+  delivery ladder (typing lock, gate, retries); once submitted the prompt clears `via: app`,
+  the node is `running` and the loop waits for the next Stop and classifies again. `Answer` to
+  a dialog = keys (`terminal/answer.rs`): for a single choice where digits select, the digit,
+  then arrows and Enter only if the same dialog is still open after 300 ms; else arrows and
+  Enter; multi-select: Space on each box to toggle, the Submit row and Enter, then "Submit
+  answers" on the review screen; text: the free-text option (digit or arrows), the text,
+  Enter. No change within 2 s → `stderr` event `dialog_answer_failed: ...` (once per prompt).
+  `Continue` (reply questions only) → the node ends by its deliverables.
+
+**State.** `NodeStatus::Waiting` ("waiting": not terminal, not a failure; the scheduler and the
+run loops treat it like `running`; `StatusCounts.waiting`). `TerminalSession.pending_prompt`
+(id). `SessionShared.pending` holds the whole `SessionPrompt` for `list_session_prompts` and
+for `send_message`: a Messages-tab message to a node waiting on a reply question becomes its
+answer. Prompt ids are `<node>-p<n>`, numbered per session. summary.json gains `questions` and
+`waited_for_user`; `read_node_result` returns `questions` (the questions.jsonl records).
+
+**Contract** (`contract_prompt.rs` ↔ `src/types/prompt.ts`; the shared fixture
+`src/types/fixtures/session_prompt.json` is read by tests on both sides): `DialogKind`,
+`PromptSource`, `AnswerVia`, `PromptOption`, `DialogPrompt`, `ReplyChoice`, `ReplyQuestion`,
+`TurnPrompt` (`{"type": "dialog" | "reply", ...}`), `SessionPrompt { run_id, sid, node_id,
+prompt }`, `SessionPromptCleared { run_id, sid, node_id, id, via }`, `PromptAnswer`
+(`{choice}` | `{choices}` | `{text}`), `QuestionRecord`. Events `session_prompt` and
+`session_prompt_cleared` (`Emitter::session_prompt` / `session_prompt_cleared`). Node event
+kinds `question`, `dialog`, `answer`. Commands `answer_prompt { run_id, sid, prompt_id, answer
+}` (checked: the prompt is pending, else `not_found`; the index exists; a list only for
+multi-select; text only where the prompt takes text, else "this prompt only takes one of its
+options"), `continue_node { run_id, sid, node_id }` (reply questions only),
+`list_session_prompts { run_id }`.
+
+**Frontend.** `promptSlice.ts`: pending prompts from the events, and from
+`list_session_prompts` when a shown run names an unknown `pending_prompt`; a new prompt toasts
+"Node X needs you" with **Show** (selects the node); the card stays disabled after a button
+until the prompt clears or a `stderr` event of that node arrives. `PromptCard.tsx` on top of
+the terminal Messages tab; a "needs you" banner in the inspector; a `?` badge on the node card;
+"needs you" on the session chip; the Results tab lists the questions. Status `waiting`: light
+blue `#38bdf8`, slow pulse, label "needs you". The mock (`simulatePrompts`, on in browser dev)
+opens a choice dialog on the first node of a terminal run and a reply question after the
+second (`mockPrompts.ts`).
+
+**Fake CLI.** `scripts/fake-claude-tty.mjs` (the interactive mode of fake-claude.mjs): hook
+payloads with the verified field names, a fake transcript JSONL, markers `FAKE_QUESTION`,
+`FAKE_DIALOG` (raw-mode keys: arrows, digits, Enter, typed text on "Type something."),
+`FAKE_PERMISSION`, `FAKE_OFFER`; `scripts/fake-codex.mjs`: `FAKE_QUESTION`. Tests:
+`tests/e2e_turns.rs` (a question pauses and an answer resumes; continue; an offer does not
+pause; a dialog answered from the app; a dialog answered in the window and a text answer; a
+permission prompt), `tests/real_terminal.rs` `real_claude_dialog_and_question_outcomes`
+(ignored).

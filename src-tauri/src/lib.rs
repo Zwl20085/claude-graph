@@ -10,6 +10,7 @@ pub mod assistant;
 pub mod claude_bin;
 pub mod commands;
 pub mod contract;
+pub mod contract_prompt;
 pub mod events;
 pub mod graph_util;
 pub mod harness;
@@ -99,6 +100,9 @@ pub fn run() {
             commands::open_session_window,
             commands::list_permission_prompts,
             commands::answer_permission,
+            commands::answer_prompt,
+            commands::continue_node,
+            commands::list_session_prompts,
         ])
         .build(tauri::generate_context!());
     let app = match app {

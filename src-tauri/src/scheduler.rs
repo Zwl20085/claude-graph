@@ -184,7 +184,10 @@ impl Scheduler {
             .filter(|(id, _)| scheduler.target.contains(*id))
             .map(|(id, s)| {
                 let slot = match s.status {
-                    NodeStatus::Pending | NodeStatus::Queued | NodeStatus::Running => Slot {
+                    NodeStatus::Pending
+                    | NodeStatus::Queued
+                    | NodeStatus::Running
+                    | NodeStatus::Waiting => Slot {
                         status: NodeStatus::Cancelled,
                         reason: Some(crate::run_store::INTERRUPTED.to_string()),
                     },
@@ -233,6 +236,7 @@ impl Scheduler {
                 NodeStatus::Pending
                 | NodeStatus::Queued
                 | NodeStatus::Running
+                | NodeStatus::Waiting
                 | NodeStatus::Skipped,
             )
             | None => false,
@@ -282,13 +286,14 @@ impl Scheduler {
             NodeStatus::Pending
             | NodeStatus::Queued
             | NodeStatus::Running
+            | NodeStatus::Waiting
             | NodeStatus::Succeeded => {}
         }
     }
 
     pub fn cancel_node(&mut self, id: &str) -> CancelEffect {
         match self.status(id) {
-            Some(NodeStatus::Running) => CancelEffect::MustKill,
+            Some(NodeStatus::Running | NodeStatus::Waiting) => CancelEffect::MustKill,
             Some(NodeStatus::Pending | NodeStatus::Queued) => {
                 self.on_finished(id, NodeStatus::Cancelled, Some("cancelled by user".into()));
                 CancelEffect::Cancelled

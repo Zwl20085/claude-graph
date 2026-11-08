@@ -18,6 +18,7 @@ pub const GRAPH_VERSION: u32 = 1;
 /// Id of the default harness profile (Claude Code).
 pub const DEFAULT_HARNESS: &str = "claude";
 
+pub use crate::contract_prompt::*;
 pub use crate::harness::profile::{HarnessCheck, HarnessKind, HarnessProfile, StopMode};
 
 /// Event name: full `RunState` whenever any node status changes.
@@ -249,6 +250,8 @@ pub enum NodeStatus {
     Blocked,
     Skipped,
     Cancelled,
+    /// Terminal mode: the agent asked something (reply question or dialog); not settled.
+    Waiting,
 }
 
 impl NodeStatus {
@@ -261,7 +264,8 @@ impl NodeStatus {
             | NodeStatus::Running
             | NodeStatus::Succeeded
             | NodeStatus::Skipped
-            | NodeStatus::Cancelled => false,
+            | NodeStatus::Cancelled
+            | NodeStatus::Waiting => false,
         }
     }
 
@@ -273,7 +277,10 @@ impl NodeStatus {
             | NodeStatus::Blocked
             | NodeStatus::Skipped
             | NodeStatus::Cancelled => true,
-            NodeStatus::Pending | NodeStatus::Queued | NodeStatus::Running => false,
+            NodeStatus::Pending
+            | NodeStatus::Queued
+            | NodeStatus::Running
+            | NodeStatus::Waiting => false,
         }
     }
 
@@ -288,6 +295,7 @@ impl NodeStatus {
             NodeStatus::Blocked => "blocked",
             NodeStatus::Skipped => "skipped",
             NodeStatus::Cancelled => "cancelled",
+            NodeStatus::Waiting => "waiting",
         }
     }
 }
@@ -391,6 +399,9 @@ pub struct TerminalSession {
     /// Harness profile id the session runs. Missing in older run.json files: `claude`.
     #[serde(default = "default_harness")]
     pub harness: String,
+    /// Id of the question or dialog the session waits on (`list_session_prompts`).
+    #[serde(default)]
+    pub pending_prompt: Option<String>,
 }
 
 /// Serde default of [`TerminalSession::harness`].
@@ -431,6 +442,8 @@ pub struct StatusCounts {
     pub blocked: u32,
     pub skipped: u32,
     pub cancelled: u32,
+    #[serde(default)]
+    pub waiting: u32,
 }
 
 /// One row of `list_runs` (shape not given in the brief; see ARCHITECTURE.md §6).
@@ -468,6 +481,8 @@ pub struct NodeResult {
     pub summary: Option<NodeSummary>,
     /// Last raw lines of events.jsonl, oldest first.
     pub events_tail: Vec<String>,
+    #[serde(default)] // terminal mode: questions.jsonl
+    pub questions: Vec<QuestionRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -492,6 +507,12 @@ pub enum NodeEventKind {
     /// "Ask me in the app": the prompt was answered; text `allowed (<scope>)` or
     /// `denied (<scope>)`, plus `: <message>` when a deny carries one.
     PermissionAnswered,
+    /// Terminal mode: the reply ended with a question; text = the question.
+    Question,
+    /// Terminal mode: a dialog waits in the window; text = question and options.
+    Dialog,
+    /// Terminal mode: a question or dialog was answered; text = how.
+    Answer,
 }
 
 /// One tool call waiting for the user's decision (`list_permission_prompts`,

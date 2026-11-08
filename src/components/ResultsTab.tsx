@@ -1,7 +1,7 @@
 /** Past runs of the graph and this node's result in each. */
 import { useEffect, useState } from 'react';
 import { ExternalLink, SquareTerminal } from 'lucide-react';
-import { deniedTools, sessionsOf, type NodeResult, type RunSummary } from '../types/contract';
+import { deniedTools, questionsOf, sessionsOf, type NodeResult, type QuestionRecord, type RunSummary } from '../types/contract';
 import { api } from '../lib/api';
 import { DENIED_HINT, formatCost, STATUS_COLORS } from '../lib/status';
 import { useGraphStore } from '../store/graphStore';
@@ -33,6 +33,38 @@ export function DeniedTools({ tools }: { tools: readonly string[] }) {
     <p role="note" aria-label="denied tools" className="rounded border border-[#f59e0b] px-2 py-1 text-[12px] text-[#f59e0b]">
       Denied tools: {tools.join(', ')}. {DENIED_HINT}
     </p>
+  );
+}
+
+/** How a recorded question was answered, in words. */
+export function answerLine(q: QuestionRecord): string {
+  if (q.offer) return 'offer: the node was done (deliverables written)';
+  const a = q.answer;
+  if (!a) return 'not answered';
+  if (a.via === 'continue') return 'continued without answering';
+  const what = a.text ?? (a.index !== undefined ? q.options[a.index]?.label ?? `option ${a.index + 1}` : null);
+  const where = a.via === 'app' ? 'from the app' : 'in the window';
+  return what ? `answered ${where}: ${what}` : `answered ${where}`;
+}
+
+/** The node's questions and dialogs of that run (questions.jsonl). */
+export function QuestionList({ questions }: { questions: readonly QuestionRecord[] }) {
+  if (questions.length === 0) return null;
+  return (
+    <div aria-label="questions" className="space-y-1">
+      <p className="text-[11px] font-semibold text-[#38bdf8]">Questions ({questions.length})</p>
+      <ul className="space-y-1">
+        {questions.map((q) => (
+          <li key={q.id} className="rounded border border-[#3c3c3c] px-2 py-1 text-[11px]">
+            <p className="text-[#e5e5e5]">
+              <span className="text-[#9a9a9a]">{q.kind === 'dialog' ? 'dialog' : 'question'}:</span> {q.question}
+            </p>
+            {q.options.length > 0 && <p className="text-[#9a9a9a]">{q.options.map((o, i) => `${i + 1}. ${o.label}`).join(' / ')}</p>}
+            <p className="text-[#38bdf8]">{answerLine(q)}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -134,6 +166,7 @@ export function ResultsTab({ nodeId }: { nodeId: string }) {
               openRun === shownRunId ? deniedTools({ permission_denials: shownDenials }) : [],
             )}
           />
+          <QuestionList questions={questionsOf(detail.result)} />
           {detail.result.summary ? (
             <div className="grid grid-cols-2 gap-x-2 text-[11px] text-[#9a9a9a]">
               <span>status: {detail.result.summary.status}</span>

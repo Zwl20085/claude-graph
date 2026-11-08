@@ -1,10 +1,14 @@
 //! The session's `hooks.json` (passed with `--settings`) and `hooks.log`.
 //!
-//! Claude Code runs the hook commands, which append one word per event to
+//! Claude Code runs the hook commands, which append one line per event to
 //! `hooks.log`: `start` (SessionStart), `submit` (UserPromptSubmit: a typed
 //! prompt was accepted), `stop` (Stop, end of every reply) and `notify`
-//! (Notification: it waits for the user). [`HookLog::poll`] returns
-//! the lines added since the last poll.
+//! (Notification: it waits for the user). When the app binary writes the
+//! line (`"<app>" --notify "<hooks.log>" --event <word> --stdin`) the word is
+//! followed by the hook's stdin payload as one line of JSON (`transcript_path`,
+//! the Stop's `last_assistant_message`, …; docs/CLAUDE_CLI_NOTES.md); the
+//! `echo` fallback writes the word only. [`HookLog::poll`] returns the lines
+//! added since the last poll.
 
 use std::path::{Path, PathBuf};
 
@@ -12,7 +16,6 @@ use serde_json::{json, Value};
 
 use crate::contract::AppResult;
 use crate::prompt::display_dir;
-use crate::store::read_optional;
 
 pub const HOOKS_FILE: &str = "hooks.json";
 pub const HOOKS_LOG: &str = "hooks.log";
@@ -44,27 +47,62 @@ fn echo(word: &str, log: &str) -> Value {
     json!([{ "hooks": [{ "type": "command", "command": format!("echo {word}>> \"{log}\"") }] }])
 }
 
-/// The settings JSON for a session whose hooks.log is `log`.
-pub fn hooks_json(log: &Path) -> Value {
+/// `"<app>" --notify "<log>" --event <word> --stdin`: the app binary appends
+/// the word and the hook's stdin JSON (quoted forward-slash paths work in
+/// cmd.exe and sh alike).
+fn notify(word: &str, log: &str, exe: &str) -> Value {
+    let command = format!("\"{exe}\" --notify \"{log}\" --event {word} --stdin");
+    json!([{ "hooks": [{ "type": "command", "command": command }] }])
+}
+
+/// The settings JSON for a session whose hooks.log is `log`. `exe`: the app
+/// binary that records the payloads; `None`, a path that is not a file, or
+/// a path holding a quote gives the `echo` form (words only).
+pub fn hooks_json(log: &Path, exe: Option<&Path>) -> Value {
     let log = display_dir(log);
+    let exe = exe
+        .filter(|e| e.is_file())
+        .map(display_dir)
+        .filter(|e| !e.contains('"') && !log.contains('"'));
+    let hook = |word: &str| match &exe {
+        Some(exe) => notify(word, &log, exe),
+        None => echo(word, &log),
+    };
     json!({ "hooks": {
-        "SessionStart": echo("start", &log),
-        "UserPromptSubmit": echo("submit", &log),
-        "Stop": echo("stop", &log),
-        "Notification": echo("notify", &log),
+        "SessionStart": hook("start"),
+        "UserPromptSubmit": hook("submit"),
+        "Stop": hook("stop"),
+        "Notification": hook("notify"),
     }})
 }
 
-/// Reads hooks.log incrementally (by line count).
+/// The bytes of `path` from `offset` (empty when missing or not longer).
+fn read_from(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    if f.metadata()?.len() <= offset {
+        return Ok(Vec::new());
+    }
+    f.seek(SeekFrom::Start(offset))?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+/// Reads hooks.log incrementally (from the end of the complete lines read).
 #[derive(Debug)]
 pub struct HookLog {
     path: PathBuf,
-    seen: usize,
+    offset: u64,
 }
 
 impl HookLog {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, seen: 0 }
+        Self { path, offset: 0 }
     }
 
     /// A reader that skips the lines already in the file.
@@ -82,19 +120,16 @@ impl HookLog {
         Ok(self.poll_lines()?.into_iter().map(|l| l.hook).collect())
     }
 
-    /// [`HookLog::poll`] with each line's payload (the text after its word:
-    /// the Codex notify JSON written by `--notify`).
+    /// [`HookLog::poll`] with each line's payload (the text after its word).
     pub fn poll_lines(&mut self) -> AppResult<Vec<HookLine>> {
-        let text = read_optional(&self.path)?.unwrap_or_default();
-        let complete = match text.rfind('\n') {
-            Some(i) => &text[..=i],
-            None => "",
+        let bytes = read_from(&self.path, self.offset)?;
+        let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else {
+            return Ok(Vec::new());
         };
-        let lines: Vec<&str> = complete.lines().collect();
-        let new = lines.get(self.seen..).unwrap_or_default();
-        self.seen = self.seen.max(lines.len());
-        Ok(new
-            .iter()
+        self.offset += u64::try_from(end + 1).unwrap_or(u64::MAX);
+        let text = String::from_utf8_lossy(&bytes[..=end]);
+        Ok(text
+            .lines()
             .filter_map(|l| {
                 let hook = Hook::parse(l)?;
                 let payload = l
@@ -118,6 +153,32 @@ pub struct HookLine {
 }
 
 impl HookLine {
+    /// A line without a payload.
+    pub fn bare(hook: Hook) -> Self {
+        HookLine {
+            hook,
+            payload: None,
+        }
+    }
+
+    /// The payload as a JSON object.
+    pub fn json(&self) -> Option<Value> {
+        let v: Value = serde_json::from_str(self.payload.as_deref()?).ok()?;
+        v.is_object().then_some(v)
+    }
+
+    /// A string field of the payload.
+    pub fn field(&self, key: &str) -> Option<String> {
+        self.json()?.get(key)?.as_str().map(str::to_string)
+    }
+
+    /// The reply's final text: Claude Code's Stop `last_assistant_message`,
+    /// Codex's notify `last-assistant-message`.
+    pub fn final_text(&self) -> Option<String> {
+        self.field("last_assistant_message")
+            .or_else(|| self.field("last-assistant-message"))
+    }
+
     /// A `stop` that ends the turn whose typed text was `typed`: no payload,
     /// a payload that is not a JSON object with `input-messages`, or one
     /// whose input messages include `typed` (whitespace-insensitive). Codex
@@ -155,7 +216,7 @@ mod tests {
 
     #[test]
     fn hooks_json_appends_words_with_forward_slashes() {
-        let v = hooks_json(Path::new("/tmp/s1/hooks.log"));
+        let v = hooks_json(Path::new("/tmp/s1/hooks.log"), None);
         let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
@@ -173,6 +234,28 @@ mod tests {
     }
 
     #[test]
+    fn hooks_json_uses_the_app_binary_when_it_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("app.exe");
+        std::fs::write(&exe, b"x").unwrap();
+        let v = hooks_json(Path::new("/tmp/s1/hooks.log"), Some(&exe));
+        let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(
+            cmd.ends_with("--notify \"/tmp/s1/hooks.log\" --event stop --stdin"),
+            "{cmd}"
+        );
+        assert!(cmd.starts_with('"') && !cmd.contains('\\'));
+        let missing = tmp.path().join("gone.exe");
+        let v = hooks_json(Path::new("/tmp/s1/hooks.log"), Some(&missing));
+        let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(cmd.starts_with("echo "));
+    }
+
+    #[test]
     fn poll_returns_only_new_complete_lines() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join(HOOKS_LOG);
@@ -187,6 +270,25 @@ mod tests {
             vec![Hook::Stop, Hook::Notify, Hook::Submit]
         );
         assert!(HookLog::at_end(path).poll().unwrap().is_empty());
+    }
+
+    #[test]
+    fn payload_fields_and_final_text() {
+        let stop = HookLine {
+            hook: Hook::Stop,
+            payload: Some(
+                r#"{"transcript_path":"C:/t.jsonl","last_assistant_message":"Which?"}"#.into(),
+            ),
+        };
+        assert_eq!(stop.final_text().as_deref(), Some("Which?"));
+        assert_eq!(stop.field("transcript_path").as_deref(), Some("C:/t.jsonl"));
+        assert!(stop.stops_turn("anything"));
+        let codex = HookLine {
+            hook: Hook::Stop,
+            payload: Some(r#"{"last-assistant-message":"ok"}"#.into()),
+        };
+        assert_eq!(codex.final_text().as_deref(), Some("ok"));
+        assert_eq!(HookLine::bare(Hook::Stop).final_text(), None);
     }
 
     #[test]
@@ -208,10 +310,6 @@ mod tests {
             .collect();
         assert_eq!(stops, [false, true, true, true]);
         assert_eq!(lines[1].payload.as_deref(), Some(main));
-        let submit = HookLine {
-            hook: Hook::Submit,
-            payload: None,
-        };
-        assert!(!submit.stops_turn("x"));
+        assert!(!HookLine::bare(Hook::Submit).stops_turn("x"));
     }
 }

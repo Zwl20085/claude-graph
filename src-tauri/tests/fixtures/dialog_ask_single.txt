@@ -1,0 +1,39 @@
+ ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Haiku 5.5 · Claude Team
+ ▝▝   ▝▝   ~\AppData\Local\Temp\claude\135f5f3505e93bfe\33c53c65-4c3e-4189-8b94-e1a095ba3086\scratchpad\probe-out\w…
+
+
+❯ Use the AskUserQuestion tool to ask me whether to use A or B, then reply with my choice.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ A or B
+
+Which option do you want: A or B?
+
+❯ 1. A
+     Choose option A.
+  2. B
+     Choose option B.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

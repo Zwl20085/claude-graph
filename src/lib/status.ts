@@ -18,6 +18,7 @@ export const STATUS_COLORS: Record<NodeStatus, string> = {
   blocked: '#f59e0b',
   skipped: '#777777',
   cancelled: '#b45309',
+  waiting: '#38bdf8',
 };
 
 /** Border colour of a node card that is not part of the shown run. */
@@ -36,7 +37,7 @@ export function ringStyle(status: NodeStatus | null): RingStyle {
   return {
     borderColor: STATUS_COLORS[status],
     borderStyle: status === 'skipped' ? 'dashed' : 'solid',
-    className: status === 'running' ? 'cg-pulse' : '',
+    className: status === 'running' ? 'cg-pulse' : status === 'waiting' ? 'cg-pulse-wait' : '',
   };
 }
 
@@ -62,6 +63,7 @@ export function edgeVisual(sourceStatus: NodeStatus | null): EdgeVisual {
     case 'failed':
     case 'blocked':
       return { stroke: STATUS_COLORS[sourceStatus], animated: false, glow: null };
+    case 'waiting':
     case 'pending':
     case 'queued':
     case 'skipped':
@@ -71,6 +73,9 @@ export function edgeVisual(sourceStatus: NodeStatus | null): EdgeVisual {
       return assertNever(sourceStatus);
   }
 }
+
+/** Label of the `waiting` status: the node asked the user something. */
+export const WAITING_LABEL = 'needs you';
 
 /** Display label of a node status (the card, the inspector). */
 export function statusLabel(status: NodeStatus): string {
@@ -84,6 +89,8 @@ export function statusLabel(status: NodeStatus): string {
     case 'skipped':
     case 'cancelled':
       return status;
+    case 'waiting':
+      return WAITING_LABEL;
     default:
       return assertNever(status);
   }

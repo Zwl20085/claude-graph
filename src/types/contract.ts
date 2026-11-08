@@ -6,6 +6,9 @@
  * (chrono `DateTime<Utc>` on the Rust side). Rust `Option<T>` is `T | null`.
  */
 
+export * from './prompt';
+import type { QuestionRecord } from './prompt';
+
 export const GRAPH_VERSION = 1;
 
 /** Event: full RunState whenever any node status changes. */
@@ -205,6 +208,8 @@ export const NODE_STATUSES = [
   'blocked',
   'skipped',
   'cancelled',
+  /** Terminal mode: the agent asked something (a question or a dialog); the session waits for you. */
+  'waiting',
 ] as const;
 export type NodeStatus = (typeof NODE_STATUSES)[number];
 
@@ -246,6 +251,8 @@ export interface TerminalSession {
    * `claude`): read it through `sessionHarness`.
    */
   harness?: string;
+  /** Id of the question or dialog the session waits on (`list_session_prompts` has it). */
+  pending_prompt?: string | null;
 }
 
 /** Payload of `pty:data`. */
@@ -309,6 +316,8 @@ export interface NodeResult {
   summary: NodeSummary | null;
   /** Last raw lines of events.jsonl, oldest first. */
   events_tail: string[];
+  /** Terminal mode: questions.jsonl records; read through `questionsOf`. */
+  questions?: QuestionRecord[];
 }
 
 export const NODE_EVENT_KINDS = [
@@ -326,6 +335,12 @@ export const NODE_EVENT_KINDS = [
   'permission_prompt',
   /** ask_app: the answer; text = `allowed` / `denied` plus the scope. */
   'permission_answered',
+  /** Terminal mode: the reply ended with a question; text = the question. */
+  'question',
+  /** Terminal mode: a dialog waits in the window; text = question and options. */
+  'dialog',
+  /** Terminal mode: a question or dialog was answered; text = how. */
+  'answer',
 ] as const;
 export type NodeEventKind = (typeof NODE_EVENT_KINDS)[number];
 
@@ -446,7 +461,8 @@ export function isTerminalSession(v: unknown): v is TerminalSession {
     (SESSION_STATUSES as readonly unknown[]).includes(v.status) &&
     (v.pid === null || v.pid === undefined || typeof v.pid === 'number') &&
     (v.current_node === null || v.current_node === undefined || typeof v.current_node === 'string') &&
-    (v.harness === undefined || typeof v.harness === 'string')
+    (v.harness === undefined || typeof v.harness === 'string') &&
+    (v.pending_prompt === undefined || v.pending_prompt === null || typeof v.pending_prompt === 'string')
   );
 }
 

@@ -216,3 +216,92 @@ claude -p "<ask for a shell command>" --output-format stream-json --verbose --mo
   `ask_app` node asked to `mkdir ask-app-probe-dir` produced one prompt
   `{tool_name:"Bash", input:{command:"mkdir ask-app-probe-dir", description:"…"}, suggestions:[]}`,
   the test answered allow/once, the folder was created, node succeeded ($0.009, about 17 s).
+
+## Turn outcomes: hook payloads, transcript, dialogs and their keys — verified 2026-11-08, Claude Code 2.1.319, Windows 11
+
+Probed with the real CLI in a ConPTY (120x40, `--permission-mode default --model haiku`, a
+`--settings` file whose hooks ran a script that appended `<event> <stdin JSON>` to a log). Each
+item: **V** = verified on that date, **U** = not verified.
+
+**Hook stdin payloads (V).** Every hook gets one JSON object on stdin.
+- Common fields: `session_id`, `transcript_path` (absolute path of the session's JSONL under
+  `~/.claude/projects/<cwd-slug>/<session_id>.jsonl`), `cwd`, `hook_event_name`; most also
+  carry `scratchpad_dir`, `prompt_id`, `permission_mode`, `effort {level}`.
+- `SessionStart`: `source` ("startup"), `model` (e.g. `claude-haiku-5-5`).
+- `UserPromptSubmit`: `prompt` = the submitted text, exactly.
+- `Stop`: `stop_hook_active` (false), **`last_assistant_message`** = the turn's final assistant
+  text, exactly (markdown kept, e.g. `You chose **B**.`), `background_tasks`, `session_crons`.
+  So the app takes the reply text straight from the Stop line; the JSONL is the fallback.
+- `Notification`: `message` ("Claude needs your permission"), `notification_type`
+  ("permission_prompt", also sent for an open AskUserQuestion dialog). It comes **late**: 10 s
+  (permission) to 18 s (AskUserQuestion) after the dialog was drawn, so it cannot be the
+  dialog signal; it only corroborates.
+- `PreToolUse` / `PostToolUse` (probed, not used by the app): `tool_name`, `tool_input`,
+  `tool_use_id`; PostToolUse adds `tool_response` (AskUserQuestion: `answers {question: label}`).
+
+**Transcript JSONL timing (V).** When the AskUserQuestion dialog is on screen, the JSONL already
+ends with the assistant entry whose `message.content` holds `{type: "tool_use", id, name:
+"AskUserQuestion", input: {questions: [{question, header, multiSelect, options: [{label,
+description}]}]}}` (`stop_reason: "tool_use"`), with no `tool_result` for that id yet. Same for
+a Bash call waiting on its permission prompt. After the answer a `user` entry with
+`{type: "tool_result", tool_use_id}` follows. Other line types seen at the tail: `ai-title`,
+`tools-used`, `session-owner`, `atis-latch`, `system` (`stop_hook_summary`, `turn_duration`),
+attachments (`hook_success`).
+
+**AskUserQuestion dialog (V).** Drawn in place of the input box:
+```
+ ☐ A or B                                   ← header (☒ once answered; tabs "← ☐ h  ✔ Submit →" for multi / several questions)
+Which option do you want: A or B?            ← question
+❯ 1. A                                       ← cursor ❯ on the highlighted option
+     Choose option A.                        ← description (indented)
+  2. B
+     Choose option B.
+  3. Type something.                         ← free-text option
+──────────
+  4. Chat about this
+Enter to select · ↑/↓ to navigate · Esc to cancel   (also "· ctrl+g to edit in Notepad ·")
+```
+- Down/Up arrows (`ESC[B`/`ESC[A`) move the cursor (V).
+- A digit selects that option **and submits at once** for a single-select question (V: Up back
+  to 1, then `2` → "User answered … → B", the turn went on).
+- A digit on the "Type something." row only moves the cursor there; typed text replaces the
+  row's label in place (`❯ 3. neither, use C`) and Enter submits it (V).
+- multiSelect: labels are `[ ] X`; Space toggles the highlighted box (`[✔] X`) (V); Enter on
+  an option row **also toggles** (V). After the options come `[ ] Type something` and a
+  `Submit` row; Enter on `Submit` opens "Review your answers … Ready to submit your answers?
+  ❯ 1. Submit answers 2. Cancel", and Enter there submits (V).
+- Several questions in one call (tabs): not probed (U); each question shows as its own dialog.
+
+**Permission prompt (V).**
+```
+ Bash command
+ …
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to <dir> from this project      (wraps onto a 2nd row)
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+ Esc to cancel · Tab to amend
+```
+- The digit `1` selected and ran the command at once (V). Enter confirms the highlighted
+  option (U for this prompt; V for the trust dialog).
+- **Esc** interrupts the turn: the screen shows "⎿ Interrupted · What should Claude do
+  instead?" and **no Stop hook fires** (V). "4. No" behaves the same way (U). The app treats
+  that screen as a `question` outcome so the node does not wait forever.
+
+**Workspace / MCP dialogs (V).** A fresh folder can show "New MCP server found in this
+project …" (options without numbers, `❯` on the highlighted row, "Enter to confirm · Esc to
+cancel") or the trust dialog ("❯ No, exit / Yes, I trust this folder"). These stay start-up
+dialogs (readiness gate markers), not node prompts.
+
+**Open reply questions (V).** "Ask me one short open question …" ended with Stop and
+`last_assistant_message: "What's your favourite colour?"`; the screen shows the idle box.
+
+**End to end (V, 2026-11-08).** `cargo test --test real_terminal real_claude_dialog -- --ignored`
+(two haiku turns in one session): the AskUserQuestion call became a `dialog` prompt from the
+transcript (`question: "Do you want option A or option B?"`, options A, B, "Type something.",
+"Chat about this", `selected: 0`) about 1 s after it was drawn; `answer_prompt {choice: 1}` sent
+the digit `2`, the dialog closed, the reply was "You chose **B**." and the node succeeded. The
+next node's reply "What's your favourite colour?" became a `question` prompt; `continue_node`
+ended it (`succeeded`, no deliverables) and the run succeeded. hooks.log words: `start submit
+stop submit stop`.

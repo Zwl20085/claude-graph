@@ -21,23 +21,31 @@
 //! - [`run`]: the run loop (session slots, cancel, run.json).
 //! - [`api`]: the live-session registry and the command-level functions.
 
+pub mod answer;
 pub mod api;
 pub mod components;
 pub mod deliver;
+pub mod dialog;
 pub mod emulate;
 pub mod hooks;
 pub mod live;
 pub mod message;
 pub mod node;
+pub mod outcome;
 pub mod output;
 mod port;
+pub mod prompt_api;
+mod prompts;
 pub mod pty;
+pub mod questions;
 pub mod reply;
 pub mod run;
 pub mod screen;
 mod send;
 pub mod session;
 mod startup;
+pub mod transcript;
+mod turn;
 
 use std::path::{Path, PathBuf};
 
@@ -104,6 +112,12 @@ pub struct TerminalNodeSummary {
     pub transcript_from: Option<u64>,
     #[serde(default)]
     pub transcript_to: Option<u64>,
+    /// Questions and dialogs the node raised (questions.jsonl).
+    #[serde(default)]
+    pub questions: usize,
+    /// The node waited for the user at least once.
+    #[serde(default)]
+    pub waited_for_user: bool,
 }
 
 /// A change reported by a session task to the run loop.

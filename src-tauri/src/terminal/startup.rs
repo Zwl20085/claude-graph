@@ -76,7 +76,11 @@ impl Session {
         let fail = |what: String| End::Failed(what);
         std::fs::create_dir_all(&dir).map_err(|e| fail(format!("io: {}: {e}", dir.display())))?;
         let hooks = dir.join(HOOKS_FILE);
-        write_json(&hooks, &hooks_json(&dir.join(HOOKS_LOG))).map_err(|e| fail(e.message))?;
+        write_json(
+            &hooks,
+            &hooks_json(&dir.join(HOOKS_LOG), Some(&ctx.notify_exe)),
+        )
+        .map_err(|e| fail(e.message))?;
         self.report(|i| i.status = SessionStatus::Starting);
         let first = self
             .t

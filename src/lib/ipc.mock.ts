@@ -27,6 +27,8 @@ import type {
   RunState,
   RunSummary,
   RunTarget,
+  SessionPrompt,
+  SessionPromptCleared,
 } from '../types/contract';
 import type { Api, Unlisten } from './api';
 import { renderBrief } from './brief';
@@ -35,6 +37,7 @@ import { emptyGraph } from './graphOps';
 import { createMockAssistant, MOCK_ASSISTANT_REPLY_MS } from './mockAssistant';
 import { createMockHarnesses } from './mockHarness';
 import { createMockPermissions } from './mockPermissions';
+import { createMockPrompts } from './mockPrompts';
 import { createMockRunner, targetSet, type MockRun } from './mockRunner';
 import { createMockTerminal, MOCK_PTY_REPLY_MS, type MockChannel } from './mockTerminal';
 import { countStatuses } from './status';
@@ -70,6 +73,11 @@ export interface MockOptions {
   broadcast?: boolean;
   /** Injected channel (tests); wins over `broadcast`. */
   channel?: MockChannel;
+  /**
+   * Terminal runs show the turn outcomes (TURN_CONTRACT): a choice dialog on
+   * the first node, a reply question after the second (browser dev).
+   */
+  simulatePrompts?: boolean;
 }
 
 const MOCK_CHANNEL_NAME = 'claude-graph-mock';
@@ -121,6 +129,8 @@ export function createMockIpc(options: MockOptions = {}): Api {
   const ptyListeners = new Set<(d: PtyData) => void>();
   const promptListeners = new Set<(p: PermissionPrompt) => void>();
   const answeredListeners = new Set<(a: PermissionAnswered) => void>();
+  const sessionPromptListeners = new Set<(p: SessionPrompt) => void>();
+  const clearedListeners = new Set<(c: SessionPromptCleared) => void>();
   /** dir -> accepted fingerprint of the elevated fields (stand-in for trusted.json). */
   const trusted = new Map<string, string>();
   let appSettings: AppSettings = { claude_bin: null };
@@ -159,6 +169,12 @@ export function createMockIpc(options: MockOptions = {}): Api {
     emitEvent: nodeEvent,
   });
 
+  const prompts = createMockPrompts({
+    emitPrompt: (p) => sessionPromptListeners.forEach((h) => h(clone(p))),
+    emitCleared: (c) => clearedListeners.forEach((h) => h(clone(c))),
+    emitEvent: nodeEvent,
+  });
+
   const runner = createMockRunner({
     timers: options.timers ?? defaultTimers,
     stepMs: options.stepMs ?? 600,
@@ -173,7 +189,14 @@ export function createMockIpc(options: MockOptions = {}): Api {
       nodeEvent(runId, nodeId, kind, text);
     },
     permissions,
+    prompts: options.simulatePrompts === true ? prompts.hooks : undefined,
   });
+
+  /** Re-emit a run after a prompt changed (session pending_prompt, node status). */
+  const refresh = (runId: string): void => {
+    const run = runner.get(runId);
+    if (run) stateListeners.forEach((h) => h(clone(run.state)));
+  };
 
   const assistant = createMockAssistant({
     timers: options.timers ?? defaultTimers,
@@ -346,6 +369,23 @@ export function createMockIpc(options: MockOptions = {}): Api {
     onPermissionAnswered: async (handler): Promise<Unlisten> => {
       answeredListeners.add(handler);
       return () => answeredListeners.delete(handler);
+    },
+    answerPrompt: async (runId, sid, promptId, answer) => {
+      prompts.answer(runId, sid, promptId, clone(answer));
+      refresh(runId);
+    },
+    continueNode: async (runId, sid, nodeId) => {
+      prompts.continueNode(runId, sid, nodeId);
+      refresh(runId);
+    },
+    listSessionPrompts: async (runId) => clone(prompts.list(runId)),
+    onSessionPrompt: async (handler): Promise<Unlisten> => {
+      sessionPromptListeners.add(handler);
+      return () => sessionPromptListeners.delete(handler);
+    },
+    onSessionPromptCleared: async (handler): Promise<Unlisten> => {
+      clearedListeners.add(handler);
+      return () => clearedListeners.delete(handler);
     },
   };
 }

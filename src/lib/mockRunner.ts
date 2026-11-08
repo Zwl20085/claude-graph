@@ -15,10 +15,14 @@ import type {
   NodeStatus,
   RunState,
   RunTarget,
+  TurnPrompt,
+  DialogPrompt,
 } from '../types/contract';
 import { runModeOf } from '../types/contract';
 import type { Timers } from './debounce';
 import type { AskDecision, AskRequest } from './mockPermissions';
+import type { MockDecision, MockPromptHooks } from './mockPrompts';
+import { answerText } from './mockPrompts';
 import { deriveSession, groupSessions } from './sessions';
 import { targetSet } from './graphOps';
 import { assertNever } from './status';
@@ -47,6 +51,12 @@ export interface RunnerDeps {
   harnessLabel?: (id: string) => string;
   /** Approval relay for FAKE_ASK (ASKAPP_CONTRACT); without it FAKE_ASK is ignored. */
   permissions?: MockPermissionHooks;
+  /**
+   * Turn outcomes (TURN_CONTRACT): with it, the first node a terminal run
+   * starts opens a choice dialog mid-turn and the second ends with a reply
+   * question; both wait for the user.
+   */
+  prompts?: MockPromptHooks;
 }
 
 export interface MockPermissionHooks {
@@ -115,6 +125,33 @@ function reasonFor(outcome: Outcome): string | null {
   }
 }
 
+/** The demo dialog of the first node of a mock terminal run (id set per node). */
+export const MOCK_DIALOG: DialogPrompt = {
+  type: 'dialog',
+  id: '',
+  kind: 'choice',
+  question: 'Which framework should I use? (mock)',
+  header: 'Framework',
+  options: [
+    { index: 0, label: 'vitest', detail: 'Fast, Vite-native.' },
+    { index: 1, label: 'jest', detail: 'The classic.' },
+    { index: 2, label: 'Type something.' },
+  ],
+  selected: 0,
+  multi: false,
+  allows_text: true,
+  source: 'transcript',
+};
+
+/** The demo reply question of the second node of a mock terminal run. */
+export const MOCK_QUESTION: TurnPrompt & { type: 'reply' } = {
+  type: 'reply',
+  id: '',
+  question: 'Should I also add a CI workflow? (mock)',
+  choices: [{ label: 'Yes, GitHub Actions' }, { label: 'No, skip CI' }],
+  reply_excerpt: 'The deliverables are written.\n\nShould I also add a CI workflow? (mock)\n1. Yes, GitHub Actions\n2. No, skip CI',
+};
+
 /** Fake pid of a mock terminal session (display only). */
 export const MOCK_PID_BASE = 4000;
 
@@ -163,7 +200,10 @@ export function createMockRunner(deps: RunnerDeps) {
   const emit = (run: MockRun): void => {
     if (run.state.mode === 'terminal') {
       const cancelled = run.state.status === 'cancelled';
-      const sessions = (run.state.sessions ?? []).map((s, i) => deriveSession(s, run.state.nodes, cancelled, MOCK_PID_BASE + i));
+      const sessions = (run.state.sessions ?? []).map((s, i) => ({
+        ...deriveSession(s, run.state.nodes, cancelled, MOCK_PID_BASE + i),
+        pending_prompt: deps.prompts?.pendingOf(run.state.run_id, s.sid) ?? null,
+      }));
       run.state = { ...run.state, sessions };
     }
     deps.emitState(run.state);
@@ -264,8 +304,53 @@ export function createMockRunner(deps: RunnerDeps) {
     });
   };
 
+  /** Terminal runs with `prompts`: how many nodes each run has started. */
+  const started = new Map<string, number>();
+
+  /** The node waits on `prompt`; the decision resumes it with `then`. */
+  const waitFor = (run: MockRun, node: Node, prompt: TurnPrompt, then: (d: MockDecision) => void): void => {
+    const hooks = deps.prompts;
+    const sid = (run.state.sessions ?? []).find((s) => s.node_ids.includes(node.id))?.sid;
+    if (!hooks || sid === undefined) return then('continue');
+    setNode(run, node.id, { status: 'waiting' });
+    hooks.open(run.state.run_id, sid, node.id, prompt, (d) => {
+      if (run.state.status !== 'running' || run.state.nodes[node.id]?.status !== 'waiting') return;
+      setNode(run, node.id, { status: 'running' });
+      emit(run);
+      then(d);
+    });
+    emit(run);
+  };
+
+  /** TURN_CONTRACT demo: a dialog on the first node, a reply question after the second. */
+  const playWithPrompts = (run: MockRun, node: Node, index: number): boolean => {
+    const steps = script(node);
+    const id = `${node.id}-p1`;
+    if (index === 0) {
+      play(run, node, steps.slice(0, 2), () =>
+        waitFor(run, node, { ...MOCK_DIALOG, id }, () => play(run, node, steps.slice(2), () => finishNode(run, node))),
+      );
+      return true;
+    }
+    if (index === 1) {
+      play(run, node, [...steps.slice(0, -1), ['text', MOCK_QUESTION.reply_excerpt]], () =>
+        waitFor(run, node, { ...MOCK_QUESTION, id }, (d) => {
+          if (d === 'continue') return finishNode(run, node);
+          play(run, node, [['text', `Thanks, using ${answerText(MOCK_QUESTION, d)}.`]], () => finishNode(run, node));
+        }),
+      );
+      return true;
+    }
+    return false;
+  };
+
   const startNode = (run: MockRun, node: Node): void => {
     setNode(run, node.id, { status: 'running', started_at: stamp() });
+    if (deps.prompts && run.state.mode === 'terminal') {
+      const index = started.get(run.state.run_id) ?? 0;
+      started.set(run.state.run_id, index + 1);
+      if (playWithPrompts(run, node, index)) return;
+    }
     const tool = askedTool(node);
     if (tool !== null && deps.permissions && run.state.mode !== 'terminal') {
       playWithAsk(run, node, tool, deps.permissions);
@@ -303,7 +388,7 @@ export function createMockRunner(deps: RunnerDeps) {
     // Show the settled (queued/skipped) state before anything starts.
     if (settled) emit(run);
 
-    const running = Object.values(run.state.nodes).filter((n) => n.status === 'running').length;
+    const running = Object.values(run.state.nodes).filter((n) => n.status === 'running' || n.status === 'waiting').length;
     const free = Math.max(0, run.graph.settings.max_parallel - running);
     const queued = Object.keys(run.state.nodes).filter((id) => status(id) === 'queued').sort();
     if (halt) queued.forEach((id) => setNode(run, id, { status: 'skipped', reason: 'stop_on_failure' }));
@@ -369,6 +454,7 @@ export function createMockRunner(deps: RunnerDeps) {
       run.state = { ...run.state, status: 'cancelled', finished_at: stamp() };
       deps.permissions?.cancel(runId);
       deps.permissions?.endRun(runId);
+      deps.prompts?.cancel(runId);
       emit(run);
     },
     /** Queue a follow-up; a finished node resumes (running) until the fake reply lands. */
@@ -419,6 +505,7 @@ export function createMockRunner(deps: RunnerDeps) {
       clearTimers(runId, nodeId);
       setNode(run, nodeId, { status: 'cancelled', finished_at: stamp(), reason: 'cancelled by user' });
       deps.permissions?.cancel(runId, nodeId);
+      deps.prompts?.cancel(runId, nodeId);
       advance(run);
     },
   };

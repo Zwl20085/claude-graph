@@ -1,0 +1,39 @@
+  Note that the question only offered "A" and "B" as generic labels, and I didn't have the definitions of either option.
+  If you tell me what A and B refer to, I can carry on with the one you meant.
+
+✻ Worked for 4s · done 1:10
+
+❯ Run this exact bash command and nothing else: mkdir probe_perm_dir
+
+● Bash(mkdir probe_perm_dir)
+  ⎿  Done
+
+● The command mkdir probe_perm_dir ran and completed with no output, so the directory should now exist in the working
+  directory. I didn't run anything else.
+
+✻ Cooked for 7s · done 1:10
+
+❯ Do not use any tool. Ask me one short open question about my favourite colour and end your reply with it.
+
+● What's your favourite colour?
+
+✻ Cooked for 1s · done 1:10
+
+❯ Use the AskUserQuestion tool once with multiSelect true to ask which of X, Y, Z I want, then reply with my choices.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ X, Y, or Z  ✔ Submit  →
+
+Which of X, Y, Z do you want? (Select all that apply)
+
+❯ 1. [✔] X
+         Choose option X.
+  2. [ ] Y
+         Choose option Y.
+  3. [ ] Z
+         Choose option Z.
+  4. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

@@ -16,6 +16,10 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, watch};
 
+use crate::terminal::api::PromptAction;
+use crate::terminal::hooks::HookLine;
+use crate::terminal::transcript::Transcript;
+
 use crate::contract::{NodeEvent, NodeEventKind, NodeStatus, SessionStatus, TerminalSession};
 use crate::harness::adapter::{behavior, Behavior};
 use crate::harness::claude;
@@ -34,6 +38,16 @@ use crate::turns::RunCtx;
 pub(super) const POLL: Duration = Duration::from_millis(300);
 const TAIL_CHARS: usize = 300;
 pub(super) const CANCELLED: &str = "cancelled by user";
+
+/// A node's end: status, reason, and the session's end if it ended too.
+pub(super) type NodeEnd = (NodeStatus, Option<String>, Option<End>);
+
+/// Per-node counts for summary.json.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Stats {
+    pub questions: usize,
+    pub waited: bool,
+}
 
 /// Why a session stopped before its node list was done.
 pub(super) enum End {
@@ -65,6 +79,14 @@ pub(super) struct Session {
     pub(super) span: Option<(u64, u64)>,
     /// How the session's harness is read (markers, submit, stop).
     pub(super) behavior: Behavior,
+    /// Claude Code's transcript JSONL (path from the hook payloads).
+    pub(super) transcript: Option<Transcript>,
+    /// Answers and "continue" from the app.
+    pub(super) actions: Option<mpsc::UnboundedReceiver<PromptAction>>,
+    /// The current node's questions.
+    pub(super) stats: Stats,
+    /// Prompt ids handed out in this session.
+    pub(super) prompt_seq: u32,
 }
 
 impl SessionTask {
@@ -78,6 +100,7 @@ impl SessionTask {
             .unwrap_or_else(|_| claude::behavior());
         self.shared
             .set_delivery(behavior.expect.clone(), behavior.ready_quiet);
+        let actions = self.shared.take_actions();
         let mut s = Session {
             behavior,
             kill: self.shared.kill_watch(),
@@ -90,6 +113,10 @@ impl SessionTask {
             done: BTreeMap::new(),
             announced: None,
             span: None,
+            transcript: None,
+            actions,
+            stats: Stats::default(),
+            prompt_seq: 0,
         };
         s.drive().await;
         if let Some(pty) = &s.pty {
@@ -194,10 +221,24 @@ impl Session {
     }
 
     pub(super) fn poll_hooks(&mut self) -> Vec<Hook> {
-        self.hooks.poll().unwrap_or_else(|e| {
+        let lines = self.hooks.poll_lines().unwrap_or_else(|e| {
             log::warn!("reading {HOOKS_LOG} failed: {e}");
             Vec::new()
-        })
+        });
+        lines.iter().for_each(|l| self.note_transcript(l));
+        lines.into_iter().map(|l| l.hook).collect()
+    }
+
+    /// Remember the transcript path a hook payload names (it changes after
+    /// `/clear`).
+    pub(super) fn note_transcript(&mut self, line: &HookLine) {
+        let Some(path) = line.field("transcript_path") else {
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        if self.transcript.as_ref().map(|t| t.path()) != Some(path.as_path()) {
+            self.transcript = Transcript::new(path);
+        }
     }
 
     pub(super) fn tail(&self) -> String {
@@ -256,8 +297,11 @@ impl Session {
         let nodes = self.t.plan.to_send().to_vec();
         for (i, id) in nodes.iter().enumerate() {
             let started_at = Utc::now();
+            self.stats = Stats::default();
             let (status, reason, end) = self.run_node(id, started_at).await;
             let finished = Finished {
+                questions: self.stats.questions,
+                waited_for_user: self.stats.waited,
                 sid: &self.t.plan.sid,
                 node_id: id,
                 status,

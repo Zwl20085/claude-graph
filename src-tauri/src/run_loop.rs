@@ -380,7 +380,7 @@ impl RunLoop {
         let session = self.state.nodes.get(id).and_then(|n| n.session_id.clone());
         let started = self.state.nodes.get(id).and_then(|n| n.started_at);
         match status {
-            NodeStatus::Running => {
+            NodeStatus::Running | NodeStatus::Waiting => {
                 // Persist first: a failed write leaves the queue untouched.
                 self.save(id, &text).await?;
                 self.sched.hold(id);

@@ -111,9 +111,12 @@ run.json files load as `"headless"` with no sessions) also writes one folder per
 
 ```
 runs/<run-id>/sessions/<sid>/      sid = s1, s2, … (one per connected component, split where the harness changes)
-  hooks.json        --settings file: SessionStart/Stop/Notification hooks appending to hooks.log
-  hooks.log         start / submit / stop / notify, one word per line, written by Claude Code;
-                    Codex sessions: "stop {notify JSON}" lines written by `claude-graph --notify`
+  hooks.json        --settings file: SessionStart/UserPromptSubmit/Stop/Notification hooks running
+                    `"<app>" --notify "<hooks.log>" --event <word> --stdin`
+  hooks.log         start / submit / stop / notify, one line per hook: the word, then the hook's
+                    stdin payload as one line of JSON (transcript_path, prompt,
+                    last_assistant_message, …); word only when the app binary could not be used
+                    (echo fallback); Codex sessions: "stop {notify JSON}" lines
   transcript.log    raw terminal output of the session
   session.json      { sid, title, node_ids, pid, status, harness, started_at, finished_at }
                     (harness: profile id; missing in older files = "claude"; run.json's
@@ -132,8 +135,32 @@ and per node `runs/<run-id>/<node-id>/`:
                     box-drawing rules are left out); its last 256 KiB
   result.md         the same text as reply.md (shown in the Results tab)
   summary.json      { session, started_at, finished_at, status, reason, transcript_from,
-                      transcript_to, … }
+                      transcript_to, questions, waited_for_user, … }
+  questions.jsonl   the node's questions and dialogs (below)
 ```
+
+When the CLI reports the turn's final text (Claude Code's Stop payload
+`last_assistant_message`, Codex's `last-assistant-message`), reply.md is that exact text instead
+of the screen: every message of the node (`> ` quoted, all lines) followed by its reply, so a node
+whose question was answered shows the whole exchange.
+
+`questions.jsonl` holds one JSON object per line, one per question or dialog, oldest first:
+
+```jsonc
+{ "id": "design-p1",                // <node>-p<n>, numbered per session
+  "ts": "2026-11-08T02:00:59Z",
+  "kind": "dialog",                  // "question" (the reply asked) | "dialog" (on screen during the turn)
+  "source": "transcript",            // "transcript" | "screen" | "reply" | "events"
+  "question": "Do you want option A or option B?",
+  "header": "A or B",                // optional
+  "options": [{ "label": "A", "detail": "Choose option A" }, { "label": "B" }],
+  "selected": 0,                     // optional: highlighted option when seen
+  "offer": false,                    // true: a reply question that did not pause (deliverables written)
+  "answer": { "ts": "…", "via": "app", "text": "B", "index": 1 } }   // via: app | window | continue; absent until answered
+```
+
+The answer is written into its record: the file is small and rewritten whole (atomically)
+when an answer arrives, so a reader never needs to join lines.
 
 `transcript_from` / `transcript_to` are byte offsets into the session's `transcript.log`: its
 length when the node's message started to be typed and when the Stop hook was seen (after up

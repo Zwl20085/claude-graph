@@ -30,6 +30,20 @@ body {
   animation: cg-pulse 1.4s ease-in-out infinite;
 }
 
+/* A node that waits for the user: a slower light-blue pulse. */
+@keyframes cg-pulse-wait {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.8);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(56, 189, 248, 0);
+  }
+}
+.cg-pulse-wait {
+  animation: cg-pulse-wait 2s ease-in-out infinite;
+}
+
 /* Running wire: marching dashes. */
 @keyframes cg-dash {
   to {

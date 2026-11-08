@@ -58,39 +58,86 @@ pub fn from_process() -> LaunchOptions {
 }
 
 /// Hidden mode flag: `claude-graph --notify <hooks.log> [json]` (Codex's
-/// `notify` program, docs/ARCHITECTURE.md "Harness profiles").
+/// `notify` program), or `claude-graph --notify <hooks.log> --event <word>
+/// --stdin` (Claude Code hook commands: the payload JSON comes on stdin).
+/// See docs/ARCHITECTURE.md "Harness profiles" and "Turn outcomes".
 pub const FLAG_NOTIFY: &str = "--notify";
+const FLAG_EVENT: &str = "--event";
+const FLAG_STDIN: &str = "--stdin";
 const NOTIFY_FILE: &str = "hooks.log";
+/// Words a hooks.log line may start with.
+pub const NOTIFY_WORDS: [&str; 4] = ["start", "submit", "stop", "notify"];
+/// At most this much of stdin is read; a larger payload is dropped.
+pub const STDIN_MAX: usize = 4 * 1024 * 1024;
 
-/// `Some((file, payload))` when `args` (after the executable) ask for the
-/// notify mode. The payload is whatever came last (Codex appends one JSON
-/// argument); it may hold any characters.
-pub fn notify_args(args: &[String]) -> Option<(PathBuf, Option<&str>)> {
-    match args {
-        [flag, file, rest @ ..] if flag == FLAG_NOTIFY => {
-            Some((PathBuf::from(file), rest.last().map(String::as_str)))
-        }
-        _ => None,
-    }
+/// A parsed notify invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyArgs<'a> {
+    pub file: PathBuf,
+    /// The line's word (`stop` unless `--event` names another).
+    pub word: &'a str,
+    /// Read the payload from stdin.
+    pub stdin: bool,
+    /// The payload argument (Codex appends one JSON argument).
+    pub payload: Option<&'a str>,
 }
 
-/// The hooks.log line for a notify payload: `stop`, plus the payload
+/// `Some(..)` when `args` (after the executable) ask for the notify mode.
+/// An unknown `--event` word is `None` (nothing is written).
+pub fn notify_args(args: &[String]) -> Option<NotifyArgs<'_>> {
+    let [flag, file, rest @ ..] = args else {
+        return None;
+    };
+    if flag != FLAG_NOTIFY {
+        return None;
+    }
+    let mut word = "stop";
+    let mut stdin = false;
+    let mut payload = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            FLAG_EVENT => {
+                word = rest.get(i + 1).map(String::as_str)?;
+                if !NOTIFY_WORDS.contains(&word) {
+                    return None;
+                }
+                i += 1;
+            }
+            FLAG_STDIN => stdin = true,
+            other => payload = Some(other),
+        }
+        i += 1;
+    }
+    Some(NotifyArgs {
+        file: PathBuf::from(file),
+        word,
+        stdin,
+        payload,
+    })
+}
+
+/// The hooks.log line for a payload: `<word>`, plus the payload
 /// re-serialized as one line of compact JSON when it is a JSON object (so
-/// the session can tell its own turn from Codex's side turns). Anything else
-/// is dropped unread.
-pub fn notify_line(payload: Option<&str>) -> String {
+/// the session can read the hook's fields). Anything else is dropped unread.
+pub fn notify_line_for(word: &str, payload: Option<&str>) -> String {
     let object = payload
         .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
         .filter(serde_json::Value::is_object)
         .and_then(|v| serde_json::to_string(&v).ok());
     match object {
-        Some(json) => format!("stop {json}\n"),
-        None => "stop\n".to_string(),
+        Some(json) => format!("{word} {json}\n"),
+        None => format!("{word}\n"),
     }
 }
 
-/// Append [`notify_line`] to `file`, which must be a session's `hooks.log`.
-pub fn notify(file: &Path, payload: Option<&str>) -> std::io::Result<()> {
+/// [`notify_line_for`] with the word `stop` (Codex's notify).
+pub fn notify_line(payload: Option<&str>) -> String {
+    notify_line_for("stop", payload)
+}
+
+/// Append a line to `file`, which must be a session's `hooks.log`.
+pub fn notify_word(file: &Path, word: &str, payload: Option<&str>) -> std::io::Result<()> {
     use std::io::Write as _;
     if file.file_name().and_then(|n| n.to_str()) != Some(NOTIFY_FILE) {
         return Err(std::io::Error::new(
@@ -102,14 +149,39 @@ pub fn notify(file: &Path, payload: Option<&str>) -> std::io::Result<()> {
         .create(true)
         .append(true)
         .open(file)?;
-    f.write_all(notify_line(payload).as_bytes())
+    f.write_all(notify_line_for(word, payload).as_bytes())
+}
+
+/// [`notify_word`] with `stop` (Codex).
+pub fn notify(file: &Path, payload: Option<&str>) -> std::io::Result<()> {
+    notify_word(file, "stop", payload)
+}
+
+/// Up to [`STDIN_MAX`] bytes of stdin as text (`None` when larger or not UTF-8).
+fn read_stdin() -> Option<String> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    let limit = u64::try_from(STDIN_MAX).unwrap_or(u64::MAX) + 1;
+    std::io::stdin().take(limit).read_to_end(&mut buf).ok()?;
+    if buf.len() > STDIN_MAX {
+        return None;
+    }
+    String::from_utf8(buf).ok()
 }
 
 /// The notify mode, if argv asks for it: returns the exit code to use.
 pub fn notify_from_process() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (file, payload) = notify_args(&args)?;
-    Some(match notify(&file, payload) {
+    if args.first().map(String::as_str) != Some(FLAG_NOTIFY) {
+        return None;
+    }
+    let Some(parsed) = notify_args(&args) else {
+        eprintln!("claude-graph --notify: bad arguments");
+        return Some(2);
+    };
+    let input = if parsed.stdin { read_stdin() } else { None };
+    let payload = input.as_deref().or(parsed.payload);
+    Some(match notify_word(&parsed.file, parsed.word, payload) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("claude-graph --notify: {e}");
@@ -210,11 +282,27 @@ mod tests {
         assert_eq!(notify_args(&args(&["/g", "--notify", "x"])), None);
         assert_eq!(notify_args(&args(&["--notify"])), None);
         let only_file = args(&["--notify", "C:/s/hooks.log"]);
-        let (file, payload) = notify_args(&only_file).unwrap();
-        assert_eq!((file, payload), (PathBuf::from("C:/s/hooks.log"), None));
+        let n = notify_args(&only_file).unwrap();
+        assert_eq!(
+            (n.file, n.payload, n.word),
+            (PathBuf::from("C:/s/hooks.log"), None, "stop")
+        );
         let hostile = "{\"a\":\"\\\"&|<>\"}\r\n& del /q *| echo pwned";
         let a = args(&["--notify", "/s/hooks.log", hostile]);
-        assert_eq!(notify_args(&a).unwrap().1, Some(hostile));
+        assert_eq!(notify_args(&a).unwrap().payload, Some(hostile));
+        let hook = args(&["--notify", "/s/hooks.log", "--event", "submit", "--stdin"]);
+        let n = notify_args(&hook).unwrap();
+        assert_eq!((n.word, n.stdin, n.payload), ("submit", true, None));
+        let bad = args(&["--notify", "/s/hooks.log", "--event", "rm"]);
+        assert_eq!(notify_args(&bad), None);
+        assert_eq!(
+            notify_args(&args(&["--notify", "/s/h.log", "--event"])),
+            None
+        );
+        assert_eq!(
+            notify_line_for("start", Some("{\"x\": 1}")),
+            "start {\"x\":1}\n"
+        );
         assert_eq!(notify_line(Some(hostile)), "stop\n");
         assert_eq!(notify_line(None), "stop\n");
         assert_eq!(notify_line(Some("[1]")), "stop\n");

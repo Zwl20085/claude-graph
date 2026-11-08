@@ -12,8 +12,9 @@ use serde_json::Value;
 
 use crate::contract::{
     AppError, AppResult, AssistantState, NodeEvent, NodeEventKind, PermissionAnswered,
-    PermissionPrompt, PtyData, RunState, EVENT_ASSISTANT_UPDATE, EVENT_NODE_EVENT,
-    EVENT_PERMISSION_ANSWERED, EVENT_PERMISSION_PROMPT, EVENT_PTY_DATA, EVENT_RUN_STATE,
+    PermissionPrompt, PtyData, RunState, SessionPrompt, SessionPromptCleared,
+    EVENT_ASSISTANT_UPDATE, EVENT_NODE_EVENT, EVENT_PERMISSION_ANSWERED, EVENT_PERMISSION_PROMPT,
+    EVENT_PTY_DATA, EVENT_RUN_STATE, EVENT_SESSION_PROMPT, EVENT_SESSION_PROMPT_CLEARED,
 };
 
 const TOOL_INPUT_MAX: usize = 200;
@@ -43,6 +44,19 @@ pub trait Emitter: Send + Sync {
     fn permission_prompt(&self, _prompt: &PermissionPrompt) {}
     /// "Ask me in the app": a prompt was resolved. No-op by default.
     fn permission_answered(&self, _answered: &PermissionAnswered) {}
+    /// Terminal mode: a node waits for the user (question or dialog).
+    fn session_prompt(&self, _prompt: &SessionPrompt) {}
+    /// Terminal mode: that prompt was answered, continued or went away.
+    fn session_prompt_cleared(&self, _cleared: &SessionPromptCleared) {}
+}
+
+/// An emitter that drops everything.
+pub struct NullEmitter;
+
+impl Emitter for NullEmitter {
+    fn run_state(&self, _state: &RunState) {}
+    fn node_event(&self, _event: &NodeEvent) {}
+    fn assistant_update(&self, _state: &AssistantState) {}
 }
 
 /// A terminal-mode session window (created by the backend).
@@ -95,6 +109,20 @@ impl Emitter for TauriEmitter {
         use tauri::Emitter as _;
         if let Err(e) = self.0.emit(EVENT_PERMISSION_ANSWERED, answered) {
             log::warn!("emit {EVENT_PERMISSION_ANSWERED} failed: {e}");
+        }
+    }
+
+    fn session_prompt(&self, prompt: &SessionPrompt) {
+        use tauri::Emitter as _;
+        if let Err(e) = self.0.emit(EVENT_SESSION_PROMPT, prompt) {
+            log::warn!("emit {EVENT_SESSION_PROMPT} failed: {e}");
+        }
+    }
+
+    fn session_prompt_cleared(&self, cleared: &SessionPromptCleared) {
+        use tauri::Emitter as _;
+        if let Err(e) = self.0.emit(EVENT_SESSION_PROMPT_CLEARED, cleared) {
+            log::warn!("emit {EVENT_SESSION_PROMPT_CLEARED} failed: {e}");
         }
     }
 
