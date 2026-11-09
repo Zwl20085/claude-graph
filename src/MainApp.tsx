@@ -7,6 +7,8 @@ import App from './App';
 import { api } from './lib/api';
 import { agentApi } from './lib/agentApi';
 import { installAgentWatch } from './store/agentStore';
+import { inboxApi } from './lib/inboxApi';
+import { installInboxStore } from './store/inboxStore';
 import { createGraphStore, installStore } from './store/graphStore';
 import { errorMessage } from './store/runHelpers';
 
@@ -37,6 +39,14 @@ if (import.meta.hot) {
 void store.getState().init();
 // Agent-called mode: follow runs driven from a CLI in the open folder.
 installAgentWatch(store, agentApi);
+// Inbox: agent tips from Vindictive (status for the top-bar badge).
+const inbox = installInboxStore(
+  api,
+  inboxApi,
+  (text) => store.getState().pushToast('error', text),
+  (appSettings) => store.setState({ appSettings }),
+);
+void inbox.getState().load();
 
 export default function MainApp() {
   return <App />;

@@ -119,13 +119,26 @@ pub async fn get_app_settings(state: State<'_, AppState>) -> AppResult<AppSettin
     blocking(move || Ok(st.app_settings())).await
 }
 
+/// Validates and stores; then applies `autostart` to the OS entry and
+/// publishes the inbox status (its settings may have changed).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn set_app_settings(
+    app: AppHandle,
     state: State<'_, AppState>,
+    inbox: State<'_, crate::inbox::Inbox>,
     settings: AppSettings,
 ) -> AppResult<AppSettings> {
     let st = state.inner().clone();
-    blocking(move || st.set_app_settings(&settings)).await
+    let stored = blocking(move || st.set_app_settings(&settings)).await?;
+    let ib = inbox.inner().clone();
+    blocking(move || {
+        ib.emit_status();
+        Ok(())
+    })
+    .await?;
+    crate::inbox::gui::apply_autostart(&app, stored.autostart)
+        .map_err(|e| AppError::new(e.code, format!("settings saved, but {}", e.message)))?;
+    Ok(stored)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -146,7 +159,10 @@ pub async fn open_graph(state: State<'_, AppState>, dir: String) -> AppResult<Gr
         let dir = existing_dir(&dir)?;
         let graph = store::read_graph(&dir)?;
         sweep(&st, &dir);
-        remember(&dir);
+        // Inbox graphs are opened from the Inbox panel, never listed as recent.
+        if !crate::inbox::is_inbox_graph(st.data_dir(), &dir) {
+            remember(&dir);
+        }
         Ok(graph)
     })
     .await

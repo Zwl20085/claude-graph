@@ -14,6 +14,7 @@ import { TopBar } from './components/TopBar';
 import { RunSummaryStrip } from './components/RunSummaryStrip';
 import { TrustDialog } from './components/TrustDialog';
 import { PermissionDialog } from './components/PermissionDialog';
+import { InboxDialog } from './components/InboxPanel';
 import { errorMessage } from './store/runHelpers';
 import { assistantStore } from './store/assistantStore';
 import { ShortcutSheet, useShortcuts } from './components/Shortcuts';
@@ -200,6 +201,7 @@ export default function App() {
       {sheet && <ShortcutSheet onClose={() => setSheet(false)} />}
       <TrustDialog />
       <PermissionDialog />
+      <InboxDialog />
       <Toasts />
     </div>
   );

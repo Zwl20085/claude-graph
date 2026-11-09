@@ -393,6 +393,95 @@ export interface LaunchOptions {
 export interface AppSettings {
   /** Absolute path of the claude CLI; null = env CLAUDE_GRAPH_CLAUDE_BIN, then PATH. */
   claude_bin: string | null;
+  /** The Vindictive inbox (docs/INBOX.md). The backend always sends it; missing = defaults. */
+  inbox?: InboxSettings;
+  /** Start Claude Graph with Windows. Missing = false. */
+  autostart?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Inbox (src-tauri/src/contract_inbox.rs, docs/INBOX.md)
+// ---------------------------------------------------------------------------
+
+/** Event name: the whole `InboxStatus` after every inbox change. */
+export const EVENT_INBOX_UPDATE = 'inbox:update';
+
+export const INBOX_LIMITS = {
+  interval_hours: { min: 1, max: 168, default: 12 },
+  max_parallel: { min: 1, max: 4, default: 2 },
+  timeout_minutes: { min: 5, max: 1440, default: 120 },
+} as const;
+
+export interface InboxSettings {
+  enabled: boolean;
+  /** Absolute tips folder; '' = not chosen. */
+  folder: string;
+  interval_hours: number;
+  max_parallel: number;
+  timeout_minutes: number;
+}
+
+export const DEFAULT_INBOX_SETTINGS: InboxSettings = {
+  enabled: false,
+  folder: '',
+  interval_hours: INBOX_LIMITS.interval_hours.default,
+  max_parallel: INBOX_LIMITS.max_parallel.default,
+  timeout_minutes: INBOX_LIMITS.timeout_minutes.default,
+};
+
+/** Protocol display state of a tip (AGENT-PROTOCOL.md section 5). */
+export type InboxTipState = 'queued' | 'running' | 'done' | 'question' | 'failed' | 'none';
+
+/** What this app is doing with a tip right now. */
+export type InboxPhase = 'waiting' | 'working' | 'question' | 'finished';
+
+export interface InboxRun {
+  /** The protocol's agent.run ('' while waiting). */
+  run: string;
+  phase: InboxPhase;
+  graph_dir: string;
+  graph_run_id: string | null;
+  sid: string | null;
+  started_at: string | null;
+  note: string | null;
+}
+
+export interface InboxTip {
+  id: string;
+  title: string;
+  state: InboxTipState;
+  decision: string;
+  eligible: boolean;
+  host: string | null;
+  at: string | null;
+  run: InboxRun | null;
+}
+
+export interface InboxSkipped {
+  file: string;
+  reason: string;
+}
+
+export interface InboxLogLine {
+  ts: string;
+  tip: string | null;
+  text: string;
+}
+
+/** Return value of `inbox_status` / `inbox_scan_now`; payload of `inbox:update`. */
+export interface InboxStatus {
+  enabled: boolean;
+  folder: string;
+  suggested_folder: string | null;
+  host: string;
+  scanning: boolean;
+  last_scan: string | null;
+  next_scan: string | null;
+  last_error: string | null;
+  tips: InboxTip[];
+  skipped: InboxSkipped[];
+  other_tips: number;
+  log: InboxLogLine[];
 }
 
 export const TRUST_ITEM_KINDS = [

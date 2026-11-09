@@ -73,17 +73,25 @@ pub fn validated(settings: &AppSettings) -> AppResult<AppSettings> {
         Some(v) => Some(validate_claude_bin(v)?.display().to_string()),
         None => None,
     };
-    Ok(AppSettings { claude_bin })
+    Ok(AppSettings {
+        claude_bin,
+        inbox: crate::inbox::settings::validated(&settings.inbox)?,
+        autostart: settings.autostart,
+    })
 }
 
-/// Settings from `<data_dir>/settings.json`; defaults if missing or unreadable.
+/// Settings from `<data_dir>/settings.json`; defaults if missing or
+/// unreadable. The inbox part is re-checked ([`crate::inbox::settings::sanitised`]).
 pub fn load(data_dir: &Path) -> AppSettings {
     let file = data_dir.join(SETTINGS_FILE);
     if !file.is_file() {
         return AppSettings::default();
     }
     match read_json::<AppSettings>(&file) {
-        Ok(s) => s,
+        Ok(s) => AppSettings {
+            inbox: crate::inbox::settings::sanitised(&s.inbox),
+            ..s
+        },
         Err(e) => {
             log::warn!("ignoring unreadable app settings: {e}");
             AppSettings::default()
@@ -108,8 +116,42 @@ mod tests {
             data,
             &AppSettings {
                 claude_bin: Some(v.to_string()),
+                ..AppSettings::default()
             },
         )
+    }
+
+    #[test]
+    fn old_files_load_and_inbox_settings_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join(SETTINGS_FILE), r#"{"claude_bin": null}"#).unwrap();
+        let s = load(tmp.path());
+        assert_eq!(s, AppSettings::default());
+        assert!(!s.inbox.enabled && !s.autostart && s.inbox.interval_hours == 12);
+        let tips = tmp.path().join("tips");
+        fs::create_dir(&tips).unwrap();
+        let wanted = AppSettings {
+            inbox: crate::contract::InboxSettings {
+                enabled: true,
+                folder: tips.display().to_string(),
+                interval_hours: 500,
+                ..Default::default()
+            },
+            autostart: true,
+            ..AppSettings::default()
+        };
+        let stored = save(tmp.path(), &wanted).unwrap();
+        assert_eq!(stored.inbox.interval_hours, 168);
+        assert!(stored.autostart && stored.inbox.enabled);
+        assert_eq!(load(tmp.path()), stored);
+        // A hand-edited bad folder turns the inbox off on load.
+        fs::write(
+            tmp.path().join(SETTINGS_FILE),
+            r#"{"inbox": {"enabled": true, "folder": "relative", "max_parallel": 9}}"#,
+        )
+        .unwrap();
+        let s = load(tmp.path());
+        assert!(!s.inbox.enabled && s.inbox.max_parallel == 4);
     }
 
     #[test]

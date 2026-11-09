@@ -32,6 +32,7 @@ import type {
 } from '../types/contract';
 import type { Api, Unlisten } from './api';
 import { renderBrief } from './brief';
+import { clampInbox } from './inboxSettings';
 import { defaultTimers, type Timers } from './debounce';
 import { emptyGraph } from './graphOps';
 import { createMockAssistant, MOCK_ASSISTANT_REPLY_MS } from './mockAssistant';
@@ -246,13 +247,20 @@ export function createMockIpc(options: MockOptions = {}): Api {
       path: appSettings.claude_bin ?? '/mock/claude',
       version: '2.1.0 (mock)',
     }),
-    getAppSettings: async () => ({ ...appSettings }),
+    getAppSettings: async () => clone(appSettings),
     setAppSettings: async (settings) => {
       const bin = settings.claude_bin === null || settings.claude_bin.trim() === '' ? null : settings.claude_bin.trim();
       const err = bin === null ? null : claudeBinError(bin);
       if (err) throw appError('invalid_input', err);
-      appSettings = { claude_bin: bin };
-      return { ...appSettings };
+      const inbox = settings.inbox ? clampInbox(settings.inbox) : undefined;
+      if (inbox?.enabled && inbox.folder === '') throw appError('invalid_input', 'choose the tips folder before enabling the inbox');
+      // Like serde defaults on the backend: fields not sent are reset (callers send the whole object).
+      appSettings = {
+        claude_bin: bin,
+        ...(inbox ? { inbox } : {}),
+        ...(settings.autostart !== undefined ? { autostart: settings.autostart } : {}),
+      };
+      return clone(appSettings);
     },
     listHarnesses: async () => harnesses.list(),
     saveHarness: async (profile) => harnesses.save(clone(profile)),
