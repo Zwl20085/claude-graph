@@ -88,7 +88,8 @@ function AppSettingsSection() {
     const next = draft.trim() === '' ? null : draft.trim();
     if (next === (appSettings?.claude_bin ?? null)) return setError(null);
     setBusy(true);
-    setError(await saveAppSettings({ claude_bin: next }));
+    // The whole object: fields left out (inbox, autostart) would be reset.
+    setError(await saveAppSettings({ ...(appSettings ?? {}), claude_bin: next }));
     setBusy(false);
   };
 

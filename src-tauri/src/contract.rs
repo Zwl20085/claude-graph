@@ -18,6 +18,7 @@ pub const GRAPH_VERSION: u32 = 1;
 /// Id of the default harness profile (Claude Code).
 pub const DEFAULT_HARNESS: &str = "claude";
 
+pub use crate::contract_inbox::*;
 pub use crate::contract_prompt::*;
 pub use crate::harness::profile::{HarnessCheck, HarnessKind, HarnessProfile, StopMode};
 
@@ -616,6 +617,10 @@ pub struct LaunchOptions {
 pub struct AppSettings {
     /// Explicit `claude` executable; `None` = env override, `~/.local/bin`, PATH.
     pub claude_bin: Option<String>,
+    /// The Vindictive inbox (docs/INBOX.md). Missing in older files: off.
+    pub inbox: InboxSettings,
+    /// Start Claude Graph with Windows (tauri-plugin-autostart). Missing: off.
+    pub autostart: bool,
 }
 
 /// Why a graph needs the user's explicit trust before it runs.

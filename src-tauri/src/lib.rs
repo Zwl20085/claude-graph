@@ -12,10 +12,12 @@ pub mod claude_bin;
 pub mod commands;
 pub mod contract;
 pub mod contract_agent;
+pub mod contract_inbox;
 pub mod contract_prompt;
 pub mod events;
 pub mod graph_util;
 pub mod harness;
+pub mod inbox;
 pub mod job;
 pub mod launch;
 pub mod mcp;
@@ -39,6 +41,11 @@ const EXIT_WAIT: Duration = Duration::from_secs(5);
 /// and assistant turn, kill every terminal session, and wait up to [`EXIT_WAIT`]. Whatever is left is caught by the Job Objects
 /// (Windows) and, on the next open, by the stale-run sweep.
 fn on_exit(app: &tauri::AppHandle) {
+    // First: no inbox write-back for the sessions killed below (tips left
+    // `running` are picked up by the stale-claim rule on the next scan).
+    if let Some(inbox) = app.try_state::<inbox::Inbox>() {
+        inbox.shutdown();
+    }
     let state = app.state::<run_api::AppState>().inner().clone();
     if state.active_count() == 0
         && state.assistant_active_count() == 0
@@ -65,8 +72,23 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(run_api::AppState::default())
         .manage(agentmode::watch::AgentWatch::default())
+        .setup(|app| {
+            let state = app.state::<run_api::AppState>().inner().clone();
+            let settings = state.app_settings();
+            let inbox = inbox::gui::for_app(app.handle(), state);
+            app.manage(inbox.clone());
+            inbox::gui::start_timer(inbox);
+            if let Err(e) = inbox::gui::apply_autostart(app.handle(), settings.autostart) {
+                log::warn!("{}", e.message);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::check_claude,
             commands::list_harnesses,
@@ -112,6 +134,9 @@ pub fn run() {
             agentmode::gui::agent_abandon,
             agentmode::gui::agent_client_configs,
             agentmode::gui::agent_install,
+            inbox::gui::inbox_status,
+            inbox::gui::inbox_scan_now,
+            inbox::gui::inbox_reveal_results,
         ])
         .build(tauri::generate_context!());
     let app = match app {

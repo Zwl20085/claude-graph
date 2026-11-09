@@ -248,6 +248,12 @@ impl AppState {
         self.lock().runs.contains_key(run_id)
     }
 
+    /// A run of the graph in `dir` is live or being set up (the "one run per
+    /// graph folder" rule would refuse a new one).
+    pub fn dir_busy(&self, dir: &Path) -> bool {
+        self.lock().owns_dir(&abs(dir))
+    }
+
     pub fn active_count(&self) -> usize {
         self.lock().runs.len()
     }

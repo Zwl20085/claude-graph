@@ -5,6 +5,7 @@ import { graphStore, useGraphStore } from '../store/graphStore';
 import { errorMessage } from '../store/runHelpers';
 import { api } from '../lib/api';
 import { btnCls, inputCls } from './ui';
+import { InboxButton } from './InboxPanel';
 
 async function pick(title: string): Promise<string | null> {
   try {
@@ -47,6 +48,9 @@ export function StartScreen() {
           <button className={`${btnCls} shrink-0 border border-[#3c3c3c]`} onClick={() => void openFolderFlow()}>
             <FolderOpen size={14} />Open folder
           </button>
+          <span className="shrink-0 rounded border border-[#3c3c3c]">
+            <InboxButton />
+          </span>
         </div>
         <div>
           <h2 className="mb-1 flex items-center gap-1 text-[11px] uppercase tracking-wide text-[#9a9a9a]">

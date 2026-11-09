@@ -1148,3 +1148,73 @@ Tests:
 - `agentmode/{pick_tests, flow_tests, watch_tests}.rs`, plus unit tests in each module.
 - `tests/e2e_agent.rs` drives the binary over stdio MCP and as a CLI.
 - `src/store/agentStore.test.ts` and `src/components/AgentMode.test.tsx` cover the frontend.
+
+## Inbox: the Vindictive runner (2026-11-09, v0.7.0)
+
+Claude Graph is the *runner* of [AGENT-PROTOCOL.md](AGENT-PROTOCOL.md): it scans the board's
+tips folder, runs each eligible `kind: agent` tip in its own generated one-node terminal graph,
+and writes the outcome back into the tip. User-facing description: [INBOX.md](INBOX.md).
+
+Module layout (`src-tauri/src/inbox/`):
+
+- Pure protocol core, no I/O: `split` (frontmatter / body, BOM, CRLF or LF), `tip` (parse; kind,
+  status, the `agent` map as an ordered `serde_yaml::Mapping`), `hash` (section 4 and its test
+  vectors), `eligible` (sections 5 and 6), `patch` (replace only the lines of the top-level
+  `agent:` key, then re-parse and verify every other key kept value and position), `block`
+  (section 3 blocks, the 4000-char cap, the section 7 outcome table), `ops` (claim and finish as
+  text transformations; both refuse a text that is not `kind: agent`).
+- Folder I/O: `folder` (listing, stamp `<mtime ns>-<len>`, `update`: temp file
+  `.<name>.<pid>-<n>.tmp`, stamp check, rename; 5 re-read-and-reapply tries; Windows sharing
+  violations retried with backoff; a vanished file is never recreated), `writeback`, `results`
+  (copies into `agent/<tip id>/`, refusing symlinks and anything outside it), `scan`.
+- Orchestration: `graphgen` (graph under `<data dir>/inbox/<slug>-<hash>/`), `runner` (the
+  `Inbox` state: scans, queue, active rounds, status), `start` (pre-checks, claim, run start),
+  `watch` (one round's outcome), `timer`, `persist` (`inbox/state.json`: last scan and the
+  recorded claim run ids, which gate the stale-claim rule), `retry` (outcomes kept when a
+  write-back failed for a passing reason; bounded delayed re-scans for busy folders); `env`
+  (injectable app state, emitters, host, clock, settings, suggestion), `settings`, `host`, `gui`
+  (Tauri commands, sink, autostart).
+- Review fixes (2026-11-09): fences are exactly `---` (protocol section 9); non-agent tips are
+  read only up to their closing fence (`folder::read_frontmatter`, 64 KiB cap); the queue pop
+  and the slot placeholder (carrying the run id the claim will use) happen under one lock;
+  graph folders holding `CLAUDE.md`, `CLAUDE.local.md`, `.mcp.json` or `.claude` are not run;
+  unpatchable frontmatter is a scan-time skip; `agent.v` counts only as a YAML number.
+
+How it plugs into the existing engine:
+
+- A round is started with `AppState::start_by_mode` on the generated folder (terminal mode), so
+  the reservation, `trust::require_trusted`, the "one run per graph folder" rule and
+  `close_earlier_sessions` apply unchanged. Before claiming, `start` also checks
+  `AppState::dir_busy` (new, read-only), the trust status (not trusted: the tip is not started and
+  the reason is shown; no trust record is ever written) and `refuse_if_agent_active`.
+- The node is a template node (`goal`, `acceptance`, `do_nots` set), so
+  `terminal::message::message_for` always picks `brief_line`: the session gets the one-line
+  pointer to `nodes/task/brief.md`; the tip text is only in the brief, fenced as data under the
+  fixed preamble of protocol section 8. The node title is fixed (`Board task`) because it is part
+  of the typed pointer. The prompt starts with fixed text, so it is never a `!` or `/` line.
+- The run's emitter is a `Tap` around the app emitter: everything is forwarded (windows open as
+  for any terminal run) and the latest `RunState` is kept. `watch` polls it: `Succeeded` → done
+  (reply = `result.md` without the echoed pointer line), other settled statuses → failed,
+  `Waiting` → question (reply question or dialog from `list_session_prompts`) with the session
+  left open; a later finish of the same node appends another block. The timeout counts working
+  time only.
+- Superseding: a tip in `question` (or finished with its session open) that becomes eligible
+  again has its earlier graph run cancelled and its sessions killed, waiting until the folder is
+  free, before the fresh round starts.
+- App exit: `Inbox::shutdown` runs first in `on_exit`, so the killed sessions write nothing; the
+  stale-claim rule picks those tips up at the next scan.
+- `open_graph` does not add inbox graphs to the recent list.
+
+IPC (contract.rs / contract_inbox.rs, contract.ts): commands `inbox_status`, `inbox_scan_now`,
+`inbox_reveal_results`; event `inbox:update` (whole `InboxStatus`); `AppSettings` gained
+`inbox: InboxSettings` and `autostart` (serde defaults, so older settings files load).
+`set_app_settings` applies `autostart` through tauri-plugin-autostart and publishes the inbox
+status. The frontend keeps its own API module (`src/lib/inboxApi.ts`, with a mock) and store
+(`src/store/inboxStore.ts`); `InboxPanel` is a dialog opened from the top bar and the start
+screen.
+
+Tests: unit tests in every core module (`ops_tests.rs`, `folder_tests.rs`,
+`graphgen_tests.rs` and inline), `tests/e2e_inbox.rs` (the whole loop with the fake CLI in a real
+pty: done, question, permission dialog, unchanged, edited, superseded, `kind: task` and another
+host's claim untouched, timeout, max parallel and coalesced scans), `src/store/inboxStore.test.ts`
+and `src/components/InboxPanel.test.tsx`.

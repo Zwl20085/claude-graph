@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://github.com/Zwl20085/claude-graph/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Zwl20085/claude-graph/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="package.json"><img alt="Version 0.6.0" src="https://img.shields.io/badge/version-0.6.0-8b5cf6"></a>
+  <a href="package.json"><img alt="Version 0.7.0" src="https://img.shields.io/badge/version-0.7.0-8b5cf6"></a>
   <a href="LICENSE"><img alt="License MIT" src="https://img.shields.io/badge/license-MIT-3b82f6"></a>
 </p>
 
@@ -226,6 +226,22 @@ dsh: add this entry to `~/.dsh/cordis.patch.yml` (a YAML list), to
 A `/graph` slash command for Claude Code is in
 [examples/claude-command-graph.md](examples/claude-command-graph.md). Rules, error codes and
 files are in [docs/cli-addon.md](docs/cli-addon.md).
+
+## Inbox: agent tasks from your Vindictive board
+
+Mark a tip on the [Vindictive](https://github.com/Zwl20085/vindictive) board as `kind: agent`
+and Claude Graph does the rest. With the Inbox enabled (top bar **Inbox**, off by default, one
+machine only), the app scans the tips folder shortly after start, every 12 hours and on
+**Scan now**. Each new or changed agent tip runs in its own session window, at most two at a
+time. The outcome comes back into the tip: ⭐ result, ❓ questions (also when a permission dialog
+waits in the window) or ⚠ failed. Files land in `agent/<tip id>/` next to the tips.
+
+You answer a question by typing into the tip; the next scan runs it again. The tip text is
+only ever handed to the agent as data in its brief. It never becomes a command, a path or a
+setting, and your own Claude Code permission settings apply. How it works, the settings and the
+safety rules are in [docs/INBOX.md](docs/INBOX.md). The contract between the two apps is
+[docs/AGENT-PROTOCOL.md](docs/AGENT-PROTOCOL.md). An optional setting starts Claude Graph with
+Windows.
 
 ## Advanced: headless engine and Assistant mode
 

@@ -11,6 +11,7 @@ import { GRID } from './Canvas';
 import { SessionChips } from './SessionChips';
 import { AgentRunChip } from './AgentRunChip';
 import { SettingsPopover } from './SettingsPopover';
+import { InboxButton } from './InboxPanel';
 import { StatusPill } from './AssistantHeader';
 import { showsPill } from '../lib/assistantView';
 import { useAssistantStore } from '../store/assistantStore';
@@ -143,6 +144,7 @@ export function TopBar({ logVisible, onToggleLog, onOpenAssistant }: TopBarProps
         <ApprovalsBadge />
         <AssistantChip onOpen={onOpenAssistant} />
         <HarnessChip />
+        <InboxButton />
         <NotificationBell />
         <button className={`${btnCls} ${logVisible ? 'bg-[#37373d]' : ''}`} onClick={onToggleLog} title="Show/hide the log panel (Ctrl+J)" aria-label="show or hide the log panel" aria-pressed={logVisible}>
           <PanelBottom size={14} />
