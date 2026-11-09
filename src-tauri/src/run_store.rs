@@ -2,9 +2,11 @@
 //! prompt.md / events.jsonl / result.md / summary.json / messages.jsonl /
 //! stderr.log, and the append-only GRAPH_LOG.md.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 
@@ -53,19 +55,38 @@ pub fn node_run_dir(dir: &Path, run_id: &str, node_id: &str) -> PathBuf {
     run_dir(dir, run_id).join(node_id)
 }
 
-/// A fresh run id (UTC timestamp, `-002`, `-003`… if that second is taken, zero
-/// padded so ids sort as text); creates the folder.
+/// The last run ids this process issued. Run ids are only unique per graph
+/// folder on disk, but the run registry and the terminal sessions are keyed
+/// by run id alone: two graphs started in the same second (two Inbox tips,
+/// say) must not share one. Ids carry their second, so a short memory is
+/// enough.
+static ISSUED: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+const ISSUED_MAX: usize = 1000;
+
+/// A fresh run id for `dir` (UTC timestamp, `-002`, `-003`… if that second is
+/// taken, zero padded so ids sort as text); creates the folder. Never one
+/// this process issued for another graph in the same second.
 pub fn new_run_id(dir: &Path, now: DateTime<Utc>) -> AppResult<String> {
     let base = now.format("%Y%m%dT%H%M%SZ").to_string();
     fs::create_dir_all(runs_dir(dir))?;
+    let mut issued = ISSUED.lock().unwrap_or_else(|p| p.into_inner());
     for n in 1..1000 {
         let id = if n == 1 {
             base.clone()
         } else {
             format!("{base}-{n:03}")
         };
+        if issued.contains(&id) {
+            continue;
+        }
         match fs::create_dir(run_dir(dir, &id)) {
-            Ok(()) => return Ok(id),
+            Ok(()) => {
+                issued.push_back(id.clone());
+                while issued.len() > ISSUED_MAX {
+                    issued.pop_front();
+                }
+                return Ok(id);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e.into()),
         }
@@ -401,6 +422,20 @@ mod tests {
             mode: crate::contract::RunMode::Headless,
             sessions: Vec::new(),
         }
+    }
+
+    /// Two graph folders started in the same second never share a run id
+    /// (the run registry and the terminal sessions are keyed by it).
+    #[test]
+    fn run_ids_are_unique_across_graph_folders_within_the_process() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let now: DateTime<Utc> = "2026-11-07T10:16:00Z".parse().unwrap();
+        let ra = new_run_id(a.path(), now).unwrap();
+        let rb = new_run_id(b.path(), now).unwrap();
+        assert_ne!(ra, rb);
+        assert!(rb.starts_with("20261107T101600Z"));
+        assert!(b.path().join("runs").join(&rb).is_dir());
     }
 
     #[test]

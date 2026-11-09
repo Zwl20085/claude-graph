@@ -205,7 +205,15 @@ fn non_utf8_files_are_not_written() {
     let f = tmp.path().join("bin.md");
     fs::write(&f, [0xff, 0xfe, 0x00]).unwrap();
     let e = claim_file(&f, "bin", &who("r1"), &known()).unwrap_err();
-    assert!(matches!(e.error, WriteError::NotUtf8));
+    // No frontmatter fence: refused from the bounded read already.
+    assert!(
+        matches!(
+            e.error,
+            WriteError::NotUtf8 | WriteError::Refused(OpError::Unreadable(_))
+        ),
+        "{}",
+        e.describe()
+    );
     assert_eq!(fs::read(&f).unwrap(), [0xff, 0xfe, 0x00]);
 }
 
@@ -288,4 +296,30 @@ fn a_tip_made_read_only_before_the_rename_is_not_replaced() {
     #[allow(clippy::permissions_set_readonly_false)]
     p.set_readonly(false);
     fs::set_permissions(&f, p).unwrap();
+}
+
+/// Review finding 6: the claim checks `kind` from the bounded frontmatter
+/// read before reading the whole file, so a tip that is not an agent tip is
+/// refused as such even when its body could not be read as text.
+#[test]
+fn the_claim_judges_kind_from_the_frontmatter_before_reading_the_body() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("task.md");
+    let mut bytes = b"---\nkind: task\n---\n".to_vec();
+    bytes.extend_from_slice(&[0xff; 4096]);
+    fs::write(&f, &bytes).unwrap();
+    let c = claim_file(&f, "task", &who("r1"), &known()).unwrap_err();
+    assert!(
+        matches!(c.error, WriteError::Refused(OpError::NotAgent)),
+        "{}",
+        c.describe()
+    );
+    let done = Outcome::Done { reply: "x".into() };
+    let fin = finish_file(&f, "task", &who("r1"), "", &done).unwrap_err();
+    assert!(matches!(fin.error, WriteError::Refused(OpError::NotAgent)));
+    assert_eq!(fs::read(&f).unwrap(), bytes);
+    // A frontmatter that never closes within the cap is refused unread too.
+    fs::write(&f, format!("---\n{}", "a: b\n".repeat(20_000))).unwrap();
+    let c = claim_file(&f, "task", &who("r1"), &known()).unwrap_err();
+    assert!(c.describe().contains("64 KiB"), "{}", c.describe());
 }

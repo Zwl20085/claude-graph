@@ -43,4 +43,33 @@ describe('SettingsPopover resource capacities', () => {
       expect(label?.className).toMatch(/min-w-\[3rem\]/);
     }
   });
+
+  it('saving the claude path keeps the inbox and autostart the store copy does not know', async () => {
+    const ipc = createMockIpc({ trustAll: true });
+    const store = createGraphStore(ipc, { autosaveMs: 60_000 });
+    installStore(store);
+    expect(await store.getState().openGraph(MOCK_EXAMPLE_DIR)).toBe(true);
+    // The store's copy is stale: the Inbox panel enabled the inbox afterwards.
+    store.setState({ appSettings: { claude_bin: null } });
+    const inbox = { enabled: true, folder: 'C:/tips', interval_hours: 12, max_parallel: 2, timeout_minutes: 120 };
+    await ipc.setAppSettings({ claude_bin: null, inbox, autostart: true });
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => root?.render(<SettingsPopover />));
+    const field = document.querySelector<HTMLInputElement>('input[placeholder="claude on PATH"]');
+    expect(field).not.toBeNull();
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setValue?.call(field, 'C:/tools/claude.cmd');
+      field?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      field?.focus();
+      field?.blur();
+    });
+    await act(async () => new Promise((r) => setTimeout(r, 0)));
+    expect(await ipc.getAppSettings()).toEqual({ claude_bin: 'C:/tools/claude.cmd', inbox, autostart: true });
+  });
 });

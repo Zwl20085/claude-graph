@@ -179,6 +179,20 @@ mod tests {
         assert!(empty.starts_with("---\nagent:\n  v: '1'\n---\n"), "{empty}");
     }
 
+    /// An existing `agent:` block in a CRLF file is replaced in place; every
+    /// other line keeps its bytes and its `\r\n`.
+    #[test]
+    fn replaces_an_existing_agent_block_and_keeps_crlf() {
+        let text = "\u{feff}---\r\ntitle: a\r\nkind: agent\r\nagent:\r\n  v: 1\r\n  state: done\r\n  custom: keep me\r\n\r\ncolor: red   # c\r\n---\r\nb\r\n";
+        let agent = map(&[("v", "1"), ("state", "running"), ("custom", "keep me")]);
+        let out = set_agent(text, &agent, "b\r\n").unwrap();
+        assert_eq!(
+            out,
+            "\u{feff}---\r\ntitle: a\r\nkind: agent\r\nagent:\r\n  v: '1'\r\n  state: running\r\n  custom: keep me\r\n\r\ncolor: red   # c\r\n---\r\nb\r\n"
+        );
+        assert_eq!(out.matches('\n').count(), out.matches("\r\n").count());
+    }
+
     #[test]
     fn flow_style_agent_is_replaced() {
         let text = "---\nkind: agent\nagent: {v: 1, state: done}\npaper:\n  doi: x\n---\n";

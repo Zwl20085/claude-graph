@@ -345,6 +345,7 @@ impl Inbox {
 
     async fn scan_once(&self, cfg: &RunConfig) -> AppResult<()> {
         let folder = cfg.folder.clone();
+        self.close_finished().await;
         check_layout(&folder, &self.graphs_root())?;
         self.retry_unwritten().await;
         let host = self.0.env.host.clone();
@@ -411,6 +412,62 @@ impl Inbox {
         Ok(())
     }
 
+    /// Start of a scan: every session whose round ended (done or failed)
+    /// before this scan began is killed and its entry dropped. It was left
+    /// open after its write-back so the owner could look at it; closing it
+    /// now keeps one idle `claude` process per handled tip from piling up.
+    /// Rounds whose outcome is still waiting to be written are kept until it
+    /// is; sessions waiting at a question are never touched here. Waits (at
+    /// most [`SUPERSEDE_WAIT`] in all) for the sessions to end, so a tip that
+    /// runs again in this scan finds its graph folder free. Returns the tips
+    /// closed.
+    pub(crate) async fn close_finished(&self) -> Vec<String> {
+        let closed: Vec<(String, Active)> = {
+            let mut s = self.lock();
+            let ids: Vec<String> = s
+                .active
+                .iter()
+                .filter(|(id, a)| {
+                    a.run.phase == InboxPhase::Finished && !s.unwritten.contains_key(*id)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| s.active.remove(&id).map(|a| (id, a)))
+                .collect()
+        };
+        let app = &self.0.env.app;
+        for (id, a) in &closed {
+            a.superseded.store(true, Ordering::SeqCst);
+            let Some(run) = a.run.graph_run_id.as_deref() else {
+                continue;
+            };
+            if let Err(e) = app.cancel_run(run) {
+                if e.code != "not_found" {
+                    self.log(Some(id), format!("closing run {run}: {}", e.message));
+                }
+            }
+            app.terminals().kill_run(run);
+            self.log(Some(id), format!("closed the finished session (run {run})"));
+        }
+        let busy = || {
+            closed.iter().any(|(_, a)| {
+                app.dir_busy(Path::new(&a.run.graph_dir))
+                    || a.run.graph_run_id.as_deref().is_some_and(|run| {
+                        app.terminals()
+                            .all_of(run)
+                            .iter()
+                            .any(|s| s.is_task_alive())
+                    })
+            })
+        };
+        let until = Instant::now() + SUPERSEDE_WAIT;
+        while busy() && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        closed.into_iter().map(|(id, _)| id).collect()
+    }
+
     pub(crate) fn not_started(&self, id: &str, why: &str) {
         self.lock()
             .not_started
@@ -421,13 +478,25 @@ impl Inbox {
     /// The tip's earlier run (waiting for the user, or finished with its
     /// session open) is cancelled and closed before a fresh run starts.
     /// `false` when it is still busy after [`SUPERSEDE_WAIT`].
+    ///
+    /// The tip's [`Active`] entry stays in place until the session is closed
+    /// (so the queued fresh run cannot be taken meanwhile, see
+    /// [`Self::take_next`]); when it does not close, the entry is kept, so a
+    /// later scan closes it again instead of losing track of it.
     async fn supersede(&self, id: &str) -> bool {
-        let Some(active) = self.lock().active.remove(id) else {
+        let Some((flag, graph_run, graph_dir)) = self.lock().active.get(id).map(|a| {
+            (
+                a.superseded.clone(),
+                a.run.graph_run_id.clone(),
+                a.run.graph_dir.clone(),
+            )
+        }) else {
             return true;
         };
-        active.superseded.store(true, Ordering::SeqCst);
+        flag.store(true, Ordering::SeqCst);
         let app = self.0.env.app.clone();
-        let Some(run) = active.run.graph_run_id.as_deref() else {
+        let Some(run) = graph_run.as_deref() else {
+            self.lock().active.remove(id);
             return true;
         };
         if let Err(e) = app.cancel_run(run) {
@@ -436,7 +505,7 @@ impl Inbox {
             }
         }
         app.terminals().kill_run(run);
-        let dir = PathBuf::from(&active.run.graph_dir);
+        let dir = PathBuf::from(&graph_dir);
         let until = Instant::now() + SUPERSEDE_WAIT;
         let busy = || {
             app.dir_busy(&dir)
@@ -450,6 +519,9 @@ impl Inbox {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let closed = !busy();
+        if closed {
+            self.lock().active.remove(id);
+        }
         self.log(
             Some(id),
             if closed {
@@ -464,7 +536,10 @@ impl Inbox {
     /// Take the next pending tip and reserve its slot in one step: its
     /// placeholder (with the run id it will claim with) is inserted under the
     /// same lock, so concurrent pumps never exceed `max_parallel`. Tips queued
-    /// under another tips folder than the current one are dropped.
+    /// under another tips folder than the current one are dropped. A tip that
+    /// still has an [`Active`] entry (its earlier session is being
+    /// superseded) is never taken: it stays queued until [`Self::supersede`]
+    /// has closed that session and removed the entry.
     fn take_next(&self, cfg: &RunConfig) -> Option<(Pending, String, Arc<AtomicBool>)> {
         let mut dropped = Vec::new();
         let next = {
@@ -478,7 +553,14 @@ impl Inbox {
                 if s.working() >= cfg.max_parallel {
                     break None;
                 }
-                let Some(p) = s.queue.pop_front() else {
+                // A tip whose earlier session is still tracked (being
+                // superseded, or not closed yet) waits in the queue: taking it
+                // would replace that session's bookkeeping, and the session
+                // would never be closed.
+                let Some(at) = s.queue.iter().position(|p| !s.active.contains_key(&p.id)) else {
+                    break None;
+                };
+                let Some(p) = s.queue.remove(at) else {
                     break None;
                 };
                 if p.folder != cfg.folder {

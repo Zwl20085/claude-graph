@@ -526,3 +526,93 @@ async fn an_outcome_for_a_read_only_tip_is_kept_and_written_at_the_next_scan() {
     assert_eq!(r.tip("ro").body.matches("<!-- agent:end -->").count(), 1);
     r.kill_all().await;
 }
+
+/// Review finding 2: a done session stays open after its write-back and is
+/// closed at the start of the next scan; a question session is not.
+#[tokio::test(flavor = "multi_thread")]
+async fn finished_sessions_are_closed_at_the_next_scan_and_questions_stay_open() {
+    let r = rig(Duration::from_secs(600));
+    r.write("done", "---\ntitle: Done\nkind: agent\n---\nDo it.\n");
+    r.write(
+        "asks",
+        "---\ntitle: Asks\nkind: agent\n---\nSet up the tests FAKE_QUESTION\n",
+    );
+    r.scan().await;
+    assert_eq!(r.agent("done", "state").as_deref(), Some("done"));
+    assert_eq!(r.agent("asks", "state").as_deref(), Some("question"));
+    let (_, done_run) = graph_run(&r.status_tip("done"));
+    let (_, asks_run) = graph_run(&r.status_tip("asks"));
+    let alive = |run: &str| {
+        r.app
+            .terminals()
+            .all_of(run)
+            .iter()
+            .any(|s| s.is_task_alive())
+    };
+    assert!(alive(&done_run), "left open after the write-back");
+    let before = fs::read_to_string(r.file("done")).unwrap();
+
+    r.scan().await;
+    wait_until("the finished session to close", || !alive(&done_run)).await;
+    assert!(
+        alive(&asks_run),
+        "a question session is not touched: {:#?}",
+        r.inbox.status().log
+    );
+    assert!(r.status_tip("done").run.is_none(), "its entry is dropped");
+    assert_eq!(
+        r.status_tip("asks").run.as_ref().map(|x| x.phase),
+        Some(InboxPhase::Question)
+    );
+    assert_eq!(fs::read_to_string(r.file("done")).unwrap(), before);
+    assert!(r
+        .inbox
+        .status()
+        .log
+        .iter()
+        .any(|l| l.text == format!("closed the finished session (run {done_run})")));
+    r.kill_all().await;
+}
+
+/// The owner edits the tip while its round works: the outcome is written
+/// with the hash of the seen body, the tip shows queued, and the next scan
+/// runs it again with the edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_during_the_run_is_written_with_the_seen_hash_and_runs_again() {
+    let r = rig(Duration::from_secs(600));
+    let seen = "Work FAKE_SLEEP_MS=2500 please\n";
+    r.write("ed", &format!("---\ntitle: Ed\nkind: agent\n---\n{seen}"));
+    r.inbox.scan_now().await.unwrap();
+    wait_until("the claim", || {
+        r.agent("ed", "state").as_deref() == Some("running")
+    })
+    .await;
+    let first_run = r.agent("ed", "run").unwrap();
+    let claimed = fs::read_to_string(r.file("ed")).unwrap();
+    fs::write(r.file("ed"), format!("{claimed}\nAlso add a summary.\n")).unwrap();
+    assert!(r.inbox.wait_idle(TIMEOUT).await);
+    wait_until("the outcome", || {
+        r.agent("ed", "state").as_deref() == Some("done")
+    })
+    .await;
+    let tip = r.tip("ed");
+    assert!(
+        tip.body
+            .starts_with(&format!("{seen}\nAlso add a summary.\n\n<!-- agent:begin")),
+        "{}",
+        tip.body
+    );
+    assert_eq!(r.agent("ed", "hash"), Some(body_hash(seen)));
+    let st = r.status_tip("ed");
+    assert_eq!(st.state, InboxTipState::Queued);
+    assert!(st.eligible, "{}", st.decision);
+
+    r.scan().await;
+    assert_eq!(r.agent("ed", "state").as_deref(), Some("done"));
+    assert_ne!(r.agent("ed", "run").unwrap(), first_run);
+    let tip = r.tip("ed");
+    assert_eq!(tip.body.matches("## ⭐ Result").count(), 2);
+    assert_eq!(r.agent("ed", "hash"), Some(body_hash(&tip.body)));
+    assert_eq!(r.status_tip("ed").state, InboxTipState::Done);
+    r.kill_all().await;
+}

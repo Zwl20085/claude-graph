@@ -134,6 +134,24 @@ pub fn patchable(text: &str, tip: &Tip) -> Result<(), OpError> {
         .map_err(|e| OpError::Patch(e.describe()))
 }
 
+/// The tip is an agent tip whose claim is `who`'s host and run (it needs
+/// only the frontmatter: `tip` may be parsed from it alone).
+pub fn check_ours(tip: &Tip, who: &Claimant<'_>) -> Result<(), OpError> {
+    if !tip.is_agent() {
+        return Err(OpError::NotAgent);
+    }
+    let agent = tip.agent.clone().unwrap_or_default();
+    let (host, run) = (agent.host(), agent.run());
+    if host.as_deref() != Some(who.host) || run.as_deref() != Some(who.run) {
+        return Err(OpError::NotOurs(format!(
+            "now host {} run {}",
+            host.unwrap_or_default(),
+            run.unwrap_or_default()
+        )));
+    }
+    Ok(())
+}
+
 /// Finished text and the body as left (the next round's expected body).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finished {
@@ -154,17 +172,10 @@ pub fn finish(
     outcome: &Outcome,
 ) -> Result<Finished, OpError> {
     let tip = agent_tip(id, text)?;
+    check_ours(&tip, who)?;
     let agent = tip.agent.clone().unwrap_or_default();
-    let (host, run) = (agent.host(), agent.run());
-    if host.as_deref() != Some(who.host) || run.as_deref() != Some(who.run) {
-        return Err(OpError::NotOurs(format!(
-            "now host {} run {}",
-            host.unwrap_or_default(),
-            run.unwrap_or_default()
-        )));
-    }
     let newline = split(text).map_or("\n", |p| p.newline());
-    let rendered = block::render(outcome, who.at, who.host, id);
+    let rendered = block::render(outcome, who.at, who.host, id, newline);
     let body = block::append(&tip.body, &rendered, newline);
     let edited = normalise(&tip.body) != normalise(expected_body);
     let hash = if edited {

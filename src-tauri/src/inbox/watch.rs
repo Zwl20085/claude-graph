@@ -25,7 +25,7 @@ use super::ops::Claimant;
 use super::results::{copy_round, results_dir};
 use super::runner::Inbox;
 use super::start::Launched;
-use super::writeback::finish_file;
+use super::writeback::{claim_holds, finish_file};
 
 /// A waiting node with no prompt listed after this long is reported anyway.
 const PROMPT_GRACE: Duration = Duration::from_secs(10);
@@ -161,11 +161,8 @@ impl Written {
     }
 }
 
-/// Copy the round's files, then append the block and set `agent` (protocol
-/// 7.2 and 7.3). A final outcome (done / failed) that could not be written
-/// for a passing reason is kept for the next scan.
-pub(crate) fn write_round(inbox: &Inbox, round: &Round, outcome: &Outcome) -> Written {
-    let env = inbox.env();
+/// The reply and the deliverables to `<tips>/agent/<id>/` (protocol 7.3).
+fn copy_results(inbox: &Inbox, round: &Round) {
     let id = &round.tip_id;
     match results_dir(&round.folder, id) {
         Ok(dest) => {
@@ -184,11 +181,28 @@ pub(crate) fn write_round(inbox: &Inbox, round: &Round, outcome: &Outcome) -> Wr
         }
         Err(e) => inbox.log(Some(id), format!("results folder refused: {e}")),
     }
+}
+
+/// Copy the round's files (unless the claim is lost), then append the block and set `agent` (protocol
+/// 7.2 and 7.3). A final outcome (done / failed) that could not be written
+/// for a passing reason is kept for the next scan.
+pub(crate) fn write_round(inbox: &Inbox, round: &Round, outcome: &Outcome) -> Written {
+    let env = inbox.env();
+    let id = &round.tip_id;
     let who = Claimant {
         host: &env.host,
         run: &round.run,
         at: (env.clock)(),
     };
+    // A read-only look at the frontmatter first: when the claim is no longer
+    // this host's run (or the tip is gone or no longer an agent tip), the
+    // results folder belongs to whoever holds it now and is not touched.
+    match claim_holds(&round.path, id, &who) {
+        Err(d) if d.is_lost() => {
+            inbox.log(Some(id), format!("results not copied: {}", d.describe()));
+        }
+        _ => copy_results(inbox, round),
+    }
     let state = outcome.state().as_str();
     let written = finish_file(&round.path, id, &who, &round.expected_body, outcome);
     inbox.refresh_tip(id, &round.path);

@@ -36,18 +36,23 @@ protocol (sections 6 to 9). This page says how the runner works in this app.
    OneDrive conflict copy `name-HOST.md`) is left alone.
 3. **Start**: the tip is re-read and checked again, its graph folder must be
    free (the "one run per graph folder" rule, and no agent-called run in it;
-   a busy folder gets a re-scan after 60 s, at most 5 in a row), it must not
-   contain `CLAUDE.md`, `CLAUDE.local.md`, `.mcp.json` or a `.claude` folder
-   (an earlier round could have left them, and a new session would load
-   them: the tip is not started, the reason names the folder, nothing is
-   deleted), and the generated graph must pass the trust gate as it is. Then the tip is
+   a busy folder gets a re-scan after 60 s, at most 5 in a row), neither it
+   nor any folder above it up to the app's data folder may contain
+   `CLAUDE.md`, `CLAUDE.local.md`, `.mcp.json`, `.claude` or `.git` (an
+   earlier round could have left them, and a new session would load them:
+   Claude Code reads `CLAUDE.md` from every parent folder and project
+   settings from a git root; the tip is not started, the reason names each
+   folder, nothing is deleted), and the generated graph must pass the trust
+   gate as it is. Then the tip is
    **claimed** (`agent.state: running`, `host`, `run`, `at`; the body read
    now is the *seen body*) and its graph is started as a normal terminal run,
    so the normal session window opens.
 4. **Outcome**: the node's own turn outcome decides (protocol section 7
    table). The reply and the node's deliverables are copied to
    `<tips folder>/agent/<tip id>/` (by name, never deleted), then one block is
-   appended to the body and `agent` is updated.
+   appended to the body and `agent` is updated. The copy is skipped when a
+   look at the tip's frontmatter right before it shows the tip gone, no
+   longer an agent tip, or claimed by another machine or run.
 
 | The node | Tip state | Block |
 |---|---|---|
@@ -55,6 +60,12 @@ protocol (sections 6 to 9). This page says how the runner works in this app.
 | waits on a reply question | `question` | `## ❓ Questions` with the end of the reply |
 | waits on a permission or choice dialog | `question` | `## ❓ Questions`: "Waiting at `<host>`: `<dialog>`. Answer in the Claude Graph session window." |
 | failed, cancelled, did not start, timed out | `failed` | `## ⚠ Failed` with the reason |
+
+A `done` or `failed` session stays open after its write-back, so you can
+look at it, and is closed at the start of the next scan (timed, at
+start-up, a re-scan, or **Scan now**): every Inbox session whose round was
+written back as done or failed before that scan began is killed. A round
+whose outcome is still waiting to be written stays open until it is.
 
 A tip in `question` keeps its session open. You can answer in the session
 window: when the node then finishes, that outcome is written as one more
@@ -133,6 +144,14 @@ stores it, and the Inbox stays off until you enable it.
   asking. A permission dialog stops the agent in the session window and the
   tip shows ❓ with the dialog text; answer it in the window (the Inbox
   panel's session button opens it). Nothing is approved for you.
+- **Planted files are refused, not removed.** A round could write
+  `CLAUDE.md` next to or above its graph folder, or make a parent a git
+  repository and put `.claude/` or `.mcp.json` there, and every later
+  session would load it. The start check looks in the graph folder and in
+  each folder above it up to and including the app's data folder (never
+  higher: not your home folder), for `CLAUDE.md`, `CLAUDE.local.md`,
+  `.mcp.json`, `.claude` and `.git`. The app itself never creates any of
+  them there.
 - **The trust gate is not bypassed.** The generated graph has no elevated
   settings. If its folder gains something elevated (for example an agent
   wrote `.claude/settings.json` into it), the tip is not started and the
@@ -153,8 +172,12 @@ stores it, and the Inbox stays off until you enable it.
   delete would be undone; Windows offers no compare-and-swap rename.
   OneDrive keeps conflict copies, and the body hash makes the next scan run
   an overwritten edit again only if it reached the file before the check.
+- **The copy window.** The results are copied after a read-only check that
+  the claim is still this run's; another machine claiming the tip between
+  that check and the write-back could still see its `result.md` replaced.
 - **Question sessions stay open** until the tip is edited (then superseded),
-  answered in the window, or the app exits; they have no timeout.
+  answered in the window, or the app exits; they have no timeout. (Done and
+  failed sessions are closed at the next scan, see above.)
 - **Generated graph folders under `<app data>/claude-graph/inbox/` are not
   pruned**: one per tip, with every round's runs and deliverables. Delete
   folders of retired tips by hand.
