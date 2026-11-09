@@ -118,6 +118,12 @@ export interface GraphActions {
   loadAppSettings: () => Promise<void>;
   /** Returns null on success, else the validation message to show inline. */
   saveAppSettings: (settings: AppSettings) => Promise<string | null>;
+  /**
+   * Save only `claude_bin`, on top of a fresh backend read (never this
+   * store's copy, which may be stale or null: the fields left out, inbox and
+   * autostart, would be reset). Null on success, else the message.
+   */
+  saveClaudeBin: (claudeBin: string | null) => Promise<string | null>;
   openGraph: (dir: string) => Promise<boolean>;
   createGraph: (dir: string, name: string) => Promise<boolean>;
   closeGraph: () => Promise<boolean>;
@@ -481,6 +487,15 @@ export function createGraphStore(api: Api, options: StoreOptions = {}): StoreApi
         }
         await get().checkClaude();
         return null;
+      },
+      saveClaudeBin: async (claudeBin) => {
+        let fresh: AppSettings;
+        try {
+          fresh = await api.getAppSettings();
+        } catch (err) {
+          return `Could not read the current settings, nothing saved: ${errorMessage(err)}`;
+        }
+        return get().saveAppSettings({ ...fresh, claude_bin: claudeBin });
       },
       openGraph: (dir) => switchTo(dir, () => api.openGraph(dir), `Could not open ${dir}`),
       createGraph: (dir, name) => switchTo(dir, () => api.createGraph(dir, name), `Could not create graph in ${dir}`),

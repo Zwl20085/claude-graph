@@ -111,6 +111,30 @@ fn claim_then_finish_keeps_every_other_key_and_the_body() {
     assert!(!decide(&tip, &runner()).is_eligible());
 }
 
+/// Review finding 5: a long multi-line reply in a CRLF tip stays within the
+/// block cap as written into the file.
+#[test]
+fn a_long_reply_in_a_crlf_tip_is_cut_to_the_block_cap_as_written() {
+    let c = claim("survey", RICH, &who("r1", 31), &known()).unwrap();
+    let done = Outcome::Done {
+        reply: "a line of the reply\n".repeat(1000),
+    };
+    let f = finish("survey", &c.text, &who("r1", 40), &c.seen_body, &done).unwrap();
+    let start = f.body.find("<!-- agent:begin").unwrap();
+    let end = f.body.find(block::END_LINE).unwrap() + block::END_LINE.len();
+    let written = &f.body[start..end];
+    assert!(
+        written.chars().count() <= block::BLOCK_MAX,
+        "{}",
+        written.chars().count()
+    );
+    assert!(written.contains("[… cut; the full reply is in agent/survey/result.md]"));
+    assert_eq!(
+        written.matches('\n').count(),
+        written.matches("\r\n").count()
+    );
+}
+
 #[test]
 fn an_edit_during_the_run_keeps_the_seen_hash() {
     let text = "---\nkind: agent\ntitle: T\n---\nDo x\n";

@@ -22,7 +22,7 @@ use super::ops::{Claimed, Known};
 use super::runner::{Active, Inbox, Pending};
 use super::tip::parse;
 use super::watch::{self, Round};
-use super::writeback::claim_file;
+use super::writeback::{claim_file, is_agent_file};
 
 /// A started run.
 pub(crate) struct Launched {
@@ -44,21 +44,36 @@ fn not_started(why: impl Into<String>) -> Failure {
     Failure::NotStarted(why.into())
 }
 
-/// Files an earlier agent round could have left in the graph folder that a
-/// new Claude Code session there would load (instructions, MCP servers,
-/// settings). `Some(reason)` names them; nothing is deleted.
-pub fn planted_files(dir: &Path) -> Option<String> {
-    let found: Vec<&str> = PLANTED
+/// Files an earlier agent round could have left that a new Claude Code
+/// session in `dir` would load (instructions, MCP servers, settings, a git
+/// root that carries them): looked for in `dir` and every parent of it up to
+/// and including `top` (the app's data dir), never above it. `Some(reason)`
+/// names each folder and what it contains; nothing is deleted. A `dir`
+/// outside `top` is checked on its own.
+pub fn planted_files(dir: &Path, top: &Path) -> Option<String> {
+    let levels: Vec<&Path> = if dir.starts_with(top) {
+        dir.ancestors().take_while(|a| a.starts_with(top)).collect()
+    } else {
+        vec![dir]
+    };
+    let mut count = 0;
+    let found: Vec<String> = levels
         .iter()
-        .copied()
-        .filter(|name| std::fs::symlink_metadata(dir.join(name)).is_ok())
+        .filter_map(|d| {
+            let names: Vec<&str> = PLANTED
+                .iter()
+                .copied()
+                .filter(|name| std::fs::symlink_metadata(d.join(name)).is_ok())
+                .collect();
+            count += names.len();
+            (!names.is_empty()).then(|| format!("{} contains {}", d.display(), names.join(", ")))
+        })
         .collect();
     (!found.is_empty()).then(|| {
         format!(
-            "{} contains {}, which a new session would load; check and remove {} by hand",
-            dir.display(),
-            found.join(", "),
-            if found.len() == 1 { "it" } else { "them" }
+            "{}, which a new session would load; check and remove {} by hand",
+            found.join("; "),
+            if count == 1 { "it" } else { "them" }
         )
     })
 }
@@ -68,6 +83,9 @@ pub fn planted_files(dir: &Path) -> Option<String> {
 /// gate as is, no agent-called run.
 fn precheck(inbox: &Inbox, p: &Pending, run: &str, dir: &Path) -> Result<(), Failure> {
     let env = inbox.env();
+    // `kind` from the bounded frontmatter read first: a tip that stopped
+    // being an agent tip is not read further (protocol section 9).
+    is_agent_file(&p.path).map_err(|d| not_started(d.describe()))?;
     let (bytes, _) = read(&p.path).map_err(|e| not_started(format!("cannot read: {e}")))?;
     let text = String::from_utf8(bytes).map_err(|_| not_started("not UTF-8"))?;
     let tip = parse(&p.id, &text).map_err(|e| not_started(e.describe()))?;
@@ -87,7 +105,7 @@ fn precheck(inbox: &Inbox, p: &Pending, run: &str, dir: &Path) -> Result<(), Fai
     if env.app.dir_busy(dir) {
         return Err(Failure::Busy("a run of its graph folder is active".into()));
     }
-    if let Some(why) = planted_files(dir) {
+    if let Some(why) = planted_files(dir, &abs(env.app.data_dir())) {
         return Err(not_started(why));
     }
     let dir = graphgen::write(&inbox.graphs_root(), &p.id, &tip.title, &tip.body)
@@ -246,18 +264,18 @@ mod tests {
     fn planted_claude_files_are_named() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
-        assert_eq!(planted_files(d), None);
+        assert_eq!(planted_files(d, d), None);
         std::fs::write(d.join("graph.json"), "{}").unwrap();
         std::fs::create_dir_all(d.join("nodes")).unwrap();
-        assert_eq!(planted_files(d), None);
+        assert_eq!(planted_files(d, d), None);
         for name in PLANTED {
             let sub = tempfile::tempdir().unwrap();
-            if name == ".claude" {
+            if name == ".claude" || name == ".git" {
                 std::fs::create_dir(sub.path().join(name)).unwrap();
             } else {
                 std::fs::write(sub.path().join(name), "x").unwrap();
             }
-            let why = planted_files(sub.path()).expect(name);
+            let why = planted_files(sub.path(), sub.path()).expect(name);
             assert!(
                 why.contains(name) && why.contains(&sub.path().display().to_string()),
                 "{why}"
@@ -265,6 +283,60 @@ mod tests {
         }
         std::fs::write(d.join("CLAUDE.md"), "x").unwrap();
         std::fs::write(d.join(".mcp.json"), "{}").unwrap();
-        assert!(planted_files(d).unwrap().contains("CLAUDE.md, .mcp.json"));
+        assert!(planted_files(d, d)
+            .unwrap()
+            .contains("CLAUDE.md, .mcp.json"));
+    }
+
+    /// Review finding 3: `<data>/inbox/<graph>/` is checked at every level
+    /// up to the data dir, never above it.
+    #[test]
+    fn planted_files_in_parent_folders_up_to_the_data_dir_are_named() {
+        let tmp = tempfile::tempdir().unwrap();
+        let above = tmp.path();
+        let data = above.join("claude-graph");
+        let inbox = data.join("inbox");
+        let graph = inbox.join("tip-0123abcd");
+        std::fs::create_dir_all(&graph).unwrap();
+        // Above the data dir: never looked at.
+        std::fs::write(above.join("CLAUDE.md"), "x").unwrap();
+        std::fs::create_dir(above.join(".git")).unwrap();
+        assert_eq!(planted_files(&graph, &data), None);
+        for (level, name) in [
+            (&graph, ".git"),
+            (&inbox, "CLAUDE.md"),
+            (&inbox, ".git"),
+            (&data, "CLAUDE.local.md"),
+            (&data, ".claude"),
+            (&data, ".mcp.json"),
+        ] {
+            let path = level.join(name);
+            if name.starts_with(".g") || name == ".claude" {
+                std::fs::create_dir(&path).unwrap();
+            } else {
+                std::fs::write(&path, "x").unwrap();
+            }
+            let why = planted_files(&graph, &data).expect(name);
+            assert!(
+                why.contains(&format!("{} contains {name}", level.display())),
+                "{why}"
+            );
+            assert!(
+                !why.contains(&format!("{} contains", above.display())),
+                "{why}"
+            );
+            if path.is_dir() {
+                std::fs::remove_dir(&path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+        // Several levels at once are all named.
+        std::fs::write(graph.join("CLAUDE.md"), "x").unwrap();
+        std::fs::write(data.join("CLAUDE.md"), "x").unwrap();
+        let why = planted_files(&graph, &data).unwrap();
+        assert!(why.contains(&format!("{} contains CLAUDE.md", graph.display())));
+        assert!(why.contains(&format!("{} contains CLAUDE.md", data.display())));
+        assert!(why.ends_with("check and remove them by hand"), "{why}");
     }
 }

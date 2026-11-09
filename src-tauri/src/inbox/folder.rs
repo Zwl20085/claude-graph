@@ -188,7 +188,7 @@ impl<E: std::fmt::Debug> WriteError<E> {
     }
 }
 
-fn gone_or<E>(e: io::Error) -> WriteError<E> {
+pub(crate) fn gone_or<E>(e: io::Error) -> WriteError<E> {
     if e.kind() == io::ErrorKind::NotFound {
         WriteError::Gone
     } else {
@@ -240,7 +240,31 @@ pub fn update_with<T, E: std::fmt::Debug>(
     apply: impl Fn(&str) -> Result<(String, T), E>,
     before_rename: BeforeRename<'_>,
 ) -> Result<T, WriteError<E>> {
+    update_inner(path, &|_| Ok(()), apply, before_rename)
+}
+
+/// A check that runs before every whole-file read of [`update_gated`] (for
+/// example: `kind` from the bounded frontmatter read).
+pub type Gate<'a, E> = &'a dyn Fn(&Path) -> Result<(), WriteError<E>>;
+
+/// [`update`], with `gate` checked before each read of the whole file: a
+/// file the gate refuses is never read past what the gate itself reads.
+pub fn update_gated<T, E: std::fmt::Debug>(
+    path: &Path,
+    gate: Gate<'_, E>,
+    apply: impl Fn(&str) -> Result<(String, T), E>,
+) -> Result<T, WriteError<E>> {
+    update_inner(path, gate, apply, &|_| {})
+}
+
+fn update_inner<T, E: std::fmt::Debug>(
+    path: &Path,
+    gate: Gate<'_, E>,
+    apply: impl Fn(&str) -> Result<(String, T), E>,
+    before_rename: BeforeRename<'_>,
+) -> Result<T, WriteError<E>> {
     for attempt in 0..STAMP_TRIES {
+        gate(path)?;
         let (bytes, before) = read(path).map_err(gone_or)?;
         let text = String::from_utf8(bytes).map_err(|_| WriteError::NotUtf8)?;
         let (new_text, value) = apply(&text).map_err(WriteError::Refused)?;

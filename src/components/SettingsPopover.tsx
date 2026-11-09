@@ -73,7 +73,7 @@ function ResourcesTable({ resources, onChange }: { resources: Settings['resource
 /** Per-machine claude path: get_app_settings / set_app_settings, backend errors inline. */
 function AppSettingsSection() {
   const appSettings = useGraphStore((s) => s.appSettings);
-  const saveAppSettings = useGraphStore((s) => s.saveAppSettings);
+  const saveClaudeBin = useGraphStore((s) => s.saveClaudeBin);
   const loadAppSettings = useGraphStore((s) => s.loadAppSettings);
   const [draft, setDraft] = useState(appSettings?.claude_bin ?? '');
   const [error, setError] = useState<string | null>(null);
@@ -88,8 +88,8 @@ function AppSettingsSection() {
     const next = draft.trim() === '' ? null : draft.trim();
     if (next === (appSettings?.claude_bin ?? null)) return setError(null);
     setBusy(true);
-    // The whole object: fields left out (inbox, autostart) would be reset.
-    setError(await saveAppSettings({ ...(appSettings ?? {}), claude_bin: next }));
+    // Saved on top of a fresh backend read: this store's copy may be stale or null.
+    setError(await saveClaudeBin(next));
     setBusy(false);
   };
 

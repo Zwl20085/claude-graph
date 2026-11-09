@@ -62,16 +62,36 @@ fn one_line(text: &str) -> String {
     flat.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// First `max` chars of `text`, or all of it.
-fn head(text: &str, max: usize) -> (&str, bool) {
-    match text.char_indices().nth(max) {
-        Some((i, _)) => (&text[..i], true),
-        None => (text, false),
+/// Chars of `text` once each `\n` is written as a line end of `nl` chars.
+fn cost(text: &str, nl: usize) -> usize {
+    text.chars().count() + text.matches('\n').count() * nl.saturating_sub(1)
+}
+
+/// The longest start of `text` that costs at most `max` chars (each `\n`
+/// counted as `nl`), and whether it was cut.
+fn head(text: &str, max: usize, nl: usize) -> (&str, bool) {
+    let mut used = 0;
+    for (i, c) in text.char_indices() {
+        used += if c == '\n' { nl } else { 1 };
+        if used > max {
+            return (&text[..i], true);
+        }
     }
+    (text, false)
 }
 
 /// The block (lines joined with `\n`, no final newline), at most [`BLOCK_MAX`] chars.
-pub fn render(outcome: &Outcome, at: NaiveDateTime, host: &str, tip_id: &str) -> String {
+///
+/// `newline` is the tip file's line end; the cap holds for the block as
+/// written (a `\r\n` counts as two chars).
+pub fn render(
+    outcome: &Outcome,
+    at: NaiveDateTime,
+    host: &str,
+    tip_id: &str,
+    newline: &str,
+) -> String {
+    let nl = newline.chars().count().max(1);
     let state = outcome.state().as_str();
     let begin = format!("<!-- agent:begin {} {state} -->", stamp_time(at));
     let heading = match outcome {
@@ -103,16 +123,18 @@ pub fn render(outcome: &Outcome, at: NaiveDateTime, host: &str, tip_id: &str) ->
         "\n\n[… cut; the full reply is in {}result.md]",
         results_rel(tip_id)
     );
+    // Every line but the last ends with `newline` (the body's line end is
+    // counted with the end line).
     let fixed: usize = [&begin, &heading, END_LINE]
         .iter()
-        .map(|s| s.chars().count() + 1)
+        .map(|s| cost(s, nl) + nl)
         .sum::<usize>()
-        + footer.as_ref().map_or(0, |f| f.chars().count() + 2);
+        + footer.as_ref().map_or(0, |f| cost(f, nl) + 2 * nl);
     let room = BLOCK_MAX.saturating_sub(fixed);
-    let body = match head(&text, room) {
+    let body = match head(&text, room, nl) {
         (all, false) => all.to_string(),
         _ => {
-            let (cut, _) = head(&text, room.saturating_sub(pointer.chars().count()));
+            let (cut, _) = head(&text, room.saturating_sub(cost(&pointer, nl)), nl);
             format!("{}{pointer}", cut.trim_end())
         }
     };
@@ -122,17 +144,18 @@ pub fn render(outcome: &Outcome, at: NaiveDateTime, host: &str, tip_id: &str) ->
         lines.push(f);
     }
     lines.push(END_LINE.to_string());
-    lines.join("\n")
-}
-
-/// The body with `block` appended: one blank line before it, a line end
-/// after it; earlier text is kept byte for byte. `newline` is the file's.
-pub fn append(body: &str, block: &str, newline: &str) -> String {
-    let block = if newline == "\n" {
-        block.to_string()
+    let block = lines.join("\n");
+    if newline == "\n" {
+        block
     } else {
         block.replace('\n', newline)
-    };
+    }
+}
+
+/// The body with `block` (rendered with the file's line end `newline`)
+/// appended: one blank line before it, a line end after it; earlier text is
+/// kept byte for byte.
+pub fn append(body: &str, block: &str, newline: &str) -> String {
     if body.is_empty() {
         return format!("{block}{newline}");
     }
@@ -147,7 +170,7 @@ pub fn append(body: &str, block: &str, newline: &str) -> String {
     if !without_last.ends_with('\n') && !without_last.is_empty() {
         out.push_str(newline);
     }
-    out.push_str(&block);
+    out.push_str(block);
     out.push_str(newline);
     out
 }
@@ -169,6 +192,7 @@ mod tests {
             at(),
             "H",
             "survey",
+            "\n",
         );
         assert_eq!(
             b,
@@ -186,6 +210,7 @@ mod tests {
             at(),
             "H",
             "t",
+            "\n",
         );
         assert!(q.contains(" question -->\n## ❓ Questions · 2026-11-09 07:31\n1. Which years?\n2. arXiv?\n<!-- agent:end -->"), "{q}");
         let d = render(
@@ -195,6 +220,7 @@ mod tests {
             at(),
             "DESK",
             "t",
+            "\n",
         );
         assert!(d.contains("Waiting at `DESK`: `Bash command mkdir x`. Answer in the Claude Graph session window."), "{d}");
         assert!(d.contains(" question -->"));
@@ -205,6 +231,7 @@ mod tests {
             at(),
             "H",
             "t",
+            "\n",
         );
         assert!(f.contains(
             " failed -->\n## ⚠ Failed · 2026-11-09 07:31\ntimed out\n<!-- agent:end -->"
@@ -214,11 +241,44 @@ mod tests {
     #[test]
     fn long_replies_are_cut_with_a_pointer_and_markers_defused() {
         let reply = format!("<!-- agent:end -->\n{}", "é".repeat(9000));
-        let b = render(&Outcome::Done { reply }, at(), "H", "t");
+        let b = render(&Outcome::Done { reply }, at(), "H", "t", "\n");
         assert!(b.chars().count() <= BLOCK_MAX, "{}", b.chars().count());
         assert!(b.contains("[… cut; the full reply is in agent/t/result.md]"));
         assert_eq!(b.matches("agent:end").count(), 1);
         assert!(b.ends_with("Files: agent/t/\n<!-- agent:end -->"));
+    }
+
+    /// Review finding 5: the cap holds for the block as written into a CRLF
+    /// file, where every line end is two chars.
+    #[test]
+    fn the_cap_holds_with_crlf_line_ends() {
+        let reply = "line of a long reply\n".repeat(400);
+        for outcome in [
+            Outcome::Done {
+                reply: reply.clone(),
+            },
+            Outcome::Question {
+                text: reply.clone(),
+            },
+            Outcome::Failed { reason: reply },
+        ] {
+            let b = render(&outcome, at(), "H", "t", "\r\n");
+            let n = b.chars().count();
+            assert!(n <= BLOCK_MAX, "{n}");
+            assert!(n > BLOCK_MAX - 30, "the room is used: {n}");
+            assert_eq!(b.matches('\n').count(), b.matches("\r\n").count());
+            assert!(b.ends_with("\r\n<!-- agent:end -->"));
+            let appended = append("x\r\n", &b, "\r\n");
+            assert!(appended.ends_with(&format!("{b}\r\n")));
+        }
+        // A short reply is the same block either way, only the line ends differ.
+        let short = Outcome::Done {
+            reply: "a\nb".into(),
+        };
+        assert_eq!(
+            render(&short, at(), "H", "t", "\r\n"),
+            render(&short, at(), "H", "t", "\n").replace('\n', "\r\n")
+        );
     }
 
     #[test]
@@ -228,7 +288,7 @@ mod tests {
         assert_eq!(append("x\n", "B", "\n"), "x\n\nB\n");
         assert_eq!(append("x\n\n", "B", "\n"), "x\n\nB\n");
         assert_eq!(append("x\n\n\n", "B", "\n"), "x\n\n\nB\n");
-        assert_eq!(append("x\r\n", "B\nC", "\r\n"), "x\r\n\r\nB\r\nC\r\n");
+        assert_eq!(append("x\r\n", "B\r\nC", "\r\n"), "x\r\n\r\nB\r\nC\r\n");
         let body = "Prompt  \n";
         assert!(append(body, "B", "\n").starts_with(body));
     }

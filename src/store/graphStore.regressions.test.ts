@@ -369,6 +369,26 @@ describe('C1: app settings and claude_bin in graph.json', () => {
     expect(s().toasts.some((t) => t.kind === 'info' && t.text.includes('per-machine setting'))).toBe(true);
   });
 
+  it('saving claude_bin keeps the inbox and autostart even when the store copy is null or stale', async () => {
+    const { s, base } = setup();
+    const inbox = { enabled: true, folder: 'C:/tips', interval_hours: 12, max_parallel: 2, timeout_minutes: 120 };
+    await base.setAppSettings({ claude_bin: null, inbox, autostart: true });
+    expect(s().appSettings).toBeNull();
+    expect(await s().saveClaudeBin('C:/tools/claude.cmd')).toBeNull();
+    expect(await base.getAppSettings()).toEqual({ claude_bin: 'C:/tools/claude.cmd', inbox, autostart: true });
+    // A stale copy (the inbox panel changed the settings meanwhile) is not written back.
+    await base.setAppSettings({ claude_bin: 'C:/tools/claude.cmd', inbox: { ...inbox, enabled: false }, autostart: false });
+    expect(await s().saveClaudeBin(null)).toBeNull();
+    expect(await base.getAppSettings()).toEqual({ claude_bin: null, inbox: { ...inbox, enabled: false }, autostart: false });
+  });
+
+  it('saving claude_bin writes nothing when the fresh read fails', async () => {
+    const setAppSettings = vi.fn(async () => ({ claude_bin: null }));
+    const { s } = setup({ getAppSettings: async () => Promise.reject({ code: 'io', message: 'locked' }), setAppSettings });
+    expect(await s().saveClaudeBin('C:/tools/claude.cmd')).toMatch(/nothing saved: locked/);
+    expect(setAppSettings).not.toHaveBeenCalled();
+  });
+
   it('a failing get_app_settings is logged, not fatal', async () => {
     const { s } = setup({ getAppSettings: async () => Promise.reject({ code: 'io', message: 'x' }) });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
