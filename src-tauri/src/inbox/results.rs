@@ -187,9 +187,17 @@ pub fn copy_round(
             .and_then(|t| fsguard::write_replacing(&t, &mut text.as_bytes()));
         report.note(PROMPT_NAME, written);
     }
-    if let Some(r) = result_md.filter(|p| fs::symlink_metadata(p).is_ok()) {
+    if let Some(r) = result_md {
+        // A missing reply file is reported too: a done tip must not point
+        // at a result.md that silently never came.
+        let opened = open(r).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => {
+                io::Error::new(io::ErrorKind::NotFound, "the node left no reply file")
+            }
+            _ => e,
+        });
         let copied =
-            open(r).and_then(|(file, _)| copy_one(file, dest, &canon_root, Path::new(REPLY_NAME)));
+            opened.and_then(|(file, _)| copy_one(file, dest, &canon_root, Path::new(REPLY_NAME)));
         report.note(REPLY_NAME, copied);
     }
     report

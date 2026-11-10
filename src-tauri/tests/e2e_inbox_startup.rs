@@ -125,14 +125,17 @@ async fn a_start_up_dialog_shows_as_a_question_then_the_round_finishes() {
     let (dir, graph_run) = r.at_the_dialog("trusty").await;
     // Nothing was typed into the dialog.
     assert!(received(&dir, &graph_run, "s1").is_empty());
-    // The session's own notification fired, for this dialog.
-    let asked = r.rec.events_of("task", NodeEventKind::Notification);
-    assert!(
-        asked
+    // The session's own notification fires for this dialog. It is the
+    // session's event and the tip is the watcher's write; they are
+    // independent, so the notification may land up to one session poll
+    // after the tip shows the question: wait for it.
+    wait_until("the dialog's notification", || {
+        r.rec
+            .events_of("task", NodeEventKind::Notification)
             .iter()
-            .any(|t| t.starts_with("Claude Code is asking something in the window")),
-        "{asked:?}"
-    );
+            .any(|t| t.starts_with("Claude Code is asking something in the window"))
+    })
+    .await;
 
     // The dialog goes away after DIALOG_MS (> the timeout): the round works
     // on and finishes; it did not time out at the dialog.
