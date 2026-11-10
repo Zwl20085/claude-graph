@@ -147,6 +147,34 @@ fn file_facts(file: &File) -> io::Result<(bool, u32)> {
 
 static TEMP_SEQ: AtomicU32 = AtomicU32::new(0);
 
+/// Retries of a rename refused because another process has the file open.
+const RENAME_RETRIES: u32 = 8;
+/// First pause between them (grows linearly: 25, 50, … 200 ms; 0.9 s in all).
+const RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Windows refuses a rename while another handle without delete sharing is
+/// open on the source or the target (an antivirus or indexer scanning a
+/// file that was just written: `ERROR_ACCESS_DENIED`, `ERROR_SHARING_VIOLATION`,
+/// `ERROR_LOCK_VIOLATION`). Only those are retried, briefly.
+fn transient(e: &io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32 | 33))
+}
+
+fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < RENAME_RETRIES && transient(&e) => {
+                attempt += 1;
+                log::debug!("rename to {} retry {attempt}: {e}", to.display());
+                std::thread::sleep(RENAME_PAUSE * attempt);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Write `data` to `target` through a new temp file next to it
 /// (`create_new`, flushed) and a rename over the name: whatever was at the
 /// name (a hard link to another file included) is replaced, never written
@@ -168,7 +196,7 @@ pub fn write_replacing(target: &Path, data: &mut dyn Read) -> io::Result<()> {
         out.flush()?;
         out.sync_all()?;
         drop(out);
-        fs::rename(&temp, target)
+        rename_retrying(&temp, target)
     })();
     if written.is_err() {
         if let Err(e) = fs::remove_file(&temp) {

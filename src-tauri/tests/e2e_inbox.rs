@@ -651,8 +651,27 @@ async fn done_sessions_close_after_the_write_back_and_questions_stay_open() {
     })
     .await;
     assert!(!r.alive(&done_run));
-    assert!(r.tips.path().join("agent/done/result.md").is_file());
-    assert!(r.tips.path().join("agent/done/prompt.md").is_file());
+    // On failure: the Inbox log, which carries every copy refusal.
+    let log = || {
+        r.inbox
+            .status()
+            .log
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+    };
+    for name in ["result.md", "prompt.md"] {
+        assert!(
+            r.tips.path().join("agent/done").join(name).is_file(),
+            "{name} missing; inbox log: {:#?}",
+            log()
+        );
+    }
+    assert!(
+        !log().iter().any(|l| l.starts_with("not copied")),
+        "{:#?}",
+        log()
+    );
     let closed = r.rec.closed.lock().unwrap().clone();
     assert_eq!(
         closed,

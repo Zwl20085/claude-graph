@@ -92,3 +92,53 @@ fn plain_trees_pass_and_a_link_anywhere_inside_is_named() {
     assert!(why.contains("is a link or junction"), "{why}");
     assert!(elsewhere.join("keep.md").is_file());
 }
+
+/// CI (windows-latest): a scanner briefly holding the target (or the temp
+/// file) open without delete sharing makes the rename fail with a sharing
+/// violation; the write waits a moment and succeeds instead of losing the
+/// file.
+#[cfg(windows)]
+#[test]
+fn a_target_held_open_briefly_is_still_replaced() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("result.md");
+    fs::write(&target, "old").unwrap();
+    // share_mode(0): no read, write or delete sharing, as a scanner may.
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&target)
+        .unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        drop(held);
+    });
+    write_replacing(&target, &mut "new".as_bytes()).unwrap();
+    release.join().unwrap();
+    assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+}
+
+/// A target that stays locked: the write gives up after the bounded retry
+/// with the error, and leaves no temp file.
+#[cfg(windows)]
+#[test]
+fn a_target_locked_for_good_fails_without_a_temp_file() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("result.md");
+    fs::write(&target, "old").unwrap();
+    let _held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&target)
+        .unwrap();
+    let t0 = std::time::Instant::now();
+    assert!(write_replacing(&target, &mut "new".as_bytes()).is_err());
+    assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+    let names: Vec<String> = fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(names, ["result.md"]);
+}

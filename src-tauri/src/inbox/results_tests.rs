@@ -255,3 +255,21 @@ fn a_junction_in_the_deliverables_is_not_followed() {
         r.refused
     );
 }
+
+/// CI finding: a reply file that is missing is reported, never skipped
+/// silently (a done tip would point at a result.md that never came).
+#[test]
+fn a_missing_reply_file_is_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tips = tmp.path().join("tips");
+    fs::create_dir(&tips).unwrap();
+    let dest = results_dir(&tips, "t").unwrap();
+    let r = copy_round(
+        &dest,
+        Some(&tmp.path().join("gone.md")),
+        None,
+        &tmp.path().join("none"),
+    );
+    assert!(r.copied.is_empty());
+    assert_eq!(r.refused, ["result.md: the node left no reply file"]);
+}
