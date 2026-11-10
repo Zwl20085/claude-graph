@@ -40,6 +40,11 @@ pub trait Emitter: Send + Sync {
     fn open_window(&self, _spec: &WindowSpec) -> AppResult<()> {
         Ok(())
     }
+    /// Terminal mode: close the session window `label` if it is open (the
+    /// Inbox, after a round ended done). No-op by default (tests without Tauri).
+    fn close_window(&self, _label: &str) -> AppResult<()> {
+        Ok(())
+    }
     /// "Ask me in the app": a prompt waits for the user. No-op by default.
     fn permission_prompt(&self, _prompt: &PermissionPrompt) {}
     /// "Ask me in the app": a prompt was resolved. No-op by default.
@@ -153,7 +158,28 @@ impl Emitter for TauriEmitter {
         .map(|_| ())
         .map_err(|e| AppError::new("internal", format!("open window {}: {e}", spec.label)))
     }
+
+    /// Only session windows (`term-…`); a closed one is fine. `destroy`: a
+    /// session window has no close handler to run.
+    fn close_window(&self, label: &str) -> AppResult<()> {
+        use tauri::Manager as _;
+        if !label.starts_with(SESSION_WINDOW_PREFIX) {
+            return Err(AppError::new(
+                "invalid_input",
+                format!("{label} is not a session window"),
+            ));
+        }
+        match self.0.get_webview_window(label) {
+            Some(window) => window
+                .destroy()
+                .map_err(|e| AppError::new("internal", format!("close window {label}: {e}"))),
+            None => Ok(()),
+        }
+    }
 }
+
+/// Labels of terminal session windows ([`crate::terminal::window_label`]).
+pub const SESSION_WINDOW_PREFIX: &str = "term-";
 
 /// Fields of the final `result` line.
 #[derive(Debug, Clone, Default, PartialEq)]

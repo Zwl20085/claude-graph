@@ -34,23 +34,27 @@ protocol (sections 6 to 9). This page says how the runner works in this app.
    claiming (the last 500, in `<app data>/claude-graph/inbox/state.json`);
    any other one ("claimed by an unknown run of this machine", for example a
    OneDrive conflict copy `name-HOST.md`) is left alone.
-3. **Start**: the tip is re-read and checked again, its graph folder must be
-   free (the "one run per graph folder" rule, and no agent-called run in it;
-   a busy folder gets a re-scan after 60 s, at most 5 in a row), neither it
-   nor any folder above it up to the app's data folder may contain
-   `CLAUDE.md`, `CLAUDE.local.md`, `.mcp.json`, `.claude` or `.git` (an
-   earlier round could have left them, and a new session would load them:
-   Claude Code reads `CLAUDE.md` from every parent folder and project
-   settings from a git root; the tip is not started, the reason names each
-   folder, nothing is deleted), and the generated graph must pass the trust
-   gate as it is. Then the tip is
+3. **Start**: the tip is re-read and checked again. Every round runs in a
+   fresh graph folder of its own (see *Where things live*). No graph folder
+   of the tip may be busy (an app run or an agent-called run in an earlier
+   round's folder; a busy folder gets a re-scan after 60 s, at most 5 in a
+   row). Neither the new round's folder nor any folder above it up to the
+   app's data folder may contain `CLAUDE.md`, `CLAUDE.local.md`, `.mcp.json`,
+   `.claude` or `.git` (a round could have planted them there, and a new
+   session would load them: Claude Code reads `CLAUDE.md` from every parent
+   folder and project settings from a git root; the tip is not started, the
+   reason names each folder, nothing is deleted). What a round left in its
+   own folder (for example the `.claude/settings.local.json` Claude Code
+   writes when you answer its MCP dialog or pick "don't ask again") is in
+   neither, so it never blocks the next round and is never loaded by it.
+   The generated graph must pass the trust gate as it is. Then the tip is
    **claimed** (`agent.state: running`, `host`, `run`, `at`; the body read
    now is the *seen body*) and its graph is started as a normal terminal run,
    so the normal session window opens.
 4. **Outcome**: the node's own turn outcome decides (protocol section 7
-   table). The reply and the node's deliverables are copied to
-   `<tips folder>/agent/<tip id>/` (by name, never deleted), then one block is
-   appended to the body and `agent` is updated. The copy is skipped when a
+   table). The reply, the round's prompt and the node's deliverables are
+   copied to `<tips folder>/agent/<tip id>/` (by name, never deleted), then
+   one block is appended to the body and `agent` is updated. The copy is skipped when a
    look at the tip's frontmatter right before it shows the tip gone, no
    longer an agent tip, or claimed by another machine or run.
 
@@ -59,13 +63,27 @@ protocol (sections 6 to 9). This page says how the runner works in this app.
 | succeeded | `done` | `## ⭐ Result` with the reply (cut at 4000 chars with a pointer to `result.md`) and `Files: agent/<id>/` |
 | waits on a reply question | `question` | `## ❓ Questions` with the end of the reply |
 | waits on a permission or choice dialog | `question` | `## ❓ Questions`: "Waiting at `<host>`: `<dialog>`. Answer in the Claude Graph session window." |
+| waits at a Claude Code start-up dialog (workspace trust, new MCP server) before its message was typed | `question` | the same, with a fixed text: `Claude Code start-up: do you trust the files in this folder? (workspace trust)`, `Claude Code start-up: new MCP server found in this project`, or `Claude Code start-up dialog` |
 | failed, cancelled, did not start, timed out | `failed` | `## ⚠ Failed` with the reason |
 
-A `done` or `failed` session stays open after its write-back, so you can
-look at it, and is closed at the start of the next scan (timed, at
-start-up, a re-scan, or **Scan now**): every Inbox session whose round was
-written back as done or failed before that scan began is killed. A round
-whose outcome is still waiting to be written stays open until it is.
+A `done` round's session is ended and its window closed right after its
+outcome and files are written (Inbox runs only; ordinary graph runs keep
+their windows). If the done outcome could not be written yet (see below),
+the session stays open until it is, and is closed at the scan after that.
+If closing fails it is logged and the tip stays `done`; a session that does
+not end within 20 s is killed again at the next scan. A `failed` session
+stays open after its write-back, so you can look at it, and is closed at
+the start of the next scan (timed, at start-up, a re-scan, or **Scan
+now**).
+
+A start-up dialog of Claude Code (workspace trust, a new MCP server) holds
+the session before its message is typed. The app never answers it and types
+nothing into it; the session window shows it, the session's own
+notification event fires, and the tip gets one ❓ block per dialog kind and
+round (not again while the same dialog stays open). Answer it in the
+window: the round then goes on, and its outcome is written as one more
+block, as for a question answered in the window. Time at such a dialog
+does not count toward the timeout.
 
 A tip in `question` keeps its session open. You can answer in the session
 window: when the node then finishes, that outcome is written as one more
@@ -90,17 +108,30 @@ row, then the next timed scan).
 
 ## Where things live
 
-- The generated graph of a tip: `<app data>/claude-graph/inbox/<slug>-<hash>/`
-  (`%APPDATA%\claude-graph\inbox\…` on Windows), never inside the tips folder
-  or OneDrive. One node `task`, permission mode `claude_settings`, model
-  inherit, default harness, terminal mode. Earlier rounds' runs and
-  deliverables stay there. Inbox graphs are not added to the recent list; the
-  Inbox panel opens them.
+- The generated graph of a round:
+  `<app data>/claude-graph/inbox/rounds/<slug>-<hash>/<run id>/`
+  (`%APPDATA%\claude-graph\inbox\rounds\…` on Windows), never inside the
+  tips folder or OneDrive; `<run id>` is the round's `agent.run`. One node
+  `task`, permission mode `claude_settings`, model inherit, default harness,
+  terminal mode. Earlier rounds' folders (with their runs, deliverables and
+  anything Claude Code wrote there) stay as they are; a new round starts
+  with an empty deliverables folder and sees earlier rounds only through
+  the tip body (their blocks). Earlier versions used one folder for all
+  rounds of a tip, `<app data>/claude-graph/inbox/<slug>-<hash>/`; it is
+  left as it is and only checked for a run still active in it. Inbox graphs
+  are not added to the recent list; the Inbox panel opens them.
 - The last scan time and the run ids this machine claimed with (last 500):
   `<app data>/claude-graph/inbox/state.json`.
-- Results: `<tips folder>/agent/<tip id>/result.md` (the reply, copied last)
-  plus the deliverables; a deliverable itself named `result.md` is copied as
-  `deliverable-result.md`.
+- Results: `<tips folder>/agent/<tip id>/result.md` (the reply, copied last),
+  `prompt.md` (the prompt the round ran with: the node prompt built from the
+  tip, that is the fixed preamble plus the tip title and the seen body as
+  data, exactly as written into the round's `graph.json`; the brief adds
+  the node's goal, rules and local paths around it), plus the deliverables.
+  Like every file there, `result.md` and `prompt.md` are the latest round's
+  (overwritten by name, never deleted; earlier rounds' prompts stay in their
+  round folders). A round whose run never started writes no `prompt.md`.
+  Deliverables themselves named `result.md` or `prompt.md` are copied as
+  `deliverable-result.md` / `deliverable-prompt.md`.
 
 ## Settings (per machine)
 
@@ -153,9 +184,9 @@ stores it, and the Inbox stays off until you enable it.
   `.mcp.json`, `.claude` and `.git`. The app itself never creates any of
   them there.
 - **The trust gate is not bypassed.** The generated graph has no elevated
-  settings. If its folder gains something elevated (for example an agent
-  wrote `.claude/settings.json` into it), the tip is not started and the
-  panel says why; no trust record is written for it.
+  settings, and each round's folder is new, so nothing elevated is in it
+  when it is checked. If it were, the tip is not started and the panel says
+  why; no trust record is written for it.
 - **Only agent tips are written**, and only their `agent` map and the end of
   the body. Every other frontmatter key keeps its bytes, value and position;
   a change that cannot be verified after re-parsing is not written. Writes
@@ -176,11 +207,19 @@ stores it, and the Inbox stays off until you enable it.
   the claim is still this run's; another machine claiming the tip between
   that check and the write-back could still see its `result.md` replaced.
 - **Question sessions stay open** until the tip is edited (then superseded),
-  answered in the window, or the app exits; they have no timeout. (Done and
-  failed sessions are closed at the next scan, see above.)
+  answered in the window, or the app exits; they have no timeout. A tip
+  waiting at a start-up dialog is one of them. (Done sessions are closed
+  after their write-back, failed ones at the next scan, see above.)
+- **Start-up dialogs are recognised by their screen text** (the markers in
+  `terminal/screen.rs`), and only before the node's message was typed. A
+  dialog Claude Code draws differently in a future version shows as the
+  generic `Claude Code start-up dialog`, or, if no marker matches at all,
+  the tip stays plain running until it is answered. A second dialog of the
+  same kind in one round (a second new MCP server) is not written again.
 - **Generated graph folders under `<app data>/claude-graph/inbox/` are not
-  pruned**: one per tip, with every round's runs and deliverables. Delete
-  folders of retired tips by hand.
+  pruned**: one per round, under one folder per tip. Delete folders of
+  retired tips by hand. A round that is not started after its folder was
+  created (the trust check failed) leaves that folder too.
 - The blank line before an appended block is ensured, not normalised: a
   body ending in several blank lines keeps them.
 - Block markers in agent replies are defused case-sensitively
@@ -191,8 +230,10 @@ stores it, and the Inbox stays off until you enable it.
 `src-tauri/src/inbox/` (see the module docs in `mod.rs`): the pure protocol
 core (`split`, `tip`, `hash`, `eligible`, `patch`, `block`, `ops`), the
 folder I/O (`folder`, `writeback`, `results`, `scan`), orchestration
-(`graphgen`, `runner`, `start`, `watch`, `timer`) and the Tauri side (`gui`).
+(`graphgen`, `runner`, `start`, `watch`, `startup`, `close`, `timer`) and the
+Tauri side (`gui`).
 IPC types: `src-tauri/src/contract_inbox.rs` / `src/types/contract.ts`.
 Frontend: `src/store/inboxStore.ts`, `src/components/InboxPanel.tsx`,
-`src/lib/inboxApi.ts`. End-to-end test with the fake CLI in a real pty:
-`src-tauri/tests/e2e_inbox.rs`.
+`src/lib/inboxApi.ts`. End-to-end tests with the fake CLI in a real pty:
+`src-tauri/tests/e2e_inbox.rs` and `src-tauri/tests/e2e_inbox_startup.rs`
+(a start-up dialog).

@@ -21,6 +21,54 @@ fn folder_names_are_plain_and_distinct() {
     }
 }
 
+/// Item 4: every round of a tip gets its own folder under
+/// `<root>/rounds/<tip folder>/`, so nothing a round left in its folder
+/// (Claude Code's `.claude/settings.local.json` after a dialog answer) is in
+/// the next round's folder or above it.
+#[test]
+fn every_round_of_a_tip_gets_its_own_folder() {
+    let root = Path::new("/data/inbox");
+    let tip = tip_dir(root, "Survey");
+    assert_eq!(tip, root.join(ROUNDS_DIR).join(folder_name("Survey")));
+    let a = round_dir(root, "Survey", "20261109-073100-ab12");
+    let b = round_dir(root, "Survey", "20261109-080000-cd34");
+    assert_eq!(a, tip.join("20261109-073100-ab12"));
+    assert_ne!(a, b);
+    assert_eq!(a.parent(), b.parent());
+    // Never the tip folder itself, never above it, whatever the run id.
+    for run in ["", "..", "a/b", "a\\b", "x y", "调研"] {
+        let d = round_dir(root, "Survey", run);
+        assert_eq!(d.parent(), Some(tip.as_path()), "{run}");
+        let name = d.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "{run} -> {name}"
+        );
+    }
+}
+
+#[test]
+fn round_dirs_lists_the_legacy_folder_and_every_round() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    assert!(round_dirs(root, "t").is_empty());
+    let legacy = root.join(folder_name("t"));
+    std::fs::create_dir_all(&legacy).unwrap();
+    let r1 = write(root, "t", "r1", "T", "body").unwrap();
+    let r2 = write(root, "t", "r2", "T", "body").unwrap();
+    write(root, "other", "r1", "T", "body").unwrap();
+    std::fs::write(tip_dir(root, "t").join("stray.txt"), "x").unwrap();
+    let mut dirs = round_dirs(root, "t");
+    dirs.sort();
+    let mut want = vec![legacy, r1.clone(), r2.clone()];
+    want.sort();
+    assert_eq!(dirs, want);
+    assert_eq!(r1, round_dir(root, "t", "r1"));
+    assert!(r1.join(crate::store::GRAPH_FILE).is_file());
+    // A later round never touches an earlier one's folder.
+    assert_ne!(r1, r2);
+}
+
 #[test]
 fn short_shell_or_slash_tips_still_get_the_pointer_line() {
     for body in ["!rm -rf /", "/review", "ok", "", "Do x\nand y"] {
@@ -51,7 +99,14 @@ fn short_shell_or_slash_tips_still_get_the_pointer_line() {
 fn generated_graph_passes_the_trust_gate_without_items() {
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("data");
-    let dir = write(&inbox_root(&data), "t", "Title", "!rm -rf / and `Bash`\n").unwrap();
+    let dir = write(
+        &inbox_root(&data),
+        "t",
+        "r1",
+        "Title",
+        "!rm -rf / and `Bash`\n",
+    )
+    .unwrap();
     let graph = read_graph(&dir).unwrap();
     let status = crate::trust::status(&data, &dir, &graph);
     assert!(status.trusted && status.items.is_empty(), "{status:?}");
@@ -90,4 +145,12 @@ fn the_brief_quotes_the_tip_as_data() {
     );
     assert!(brief.contains("Your deliverables folder: /g/nodes/task/deliverables/"));
     assert_eq!(g.name, "Inbox: Survey papers");
+}
+
+/// Item 2: the prompt kept with the results is the node prompt the brief is
+/// built from.
+#[test]
+fn the_node_prompt_is_the_task_text() {
+    let g = build("T", "Do x\r\n");
+    assert_eq!(g.nodes[0].prompt, task_text("T", "Do x\r\n"));
 }

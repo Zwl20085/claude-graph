@@ -1,5 +1,6 @@
 //! Copy a round's files to `<tips folder>/agent/<tip id>/` (protocol 7.3):
-//! the final reply as `result.md` plus the node's deliverables, by name.
+//! the final reply as `result.md`, the round's prompt as `prompt.md`, plus
+//! the node's deliverables, by name.
 //! Nothing is ever deleted there. Symbolic links (as sources or targets) and
 //! anything that would resolve outside the results folder are refused and
 //! reported; so are files beyond the size and count caps.
@@ -96,7 +97,10 @@ fn walk(root: &Path, rel: &Path, out: &mut Vec<PathBuf>, refused: &mut Vec<Strin
     }
 }
 
-fn copy_one(src: &Path, dest_root: &Path, canon_root: &Path, rel: &Path) -> io::Result<()> {
+/// `dest_root/rel`, once its folder is inside the results folder and the
+/// target is absent or a regular file (a link or folder is never written
+/// through).
+fn target(dest_root: &Path, canon_root: &Path, rel: &Path) -> io::Result<PathBuf> {
     let dest = dest_root.join(rel);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
@@ -115,19 +119,48 @@ fn copy_one(src: &Path, dest_root: &Path, canon_root: &Path, rel: &Path) -> io::
             ));
         }
     }
-    fs::copy(src, &dest).map(|_| ())
+    Ok(dest)
+}
+
+fn copy_one(src: &Path, dest_root: &Path, canon_root: &Path, rel: &Path) -> io::Result<()> {
+    fs::copy(src, target(dest_root, canon_root, rel)?).map(|_| ())
 }
 
 /// The reply's name in the results folder.
 pub const REPLY_NAME: &str = "result.md";
 /// What a deliverable named `result.md` is copied as (the reply keeps the name).
 pub const DELIVERABLE_RESULT_NAME: &str = "deliverable-result.md";
+/// The round's prompt (the task text its brief was built from).
+pub const PROMPT_NAME: &str = "prompt.md";
+/// What a deliverable named `prompt.md` is copied as.
+pub const DELIVERABLE_PROMPT_NAME: &str = "deliverable-prompt.md";
 
-/// Copy every file under `deliverables`, then `result_md` (as `result.md`,
-/// when given, last so it is always the reply) into `dest`, which
-/// [`results_dir`] made. A top-level deliverable named `result.md` is copied
-/// as `deliverable-result.md`. The reply does not count against the caps.
-pub fn copy_round(dest: &Path, result_md: Option<&Path>, deliverables: &Path) -> CopyReport {
+/// A top-level deliverable's name in the results folder: `result.md` and
+/// `prompt.md` are the runner's own, so those deliverables are renamed.
+fn deliverable_target(rel: &Path) -> PathBuf {
+    let s = rel.as_os_str();
+    if s.eq_ignore_ascii_case(REPLY_NAME) {
+        PathBuf::from(DELIVERABLE_RESULT_NAME)
+    } else if s.eq_ignore_ascii_case(PROMPT_NAME) {
+        PathBuf::from(DELIVERABLE_PROMPT_NAME)
+    } else {
+        rel.to_path_buf()
+    }
+}
+
+/// Copy every file under `deliverables`, then write `prompt` (as
+/// `prompt.md`, when given), then copy `result_md` (as `result.md`, when
+/// given, last so it is always the reply) into `dest`, which [`results_dir`]
+/// made. Top-level deliverables named `result.md` / `prompt.md` are copied
+/// as `deliverable-result.md` / `deliverable-prompt.md`. The prompt and the
+/// reply do not count against the caps; both replace an earlier round's
+/// file of the same name (as every file here, protocol 7.3).
+pub fn copy_round(
+    dest: &Path,
+    result_md: Option<&Path>,
+    prompt: Option<&str>,
+    deliverables: &Path,
+) -> CopyReport {
     let mut report = CopyReport::default();
     let canon_root = match fs::canonicalize(dest) {
         Ok(c) => c,
@@ -136,39 +169,48 @@ pub fn copy_round(dest: &Path, result_md: Option<&Path>, deliverables: &Path) ->
             return report;
         }
     };
+    copy_deliverables(dest, &canon_root, deliverables, &mut report);
+    if let Some(text) = prompt {
+        let written = target(dest, &canon_root, Path::new(PROMPT_NAME))
+            .and_then(|t| fs::write(t, text.as_bytes()));
+        report.note(PROMPT_NAME, written);
+    }
+    if let Some(r) = result_md.filter(|p| p.is_file()) {
+        let copied = copy_one(r, dest, &canon_root, Path::new(REPLY_NAME));
+        report.note(REPLY_NAME, copied);
+    }
+    report
+}
+
+impl CopyReport {
+    fn note(&mut self, shown: &str, result: io::Result<()>) {
+        match result {
+            Ok(()) => self.copied.push(shown.to_string()),
+            Err(e) => self.refused.push(format!("{shown}: {e}")),
+        }
+    }
+}
+
+/// Every file under `deliverables`, within the caps.
+fn copy_deliverables(dest: &Path, canon_root: &Path, deliverables: &Path, report: &mut CopyReport) {
     let mut rels = Vec::new();
     walk(deliverables, Path::new(""), &mut rels, &mut report.refused);
-    let mut files: Vec<(PathBuf, PathBuf, bool)> = rels
-        .into_iter()
-        .map(|r| {
-            let target = if r.as_os_str().eq_ignore_ascii_case(REPLY_NAME) {
-                PathBuf::from(DELIVERABLE_RESULT_NAME)
-            } else {
-                r.clone()
-            };
-            (deliverables.join(&r), target, false)
-        })
-        .collect();
-    if let Some(r) = result_md.filter(|p| p.is_file()) {
-        files.push((r.to_path_buf(), PathBuf::from(REPLY_NAME), true));
-    }
     let mut bytes = 0u64;
-    for (src, rel, is_reply) in files {
+    for r in rels {
+        let src = deliverables.join(&r);
+        let rel = deliverable_target(&r);
         let shown = rel.display().to_string().replace('\\', "/");
         let size = fs::metadata(&src).map_or(0, |m| m.len());
-        if !is_reply && (report.copied.len() >= MAX_FILES || bytes + size > MAX_BYTES) {
+        if report.copied.len() >= MAX_FILES || bytes + size > MAX_BYTES {
             report.refused.push(format!("{shown}: over the copy cap"));
             continue;
         }
-        match copy_one(&src, dest, &canon_root, &rel) {
-            Ok(()) => {
-                bytes += size;
-                report.copied.push(shown);
-            }
-            Err(e) => report.refused.push(format!("{shown}: {e}")),
+        let copied = copy_one(&src, dest, canon_root, &rel);
+        if copied.is_ok() {
+            bytes += size;
         }
+        report.note(&shown, copied);
     }
-    report
 }
 
 #[cfg(test)]
@@ -189,7 +231,7 @@ mod tests {
         let dest = results_dir(&tips, "my-tip").unwrap();
         fs::write(dest.join("old.md"), "from round 1").unwrap();
         fs::write(dest.join("survey.md"), "old").unwrap();
-        let r = copy_round(&dest, Some(&reply), &src);
+        let r = copy_round(&dest, Some(&reply), None, &src);
         // Deliverables first, the reply last.
         assert_eq!(r.copied, ["sub/t.csv", "survey.md", "result.md"]);
         assert!(r.refused.is_empty(), "{:?}", r.refused);
@@ -203,8 +245,63 @@ mod tests {
             "the reply"
         );
         // Missing deliverables folder: just the reply.
-        let r = copy_round(&dest, None, &tmp.path().join("none"));
+        let r = copy_round(&dest, None, None, &tmp.path().join("none"));
         assert!(r.copied.is_empty() && r.refused.is_empty());
+    }
+
+    /// Item 2: the round's prompt is kept as `prompt.md` (latest round's,
+    /// overwritten by name like `result.md`), written before the reply; a
+    /// deliverable of that name never replaces it.
+    #[test]
+    fn the_prompt_is_kept_next_to_the_reply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tips = tmp.path().join("tips");
+        fs::create_dir(&tips).unwrap();
+        let src = tmp.path().join("deliv");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("PROMPT.md"), "the agent's own prompt file").unwrap();
+        let reply = tmp.path().join("reply.md");
+        fs::write(&reply, "the reply").unwrap();
+        let dest = results_dir(&tips, "t").unwrap();
+        fs::write(dest.join(PROMPT_NAME), "round 1 prompt").unwrap();
+        let r = copy_round(&dest, Some(&reply), Some("round 2 prompt\n"), &src);
+        assert_eq!(
+            r.copied,
+            [DELIVERABLE_PROMPT_NAME, PROMPT_NAME, REPLY_NAME],
+            "{:?}",
+            r.refused
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join(PROMPT_NAME)).unwrap(),
+            "round 2 prompt\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join(DELIVERABLE_PROMPT_NAME)).unwrap(),
+            "the agent's own prompt file"
+        );
+        // No prompt given (the round never ran): an earlier one is left as is.
+        let r = copy_round(&dest, None, None, &tmp.path().join("none"));
+        assert!(r.copied.is_empty());
+        assert_eq!(
+            fs::read_to_string(dest.join(PROMPT_NAME)).unwrap(),
+            "round 2 prompt\n"
+        );
+    }
+
+    #[test]
+    fn a_prompt_target_that_is_not_a_regular_file_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tips = tmp.path().join("tips");
+        fs::create_dir(&tips).unwrap();
+        let dest = results_dir(&tips, "t").unwrap();
+        fs::create_dir(dest.join(PROMPT_NAME)).unwrap();
+        let r = copy_round(&dest, None, Some("p"), &tmp.path().join("none"));
+        assert!(r.copied.is_empty());
+        assert!(
+            r.refused[0].starts_with("prompt.md: target exists and is not a regular file"),
+            "{:?}",
+            r.refused
+        );
     }
 
     #[test]
@@ -229,7 +326,7 @@ mod tests {
         let reply = tmp.path().join("reply.md");
         fs::write(&reply, "the reply").unwrap();
         let dest = results_dir(&tips, "t").unwrap();
-        let r = copy_round(&dest, Some(&reply), &src);
+        let r = copy_round(&dest, Some(&reply), None, &src);
         assert_eq!(
             r.copied,
             [DELIVERABLE_RESULT_NAME, "sub/result.md", "result.md"]
@@ -253,7 +350,7 @@ mod tests {
         let not_a_dir = tmp.path().join("deliv");
         fs::write(&not_a_dir, "x").unwrap();
         let dest = results_dir(&tips, "t").unwrap();
-        let r = copy_round(&dest, None, &not_a_dir);
+        let r = copy_round(&dest, None, None, &not_a_dir);
         assert!(r.copied.is_empty());
         assert!(
             r.refused[0].contains("cannot read the folder"),
@@ -276,7 +373,11 @@ mod tests {
         fs::create_dir(&src).unwrap();
         std::os::unix::fs::symlink("/etc/passwd", src.join("p")).unwrap();
         let dest = results_dir(&tips, "y").unwrap();
-        let r = copy_round(&dest, None, &src);
+        let r = copy_round(&dest, None, None, &src);
         assert!(r.copied.is_empty() && r.refused[0].contains("symbolic link"));
+        // A symlinked prompt.md target is not followed.
+        std::os::unix::fs::symlink("/etc/passwd", dest.join(PROMPT_NAME)).unwrap();
+        let r = copy_round(&dest, None, Some("p"), &tmp.path().join("none"));
+        assert!(r.copied.is_empty() && r.refused[0].contains("not a regular file"));
     }
 }

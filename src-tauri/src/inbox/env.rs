@@ -128,6 +128,9 @@ impl Emitter for Tap {
     fn open_window(&self, spec: &WindowSpec) -> AppResult<()> {
         self.inner.open_window(spec)
     }
+    fn close_window(&self, label: &str) -> AppResult<()> {
+        self.inner.close_window(label)
+    }
     fn permission_prompt(&self, prompt: &PermissionPrompt) {
         self.inner.permission_prompt(prompt);
     }

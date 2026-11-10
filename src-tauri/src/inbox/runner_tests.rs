@@ -222,6 +222,7 @@ async fn finished_sessions_are_closed_at_the_start_of_the_next_scan() {
         graph_dir: ib.graphs_root().join("kept"),
         graph_run: Some("r-kept".into()),
         expected_body: String::new(),
+        prompt: None,
     };
     ib.keep_unwritten(
         &round,
@@ -280,6 +281,7 @@ fn results_are_not_copied_when_the_claim_is_lost() {
         graph_dir,
         graph_run: Some("g1".into()),
         expected_body: "Do x\n".into(),
+        prompt: Some("the prompt".into()),
     };
     let done = Outcome::Done {
         reply: "mine".into(),
@@ -318,11 +320,18 @@ fn results_are_not_copied_when_the_claim_is_lost() {
         "theirs"
     );
 
+    assert!(!results.join("prompt.md").exists(), "no prompt either");
+
     // Still ours: copied and written.
     std::fs::write(&tip, agent_tip_claimed_by("H", "r-mine")).unwrap();
     assert!(matches!(write_round(&ib, &round, &done), Written::Yes(_)));
     assert_eq!(
         std::fs::read_to_string(results.join("result.md")).unwrap(),
         "mine"
+    );
+    // Item 2: the round's prompt is kept next to the reply.
+    assert_eq!(
+        std::fs::read_to_string(results.join("prompt.md")).unwrap(),
+        "the prompt"
     );
 }

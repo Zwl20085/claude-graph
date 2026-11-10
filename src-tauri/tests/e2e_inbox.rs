@@ -15,9 +15,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use claude_graph_lib::contract::{InboxPhase, InboxStatus, InboxTipState};
+use claude_graph_lib::inbox::graphgen::{inbox_root, round_dir, task_text, tip_dir};
 use claude_graph_lib::inbox::hash::body_hash;
 use claude_graph_lib::inbox::tip::{parse, Tip};
 use claude_graph_lib::inbox::{Inbox, InboxEnv, NullSink, RunConfig};
+use claude_graph_lib::paths::abs;
 use claude_graph_lib::run_api::AppState;
 use common::term::{received, wait_until};
 use common::*;
@@ -28,18 +30,25 @@ struct Rig {
     tips: tempfile::TempDir,
     app: AppState,
     inbox: Inbox,
+    rec: Arc<Recorder>,
 }
 
 fn rig(timeout: Duration) -> Rig {
     use_fake_claude("");
     let tips = tempfile::tempdir().unwrap();
     let app = fresh_app();
-    let inbox = inbox_on(&app, tips.path(), timeout);
-    Rig { tips, app, inbox }
+    let rec = Arc::new(Recorder::default());
+    let inbox = inbox_on(&app, tips.path(), timeout, rec.clone());
+    Rig {
+        tips,
+        app,
+        inbox,
+        rec,
+    }
 }
 
 /// An inbox on `app`'s data dir (a second one stands for an app restart).
-fn inbox_on(app: &AppState, folder: &Path, timeout: Duration) -> Inbox {
+fn inbox_on(app: &AppState, folder: &Path, timeout: Duration, rec: Arc<Recorder>) -> Inbox {
     let cfg = RunConfig {
         enabled: true,
         folder: folder.to_path_buf(),
@@ -49,7 +58,7 @@ fn inbox_on(app: &AppState, folder: &Path, timeout: Duration) -> Inbox {
     };
     Inbox::new(InboxEnv {
         app: app.clone(),
-        emitter: Arc::new(Recorder::default()),
+        emitter: rec,
         sink: Arc::new(NullSink),
         host: HOST.into(),
         clock: Arc::new(|| chrono::Local::now().naive_local()),
@@ -98,6 +107,28 @@ impl Rig {
             .into_iter()
             .find(|t| t.id == id)
             .unwrap_or_else(|| panic!("tip {id} listed"))
+    }
+
+    /// The graph folder and graph run of the tip's last round (by its
+    /// `agent.run`; a done round's entry is gone from the status).
+    fn round(&self, id: &str) -> (PathBuf, String) {
+        let run = self.agent(id, "run").expect("agent.run");
+        let dir = round_dir(&inbox_root(self.app.data_dir()), id, &run);
+        let runs: Vec<String> = fs::read_dir(dir.join("runs"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(runs.len(), 1, "one graph run per round folder: {runs:?}");
+        (dir, runs[0].clone())
+    }
+
+    fn alive(&self, graph_run: &str) -> bool {
+        self.app
+            .terminals()
+            .all_of(graph_run)
+            .iter()
+            .any(|s| s.is_task_alive())
     }
 
     async fn kill_all(&self) {
@@ -176,9 +207,30 @@ async fn the_inbox_loop_runs_tips_and_writes_outcomes_back() {
     let text = fs::read_to_string(r.file("alpha")).unwrap();
     assert!(text.starts_with("---\ntitle: Find papers\nkind: agent\ncolor: '#ff8800'\npaper:\n  doi: \"10.1/x\"\nagent:\n"), "{text}");
 
+    // Item 2: the prompt the round ran with is kept next to the reply.
+    let alpha_body = "Find three recent papers on hairpin AC loss.\n";
+    let prompt = r.tips.path().join("agent").join("alpha").join("prompt.md");
+    assert_eq!(
+        fs::read_to_string(&prompt).unwrap(),
+        task_text("Find papers", alpha_body)
+    );
+
+    // Item 3: a done round's session is ended and its window closed right
+    // after the write-back; its entry is gone.
+    let (gdir, grun) = r.round("alpha");
+    let label = format!("term-{grun}-s1");
+    wait_until("the done window to be closed", || {
+        r.rec.closed.lock().unwrap().contains(&label)
+    })
+    .await;
+    wait_until("the done entry to be dropped", || {
+        r.status_tip("alpha").run.is_none()
+    })
+    .await;
+    assert!(!r.alive(&grun));
+    assert_eq!(r.agent("alpha", "state").as_deref(), Some("done"));
+
     // The tip text was never typed: only the pointer line to the brief.
-    let st = r.status_tip("alpha");
-    let (gdir, grun) = graph_run(&st);
     let typed = received(&gdir, &grun, "s1");
     assert_eq!(typed.len(), 1, "{typed:?}");
     assert!(
@@ -226,12 +278,36 @@ async fn the_inbox_loop_runs_tips_and_writes_outcomes_back() {
         .decision
         .starts_with("unchanged since done"));
 
+    // Item 4: Claude Code wrote its own settings into the round's folder
+    // (the owner answered a dialog); the next round is not refused for it,
+    // and the file is left as it is.
+    let local = gdir.join(".claude").join("settings.local.json");
+    fs::create_dir_all(local.parent().unwrap()).unwrap();
+    fs::write(&local, "{\"enabledMcpjsonServers\":[]}").unwrap();
+
     // (d) appended text makes it eligible: a new run, a second block.
     fs::write(r.file("alpha"), format!("{before}\nAlso include arXiv.\n")).unwrap();
     r.scan().await;
-    assert_eq!(r.agent("alpha", "state").as_deref(), Some("done"));
+    assert_eq!(
+        r.agent("alpha", "state").as_deref(),
+        Some("done"),
+        "{}",
+        r.status_tip("alpha").decision
+    );
     let second_run = r.agent("alpha", "run").unwrap();
     assert_ne!(first_run, second_run);
+    let (gdir2, _) = r.round("alpha");
+    assert_ne!(gdir2, gdir, "a fresh folder per round");
+    assert_eq!(gdir2.parent(), gdir.parent());
+    assert_eq!(
+        gdir.parent().unwrap(),
+        tip_dir(&inbox_root(r.app.data_dir()), "alpha")
+    );
+    assert!(!gdir2.join(".claude").exists());
+    assert!(local.is_file(), "never deleted");
+    assert!(fs::read_to_string(&prompt)
+        .unwrap()
+        .contains("Also include arXiv."));
     let tip = r.tip("alpha");
     let before_body = parse("alpha", &before).unwrap().body;
     assert!(tip.body.starts_with(&format!(
@@ -435,7 +511,7 @@ async fn stale_claims_rerun_only_for_recorded_runs_and_planted_files_block() {
     );
     assert_eq!(r.agent("mine", "state").as_deref(), Some("done"));
     let first_run = r.agent("mine", "run").unwrap();
-    let (gdir, _) = graph_run(&r.status_tip("mine"));
+    let (gdir, _) = r.round("mine");
     r.kill_all().await;
 
     // A crash left `mine` running with a run id this machine recorded: after
@@ -444,7 +520,12 @@ async fn stale_claims_rerun_only_for_recorded_runs_and_planted_files_block() {
         .unwrap()
         .replace("state: done", "state: running");
     fs::write(r.file("mine"), &crashed).unwrap();
-    let restarted = inbox_on(&r.app, r.tips.path(), Duration::from_secs(600));
+    let restarted = inbox_on(
+        &r.app,
+        r.tips.path(),
+        Duration::from_secs(600),
+        Arc::new(Recorder::default()),
+    );
     restarted.scan_now().await.unwrap();
     assert!(restarted.wait_idle(TIMEOUT).await);
     assert_eq!(r.agent("mine", "state").as_deref(), Some("done"));
@@ -453,9 +534,13 @@ async fn stale_claims_rerun_only_for_recorded_runs_and_planted_files_block() {
     r.app.terminals().kill_all();
     wait_until("sessions gone", || r.app.terminals().live_count() == 0).await;
 
-    // Files an earlier round planted in the graph folder: the next round does
-    // not start, the tip is not written, the reason names the folder.
+    // A file an earlier round left in its own folder is not in the next
+    // round's folder or above it; one planted in a parent (here the tip's
+    // folder of rounds) is: the next round does not start, the tip is not
+    // written, the reason names that folder only.
+    let tip_rounds = gdir.parent().unwrap().to_path_buf();
     fs::write(gdir.join("CLAUDE.md"), "planted").unwrap();
+    fs::write(tip_rounds.join("CLAUDE.md"), "planted").unwrap();
     let before = format!(
         "{}\nMore please.\n",
         fs::read_to_string(r.file("mine")).unwrap()
@@ -475,8 +560,21 @@ async fn stale_claims_rerun_only_for_recorded_runs_and_planted_files_block() {
         "{}",
         tip.decision
     );
-    assert!(tip.decision.contains("CLAUDE.md"), "{}", tip.decision);
+    assert!(
+        tip.decision.contains(&format!(
+            "{} contains CLAUDE.md",
+            abs(&tip_rounds).display()
+        )),
+        "{}",
+        tip.decision
+    );
+    assert!(
+        !tip.decision.contains(&abs(&gdir).display().to_string()),
+        "{}",
+        tip.decision
+    );
     assert!(gdir.join("CLAUDE.md").is_file(), "never deleted");
+    assert!(tip_rounds.join("CLAUDE.md").is_file(), "never deleted");
 }
 
 fn set_read_only(path: &Path, on: bool) {
@@ -527,10 +625,11 @@ async fn an_outcome_for_a_read_only_tip_is_kept_and_written_at_the_next_scan() {
     r.kill_all().await;
 }
 
-/// Review finding 2: a done session stays open after its write-back and is
-/// closed at the start of the next scan; a question session is not.
+/// Item 3: a done round's session is ended and its window closed right
+/// after its outcome and results are written (no scan needed); a question
+/// session stays open, also through the next scan.
 #[tokio::test(flavor = "multi_thread")]
-async fn finished_sessions_are_closed_at_the_next_scan_and_questions_stay_open() {
+async fn done_sessions_close_after_the_write_back_and_questions_stay_open() {
     let r = rig(Duration::from_secs(600));
     r.write("done", "---\ntitle: Done\nkind: agent\n---\nDo it.\n");
     r.write(
@@ -540,37 +639,37 @@ async fn finished_sessions_are_closed_at_the_next_scan_and_questions_stay_open()
     r.scan().await;
     assert_eq!(r.agent("done", "state").as_deref(), Some("done"));
     assert_eq!(r.agent("asks", "state").as_deref(), Some("question"));
-    let (_, done_run) = graph_run(&r.status_tip("done"));
+    let (_, done_run) = r.round("done");
     let (_, asks_run) = graph_run(&r.status_tip("asks"));
-    let alive = |run: &str| {
-        r.app
-            .terminals()
-            .all_of(run)
-            .iter()
-            .any(|s| s.is_task_alive())
-    };
-    assert!(alive(&done_run), "left open after the write-back");
+    let closed_line = format!("closed the done session (run {done_run})");
+    wait_until("the done session to be closed", || {
+        r.inbox.status().log.iter().any(|l| l.text == closed_line)
+    })
+    .await;
+    assert!(!r.alive(&done_run));
+    assert!(r.tips.path().join("agent/done/result.md").is_file());
+    assert!(r.tips.path().join("agent/done/prompt.md").is_file());
+    let closed = r.rec.closed.lock().unwrap().clone();
+    assert_eq!(
+        closed,
+        [format!("term-{done_run}-s1")],
+        "only the done window"
+    );
+    assert!(r.status_tip("done").run.is_none(), "its entry is dropped");
     let before = fs::read_to_string(r.file("done")).unwrap();
 
     r.scan().await;
-    wait_until("the finished session to close", || !alive(&done_run)).await;
     assert!(
-        alive(&asks_run),
+        r.alive(&asks_run),
         "a question session is not touched: {:#?}",
         r.inbox.status().log
     );
-    assert!(r.status_tip("done").run.is_none(), "its entry is dropped");
     assert_eq!(
         r.status_tip("asks").run.as_ref().map(|x| x.phase),
         Some(InboxPhase::Question)
     );
     assert_eq!(fs::read_to_string(r.file("done")).unwrap(), before);
-    assert!(r
-        .inbox
-        .status()
-        .log
-        .iter()
-        .any(|l| l.text == format!("closed the finished session (run {done_run})")));
+    assert_eq!(r.rec.closed.lock().unwrap().len(), 1);
     r.kill_all().await;
 }
 
