@@ -11,11 +11,14 @@
 //!   [`writeback`] (claim / finish on the file), [`results`] (copies into
 //!   `agent/<tip id>/`), [`scan`] (one read-only pass).
 //! - Orchestration: [`graphgen`] (the generated graph), [`runner`] (scans,
-//!   queue, state), [`start`], [`watch`] (outcome of one run), [`timer`].
+//!   queue, state), [`start`], [`watch`] (outcome of one run), [`startup`]
+//!   (a Claude Code start-up dialog seen by the watcher), [`close`] (ending a
+//!   done round's session), [`timer`].
 //! - Environment: [`env`] (injectable dependencies), [`settings`], [`host`],
 //!   [`gui`] (Tauri commands).
 
 pub mod block;
+pub(crate) mod close;
 pub mod eligible;
 pub mod env;
 pub mod folder;
@@ -33,6 +36,7 @@ pub mod scan;
 pub mod settings;
 pub mod split;
 pub(crate) mod start;
+pub mod startup;
 pub mod timer;
 pub mod tip;
 pub(crate) mod watch;

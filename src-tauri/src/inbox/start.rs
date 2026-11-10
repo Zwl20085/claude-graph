@@ -17,7 +17,7 @@ use super::block::Outcome;
 use super::eligible::{decide, Decision, Runner};
 use super::env::Tap;
 use super::folder::read;
-use super::graphgen::{self, folder_name, PLANTED};
+use super::graphgen::{self, inbox_root, round_dir, PLANTED};
 use super::ops::{Claimed, Known};
 use super::runner::{Active, Inbox, Pending};
 use super::tip::parse;
@@ -78,9 +78,27 @@ pub fn planted_files(dir: &Path, top: &Path) -> Option<String> {
     })
 }
 
-/// Checks before the claim: the tip is still eligible, its graph folder is
-/// free and carries no planted files, the generated graph passes the trust
-/// gate as is, no agent-called run.
+/// One run per tip: no graph folder of the tip (an earlier round's, or the
+/// single folder of earlier app versions) has an app run or an agent-called
+/// run active. Each round runs in a fresh folder, so the "one run per graph
+/// folder" rule alone would no longer keep two rounds of a tip apart.
+fn check_rounds_free(inbox: &Inbox, tip_id: &str) -> Result<(), Failure> {
+    for d in graphgen::round_dirs(&inbox.graphs_root(), tip_id) {
+        let d = abs(&d);
+        if inbox.env().app.dir_busy(&d) {
+            return Err(Failure::Busy(format!(
+                "a run of its graph folder {} is active",
+                d.display()
+            )));
+        }
+        crate::agentmode::gui::refuse_if_agent_active(&d).map_err(|e| not_started(e.message))?;
+    }
+    Ok(())
+}
+
+/// Checks before the claim: the tip is still eligible, no folder of the tip
+/// is busy, the new round's folder and its parents carry no planted files,
+/// the generated graph passes the trust gate as is, no agent-called run.
 fn precheck(inbox: &Inbox, p: &Pending, run: &str, dir: &Path) -> Result<(), Failure> {
     let env = inbox.env();
     // `kind` from the bounded frontmatter read first: a tip that stopped
@@ -102,13 +120,11 @@ fn precheck(inbox: &Inbox, p: &Pending, run: &str, dir: &Path) -> Result<(), Fai
     if let Decision::Skip(why) = decide(&tip, &me) {
         return Err(not_started(why));
     }
-    if env.app.dir_busy(dir) {
-        return Err(Failure::Busy("a run of its graph folder is active".into()));
-    }
+    check_rounds_free(inbox, &p.id)?;
     if let Some(why) = planted_files(dir, &abs(env.app.data_dir())) {
         return Err(not_started(why));
     }
-    let dir = graphgen::write(&inbox.graphs_root(), &p.id, &tip.title, &tip.body)
+    let dir = graphgen::write(&inbox.graphs_root(), &p.id, run, &tip.title, &tip.body)
         .map_err(|e| not_started(format!("cannot write its graph: {}", e.message)))?;
     let status = env
         .app
@@ -126,7 +142,12 @@ fn precheck(inbox: &Inbox, p: &Pending, run: &str, dir: &Path) -> Result<(), Fai
 
 fn launch(inbox: &Inbox, p: &Pending, run: &str) -> Result<Launched, Failure> {
     let env = inbox.env();
-    let dir = abs(&inbox.graphs_root().join(folder_name(&p.id)));
+    // From the canonical data dir: the round folder does not exist yet, so
+    // `abs` could not canonicalize it, and the planted-files check compares
+    // it with the canonical data dir (an 8.3 short name in TEMP would
+    // otherwise hide every parent from that check).
+    let root = inbox_root(&abs(env.app.data_dir()));
+    let dir = round_dir(&root, &p.id, run);
     precheck(inbox, p, run, &dir)?;
     let who = super::ops::Claimant {
         host: &env.host,
@@ -156,8 +177,9 @@ fn launch(inbox: &Inbox, p: &Pending, run: &str) -> Result<Launched, Failure> {
         graph_dir: dir.clone(),
         graph_run: None,
         expected_body: seen_body.clone(),
+        prompt: None,
     };
-    if let Err(e) = graphgen::write(&inbox.graphs_root(), &p.id, &title, &seen_body) {
+    if let Err(e) = graphgen::write(&inbox.graphs_root(), &p.id, run, &title, &seen_body) {
         return Err(Failure::StartFailed(
             Box::new(round),
             format!("cannot write its graph: {}", e.message),
@@ -169,6 +191,9 @@ fn launch(inbox: &Inbox, p: &Pending, run: &str) -> Result<Launched, Failure> {
         Ok((graph_run, join)) => Ok(Launched {
             round: Round {
                 graph_run: Some(graph_run),
+                // The node prompt written into this round's graph.json just
+                // above, which the run loaded and built the brief from.
+                prompt: Some(graphgen::task_text(&title, &seen_body)),
                 ..round
             },
             join,
@@ -188,7 +213,7 @@ pub(crate) fn placeholder(root: &Path, tip_id: &str, run: &str) -> Active {
         run: InboxRun {
             run: run.to_string(),
             phase: InboxPhase::Working,
-            graph_dir: root.join(folder_name(tip_id)).display().to_string(),
+            graph_dir: round_dir(root, tip_id, run).display().to_string(),
             graph_run_id: None,
             sid: None,
             started_at: Some(Utc::now()),

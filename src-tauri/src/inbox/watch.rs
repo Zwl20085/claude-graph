@@ -3,11 +3,15 @@
 //! The node's status (from the run's own `run:state` events) decides:
 //! succeeded -> `done`; failed / cancelled / skipped / blocked -> `failed`;
 //! waiting -> `question` (a reply question, or a dialog in the window) while
-//! the session stays open; if the owner then answers in the window and the
-//! node finishes, that outcome is written as one more block. Working time
-//! over the timeout cancels the run (`failed`). Nothing is written once the
-//! tip was superseded by a newer run or the app is closing.
+//! the session stays open; queued with a Claude Code start-up dialog on
+//! screen ([`super::startup`]) -> `question` too, once per dialog kind; if
+//! the owner then answers in the window and the node finishes, that outcome
+//! is written as one more block. Working time over the timeout cancels the
+//! run (`failed`). Nothing is written once the tip was superseded by a newer
+//! run or the app is closing. A `done` that was written closes the round's
+//! session and window ([`super::close`]).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -25,6 +29,7 @@ use super::ops::Claimant;
 use super::results::{copy_round, results_dir};
 use super::runner::Inbox;
 use super::start::Launched;
+use super::startup::{startup_dialog, StartupDialog};
 use super::writeback::{claim_holds, finish_file};
 
 /// A waiting node with no prompt listed after this long is reported anyway.
@@ -42,6 +47,9 @@ pub(crate) struct Round {
     pub graph_run: Option<String>,
     /// The seen body, then the body as this run last left it.
     pub expected_body: String,
+    /// The node prompt the round ran with (set once the run started),
+    /// kept as `prompt.md` with the results.
+    pub prompt: Option<String>,
 }
 
 impl Inbox {
@@ -173,6 +181,7 @@ fn copy_results(inbox: &Inbox, round: &Round) {
             let report = copy_round(
                 &dest,
                 result_md.as_deref(),
+                round.prompt.as_deref(),
                 &deliverables_dir(&round.graph_dir, NODE_ID),
             );
             for r in &report.refused {
@@ -289,6 +298,60 @@ fn node_outcome(round: &Round, state: &RunState) -> Option<Outcome> {
     }
 }
 
+/// Prefix of the key of a start-up dialog (prompt ids never start so).
+const STARTUP_KEY: &str = "startup: ";
+
+/// Whether the session waits for the owner now.
+enum Ask {
+    /// It waits: the key of what it waits on (written once) and the outcome.
+    Now(String, Outcome),
+    /// Not decided yet (no prompt listed yet, a dialog still being drawn).
+    Later,
+    /// It does not wait.
+    No,
+}
+
+/// What the node waits on: a turn prompt while it is `waiting`, or a
+/// Claude Code start-up dialog (trust, MCP) while its message was not taken
+/// yet (`pending` / `queued`). Nothing is typed into either.
+fn ask(
+    inbox: &Inbox,
+    run: &str,
+    status: Option<NodeStatus>,
+    waiting_since: &mut Option<Instant>,
+) -> Ask {
+    let terminals = inbox.env().app.terminals();
+    match status {
+        Some(NodeStatus::Waiting) => {
+            let since = *waiting_since.get_or_insert_with(Instant::now);
+            let prompt = list_session_prompts(terminals, run)
+                .ok()
+                .and_then(|v| v.into_iter().find(|p| p.node_id == NODE_ID));
+            match prompt {
+                Some(p) => Ask::Now(p.prompt.id().to_string(), question_text(&p)),
+                None if since.elapsed() >= PROMPT_GRACE => Ask::Now(
+                    "unlisted".to_string(),
+                    Outcome::Dialog {
+                        text: "the session waits for input".into(),
+                    },
+                ),
+                None => Ask::Later,
+            }
+        }
+        None | Some(NodeStatus::Pending | NodeStatus::Queued) => {
+            match startup_dialog(terminals, run) {
+                StartupDialog::Open(text) => Ask::Now(
+                    format!("{STARTUP_KEY}{text}"),
+                    Outcome::Dialog { text: text.into() },
+                ),
+                StartupDialog::Drawing => Ask::Later,
+                StartupDialog::Closed => Ask::No,
+            }
+        }
+        Some(_) => Ask::No,
+    }
+}
+
 /// Follow `l` until its outcome is written (or the tip is superseded).
 pub(crate) async fn watch(inbox: Inbox, l: Launched, superseded: Arc<AtomicBool>) {
     let Launched {
@@ -302,6 +365,8 @@ pub(crate) async fn watch(inbox: Inbox, l: Launched, superseded: Arc<AtomicBool>
     let run = round.graph_run.clone().unwrap_or_default();
     let mut deadline = Instant::now() + timeout;
     let mut written_prompt: Option<String> = None;
+    // Start-up dialogs reported in this round: each kind once.
+    let mut startup_written: HashSet<String> = HashSet::new();
     let mut waiting_since: Option<Instant> = None;
     let mut asking = false;
     let mut join = Some(join);
@@ -331,38 +396,40 @@ pub(crate) async fn watch(inbox: Inbox, l: Launched, superseded: Arc<AtomicBool>
             .and_then(|s| s.nodes.get(NODE_ID))
             .map(|n| n.status);
         if let Some(outcome) = state.as_ref().and_then(|s| node_outcome(&round, s)) {
-            write(&inbox, &round, outcome, &superseded).await;
+            let done = matches!(outcome, Outcome::Done { .. });
+            let written = write(&inbox, &round, outcome, &superseded).await;
             inbox.set_phase(&id, InboxPhase::Finished);
+            if done && written.is_some() {
+                // Outcome and results are in the tip folder: close it now.
+                inbox.close_done(&id, &run).await;
+            }
             inbox.pump().await;
             return;
         }
-        if status == Some(NodeStatus::Waiting) {
-            let since = *waiting_since.get_or_insert_with(Instant::now);
-            let prompt = list_session_prompts(inbox.env().app.terminals(), &run)
-                .ok()
-                .and_then(|v| v.into_iter().find(|p| p.node_id == NODE_ID));
-            let (key, outcome) = match prompt {
-                Some(p) => (p.prompt.id().to_string(), question_text(&p)),
-                None if since.elapsed() >= PROMPT_GRACE => (
-                    "unlisted".to_string(),
-                    Outcome::Dialog {
-                        text: "the session waits for input".into(),
-                    },
-                ),
-                None => continue,
-            };
-            if written_prompt.as_deref() != Some(key.as_str()) {
-                if let Some(body) = write(&inbox, &round, outcome, &superseded).await {
-                    round.expected_body = body;
-                }
-                written_prompt = Some(key);
-                asking = true;
-                inbox.set_phase(&id, InboxPhase::Question);
-                inbox.pump().await;
-            }
-            continue;
+        if status != Some(NodeStatus::Waiting) {
+            waiting_since = None;
         }
-        waiting_since = None;
+        match ask(&inbox, &run, status, &mut waiting_since) {
+            Ask::Now(key, outcome) => {
+                let fresh = written_prompt.as_deref() != Some(key.as_str())
+                    && !startup_written.contains(&key);
+                if fresh {
+                    if key.starts_with(STARTUP_KEY) {
+                        startup_written.insert(key.clone());
+                    }
+                    if let Some(body) = write(&inbox, &round, outcome, &superseded).await {
+                        round.expected_body = body;
+                    }
+                    written_prompt = Some(key);
+                    asking = true;
+                    inbox.set_phase(&id, InboxPhase::Question);
+                    inbox.pump().await;
+                }
+                continue;
+            }
+            Ask::Later => continue,
+            Ask::No => {}
+        }
         if asking {
             // Answered in the window: working again, with a fresh timeout.
             asking = false;
@@ -399,83 +466,5 @@ pub(crate) async fn watch(inbox: Inbox, l: Launched, superseded: Arc<AtomicBool>
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::contract::{DialogKind, DialogPrompt, PromptOption, PromptSource, ReplyQuestion};
-
-    #[test]
-    fn the_echoed_pointer_line_is_dropped() {
-        let r =
-            "> Node \"Board task\" (task): read the brief at C:/x/brief.md and do it\n\nFound 3.\n";
-        assert_eq!(without_echo(r), "Found 3.\n");
-        assert_eq!(without_echo("Found 3.\n"), "Found 3.\n");
-        assert_eq!(without_echo("> a quote\n\nx"), "> a quote\n\nx");
-        assert_eq!(without_echo("> Node read the brief at x"), "");
-    }
-
-    fn prompt(p: TurnPrompt) -> SessionPrompt {
-        SessionPrompt {
-            run_id: "r".into(),
-            sid: "s1".into(),
-            node_id: NODE_ID.into(),
-            prompt: p,
-        }
-    }
-
-    #[test]
-    fn prompts_become_question_or_dialog_outcomes() {
-        let reply = ReplyQuestion {
-            id: "q".into(),
-            question: "Which?".into(),
-            choices: vec![crate::contract::ReplyChoice {
-                label: "a".into(),
-                detail: None,
-            }],
-            reply_excerpt: String::new(),
-        };
-        assert_eq!(
-            question_text(&prompt(TurnPrompt::Reply(reply.clone()))),
-            Outcome::Question {
-                text: "Which?\n1. a".into()
-            }
-        );
-        let with_excerpt = ReplyQuestion {
-            reply_excerpt: "1. Years?\n2. arXiv?".into(),
-            ..reply
-        };
-        assert_eq!(
-            question_text(&prompt(TurnPrompt::Reply(with_excerpt))),
-            Outcome::Question {
-                text: "1. Years?\n2. arXiv?".into()
-            }
-        );
-        let dialog = DialogPrompt {
-            id: "d".into(),
-            kind: DialogKind::Permission,
-            question: "Do you want to proceed?".into(),
-            header: Some("Bash: mkdir x".into()),
-            options: vec![
-                PromptOption {
-                    index: 0,
-                    label: "Yes".into(),
-                    detail: None,
-                },
-                PromptOption {
-                    index: 1,
-                    label: "No".into(),
-                    detail: None,
-                },
-            ],
-            selected: Some(0),
-            multi: false,
-            allows_text: false,
-            source: PromptSource::Screen,
-        };
-        assert_eq!(
-            question_text(&prompt(TurnPrompt::Dialog(dialog))),
-            Outcome::Dialog {
-                text: "Bash: mkdir x: Do you want to proceed? (Yes / No)".into()
-            }
-        );
-    }
-}
+#[path = "watch_tests.rs"]
+mod tests;

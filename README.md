@@ -233,8 +233,10 @@ Mark a tip on the [Vindictive](https://github.com/Zwl20085/vindictive) board as 
 and Claude Graph does the rest. With the Inbox enabled (top bar **Inbox**, off by default, one
 machine only), the app scans the tips folder shortly after start, every 12 hours and on
 **Scan now**. Each new or changed agent tip runs in its own session window, at most two at a
-time. The outcome comes back into the tip: ⭐ result, ❓ questions (also when a permission dialog
-waits in the window) or ⚠ failed. Files land in `agent/<tip id>/` next to the tips.
+time. The outcome comes back into the tip: ⭐ result, ❓ questions (also when a permission dialog,
+or Claude Code's start-up trust or MCP dialog, waits in the window) or ⚠ failed. Files, with the
+prompt the agent was given, land in `agent/<tip id>/` next to the tips. A done tip's session
+window closes by itself.
 
 You answer a question by typing into the tip; the next scan runs it again. The tip text is
 only ever handed to the agent as data in its brief. It never becomes a command, a path or a

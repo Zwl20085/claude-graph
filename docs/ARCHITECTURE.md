@@ -1167,9 +1167,11 @@ Module layout (`src-tauri/src/inbox/`):
   `.<name>.<pid>-<n>.tmp`, stamp check, rename; 5 re-read-and-reapply tries; Windows sharing
   violations retried with backoff; a vanished file is never recreated), `writeback`, `results`
   (copies into `agent/<tip id>/`, refusing symlinks and anything outside it), `scan`.
-- Orchestration: `graphgen` (graph under `<data dir>/inbox/<slug>-<hash>/`), `runner` (the
-  `Inbox` state: scans, queue, active rounds, status), `start` (pre-checks, claim, run start),
-  `watch` (one round's outcome), `timer`, `persist` (`inbox/state.json`: last scan and the
+- Orchestration: `graphgen` (one graph folder per round,
+  `<data dir>/inbox/rounds/<slug>-<hash>/<run id>/`), `runner` (the `Inbox` state: scans,
+  queue, active rounds, status), `start` (pre-checks, claim, run start), `watch` (one round's
+  outcome), `startup` (a Claude Code start-up dialog seen from the session's screen), `close`
+  (ending a done round's session and window), `timer`, `persist` (`inbox/state.json`: last scan and the
   recorded claim run ids, which gate the stale-claim rule), `retry` (outcomes kept when a
   write-back failed for a passing reason; bounded delayed re-scans for busy folders); `env`
   (injectable app state, emitters, host, clock, settings, suggestion), `settings`, `host`, `gui`
@@ -1179,13 +1181,21 @@ Module layout (`src-tauri/src/inbox/`):
   and the slot placeholder (carrying the run id the claim will use) happen under one lock;
   graph folders holding `CLAUDE.md`, `CLAUDE.local.md`, `.mcp.json` or `.claude` are not run;
   unpatchable frontmatter is a scan-time skip; `agent.v` counts only as a YAML number.
+- Inbox polish (2026-11-10): a fresh graph folder per round (so the `.claude/settings.local.json`
+  Claude Code writes into its working folder when a dialog is answered never blocks the next
+  round; the parent check for planted files is unchanged); a start-up dialog (trust, new MCP
+  server) while the node is still `queued` is written as a ❓ block with a fixed text, once per
+  dialog kind per round; the round's prompt (the node prompt from the tip) is kept as
+  `prompt.md` next to `result.md`; a round that ends `done` has its session ended and its window
+  closed (`Emitter::close_window`, new, session windows only) right after the write-back.
 
 How it plugs into the existing engine:
 
 - A round is started with `AppState::start_by_mode` on the generated folder (terminal mode), so
   the reservation, `trust::require_trusted`, the "one run per graph folder" rule and
   `close_earlier_sessions` apply unchanged. Before claiming, `start` also checks
-  `AppState::dir_busy` (new, read-only), the trust status (not trusted: the tip is not started and
+  `AppState::dir_busy` (new, read-only) for every graph folder of the tip (each round has its
+  own, so the per-folder rule alone would not keep two rounds of one tip apart), the trust status (not trusted: the tip is not started and
   the reason is shown; no trust record is ever written) and `refuse_if_agent_active`.
 - The node is a template node (`goal`, `acceptance`, `do_nots` set), so
   `terminal::message::message_for` always picks `brief_line`: the session gets the one-line
@@ -1196,8 +1206,10 @@ How it plugs into the existing engine:
   for any terminal run) and the latest `RunState` is kept. `watch` polls it: `Succeeded` → done
   (reply = `result.md` without the echoed pointer line), other settled statuses → failed,
   `Waiting` → question (reply question or dialog from `list_session_prompts`) with the session
-  left open; a later finish of the same node appends another block. The timeout counts working
-  time only.
+  left open; `queued` with a start-up dialog on the session's screen → question too (fixed text,
+  `inbox::startup`); a later finish of the same node appends another block. The timeout counts
+  working time only. A done round's session is killed and its window closed after the
+  write-back; a failed one at the next scan.
 - Superseding: a tip in `question` (or finished with its session open) that becomes eligible
   again has its earlier graph run cancelled and its sessions killed, waiting until the folder is
   free, before the fresh round starts.

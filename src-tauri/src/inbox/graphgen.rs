@@ -1,5 +1,6 @@
-//! The one-node graph an agent tip runs in: `<data dir>/inbox/<folder>/`
-//! (never inside the tips folder or OneDrive), permission mode
+//! The one-node graph an agent tip runs in: a fresh folder per round,
+//! `<data dir>/inbox/rounds/<tip folder>/<run id>/` (never inside the tips
+//! folder or OneDrive), permission mode
 //! `claude_settings`, model inherit, terminal mode, default harness.
 //!
 //! The tip (title and seen body) goes into the node brief only, fenced as
@@ -19,6 +20,9 @@ use crate::prompt::{is_simple, result_fence};
 use crate::store::save_graph;
 
 pub const INBOX_DIR: &str = "inbox";
+/// Under the inbox folder: one folder per tip, one folder per round in it.
+pub const ROUNDS_DIR: &str = "rounds";
+const ROUND_MAX: usize = 40;
 pub const NODE_ID: &str = "task";
 /// Node title (typed in the pointer line, so fixed: never the tip's title).
 pub const NODE_TITLE: &str = "Board task";
@@ -174,10 +178,64 @@ pub fn build(title: &str, seen_body: &str) -> Graph {
     }
 }
 
-/// Create or refresh `<root>/<folder_name(tip)>/graph.json`; earlier rounds'
-/// files (runs, deliverables) stay. Returns the folder.
-pub fn write(root: &Path, tip_id: &str, title: &str, seen_body: &str) -> AppResult<PathBuf> {
-    let dir = root.join(folder_name(tip_id));
+/// `<root>/rounds/<folder_name(tip)>`: the folder holding every round of one
+/// tip. The app creates it and never runs a session in it.
+pub fn tip_dir(root: &Path, tip_id: &str) -> PathBuf {
+    root.join(ROUNDS_DIR).join(folder_name(tip_id))
+}
+
+/// A round's folder name from the runner's own run id: ASCII letters, digits
+/// and `-` only (anything else becomes `-`), never empty.
+fn round_name(run: &str) -> String {
+    let name: String = run
+        .chars()
+        .take(ROUND_MAX)
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    if name.chars().all(|c| c == '-') {
+        format!("round{name}")
+    } else {
+        name
+    }
+}
+
+/// `<tip_dir>/<run>`: the graph folder of one round. Every round has its own,
+/// so nothing a session left in its folder (Claude Code writes
+/// `.claude/settings.local.json` there when a dialog is answered) is in the
+/// next round's folder or a parent of it.
+pub fn round_dir(root: &Path, tip_id: &str, run: &str) -> PathBuf {
+    tip_dir(root, tip_id).join(round_name(run))
+}
+
+/// Every existing graph folder of the tip: the folder of earlier app versions
+/// (`<root>/<folder_name(tip)>`, one for all rounds) and each round folder.
+pub fn round_dirs(root: &Path, tip_id: &str) -> Vec<PathBuf> {
+    let legacy = root.join(folder_name(tip_id));
+    let rounds = std::fs::read_dir(tip_dir(root, tip_id))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.path())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    std::iter::once(legacy)
+        .filter(|d| d.is_dir())
+        .chain(rounds)
+        .collect()
+}
+
+/// Create or refresh `<round_dir>/graph.json` for round `run` of the tip.
+/// Returns the folder.
+pub fn write(
+    root: &Path,
+    tip_id: &str,
+    run: &str,
+    title: &str,
+    seen_body: &str,
+) -> AppResult<PathBuf> {
+    let dir = round_dir(root, tip_id, run);
     std::fs::create_dir_all(&dir)?;
     let graph = build(title, seen_body);
     if is_simple(&graph.nodes[0]) {

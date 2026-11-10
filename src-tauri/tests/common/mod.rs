@@ -68,6 +68,8 @@ pub struct Recorder {
     pub session_prompts: Mutex<Vec<SessionPrompt>>,
     /// Terminal mode: `session_prompt_cleared` events.
     pub cleared: Mutex<Vec<SessionPromptCleared>>,
+    /// Terminal mode: labels of the windows closed by the backend, in order.
+    pub closed: Mutex<Vec<String>>,
 }
 
 impl Emitter for Recorder {
@@ -88,6 +90,10 @@ impl Emitter for Recorder {
     }
     fn open_window(&self, spec: &WindowSpec) -> AppResult<()> {
         self.windows.lock().unwrap().push(spec.clone());
+        Ok(())
+    }
+    fn close_window(&self, label: &str) -> AppResult<()> {
+        self.closed.lock().unwrap().push(label.to_string());
         Ok(())
     }
     fn permission_prompt(&self, prompt: &PermissionPrompt) {
