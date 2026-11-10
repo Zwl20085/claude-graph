@@ -61,6 +61,9 @@ pub(crate) struct Shared {
     pub not_started: BTreeMap<String, String>,
     /// Outcomes whose write-back failed for a reason that may pass.
     pub unwritten: BTreeMap<String, Unwritten>,
+    /// Graph runs whose ended sessions are not in their run.json yet (the
+    /// run's loop or a session was still alive): run id -> (tip id, tries).
+    pub unrecorded: BTreeMap<String, (String, u32)>,
     /// Run ids this machine claimed (oldest first, bounded, persisted).
     pub claimed: VecDeque<String>,
     pub log: VecDeque<InboxLogLine>,
@@ -423,6 +426,7 @@ impl Inbox {
     /// runs again in this scan finds its graph folder free. Returns the tips
     /// closed.
     pub(crate) async fn close_finished(&self) -> Vec<String> {
+        self.retry_unrecorded();
         let closed: Vec<(String, Active)> = {
             let mut s = self.lock();
             let ids: Vec<String> = s
@@ -466,6 +470,11 @@ impl Inbox {
         let until = Instant::now() + SUPERSEDE_WAIT;
         while busy() && Instant::now() < until {
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        for (id, a) in &closed {
+            if let Some(run) = a.run.graph_run_id.as_deref() {
+                self.record_ended(id, run);
+            }
         }
         closed.into_iter().map(|(id, _)| id).collect()
     }
@@ -522,6 +531,7 @@ impl Inbox {
         }
         let closed = !busy();
         if closed {
+            self.record_ended(id, run);
             self.lock().active.remove(id);
         }
         self.log(

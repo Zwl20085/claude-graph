@@ -154,3 +154,15 @@ fn the_node_prompt_is_the_task_text() {
     let g = build("T", "Do x\r\n");
     assert_eq!(g.nodes[0].prompt, task_text("T", "Do x\r\n"));
 }
+
+/// Item A: the agent is told to name its files by file name only, so its
+/// summary does not cite local folders of this machine.
+#[test]
+fn the_brief_asks_for_file_names_only() {
+    let g = build("T", "Do x");
+    let brief = terminal_brief(&display_dir(Path::new("/g")), &g, &g.nodes[0], &[]);
+    assert!(
+        brief.contains("name each file you wrote by its file name only, never by a folder path"),
+        "{brief}"
+    );
+}

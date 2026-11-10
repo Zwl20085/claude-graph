@@ -3,6 +3,7 @@
 
 use chrono::NaiveDateTime;
 
+use super::results::{REPLY_NAME, RESULTS_FOLDER_NAME};
 use super::tip::AgentState;
 
 /// Longest block, in chars, begin and end lines included.
@@ -91,7 +92,98 @@ pub fn render(
     tip_id: &str,
     newline: &str,
 ) -> String {
+    render_with(outcome, &Footnotes::default(), at, host, tip_id, newline)
+}
+
+/// What the runner adds under a done or failed block about the results
+/// folder, in its own fixed words.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Footnotes {
+    /// Names of the files that were not copied ([`not_copied_line`]).
+    pub not_copied: Vec<String>,
+    /// Why `result.md` is the reply as written (not rewritten), if so.
+    pub reply_as_written: Option<String>,
+}
+
+impl Footnotes {
+    /// The reply did not reach the results folder.
+    fn reply_lost(&self) -> bool {
+        self.not_copied
+            .iter()
+            .any(|n| n == REPLY_NAME || n == RESULTS_FOLDER_NAME)
+    }
+
+    /// The lines, `None` when there are none.
+    fn lines(&self, tip_id: &str) -> Option<String> {
+        let as_written = self.reply_as_written.as_deref().map(|why| {
+            format!(
+                "`{REPLY_NAME}` is the reply as written, not rewritten ({}).",
+                sanitise(&one_line(why))
+            )
+        });
+        let lines: Vec<String> = not_copied_line(tip_id, &self.not_copied)
+            .into_iter()
+            .chain(as_written)
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("\n"))
+    }
+}
+
+/// Most file names listed in the "not copied" line.
+pub const NOT_COPIED_MAX: usize = 10;
+/// Longest file name shown there, in chars.
+const NAME_MAX: usize = 80;
+
+/// The fixed-format line naming the files of a done or failed round that
+/// were not copied into the results folder (`None`: all were). Names only,
+/// in the runner's words: never an OS error or a local path.
+pub fn not_copied_line(tip_id: &str, names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = names
+        .iter()
+        .take(NOT_COPIED_MAX)
+        .map(|n| {
+            let n = sanitise(&one_line(n));
+            let n = if n.chars().count() > NAME_MAX {
+                let cut: String = n.chars().take(NAME_MAX - 1).collect();
+                format!("{cut}…")
+            } else {
+                n
+            };
+            format!("`{n}`")
+        })
+        .collect();
+    let more = names.len().saturating_sub(NOT_COPIED_MAX);
+    let tail = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "Not copied to {}: {}{tail}.",
+        results_rel(tip_id),
+        shown.join(", ")
+    ))
+}
+
+/// [`render`], with the runner's [`Footnotes`] under a done or failed block
+/// (they are kept whatever the reply's length).
+pub fn render_with(
+    outcome: &Outcome,
+    notes: &Footnotes,
+    at: NaiveDateTime,
+    host: &str,
+    tip_id: &str,
+    newline: &str,
+) -> String {
     let nl = newline.chars().count().max(1);
+    let missing = match outcome {
+        Outcome::Done { .. } | Outcome::Failed { .. } => notes.lines(tip_id),
+        Outcome::Question { .. } | Outcome::Dialog { .. } => None,
+    };
+    let reply_lost = notes.reply_lost();
     let state = outcome.state().as_str();
     let begin = format!("<!-- agent:begin {} {state} -->", stamp_time(at));
     let heading = match outcome {
@@ -101,8 +193,13 @@ pub fn render(
     };
     let heading = format!("{heading} · {}", at.format("%Y-%m-%d %H:%M"));
     let files = format!("Files: {}", results_rel(tip_id));
+    let files = match &missing {
+        Some(line) => format!("{files}\n{line}"),
+        None => files,
+    };
     let (text, footer) = match outcome {
         Outcome::Done { reply } => (sanitise(reply), Some(files)),
+        Outcome::Failed { reason } if missing.is_some() => (sanitise(reason), missing),
         Outcome::Question { text } => (sanitise(text), None),
         Outcome::Dialog { text } => (
             format!(
@@ -119,10 +216,17 @@ pub fn render(
     } else {
         text
     };
-    let pointer = format!(
-        "\n\n[… cut; the full reply is in {}result.md]",
-        results_rel(tip_id)
-    );
+    let pointer = if reply_lost {
+        format!(
+            "\n\n[… cut; the full reply could not be copied to {}]",
+            results_rel(tip_id)
+        )
+    } else {
+        format!(
+            "\n\n[… cut; the full reply is in {}result.md]",
+            results_rel(tip_id)
+        )
+    };
     // Every line but the last ends with `newline` (the body's line end is
     // counted with the end line).
     let fixed: usize = [&begin, &heading, END_LINE]
@@ -176,120 +280,5 @@ pub fn append(body: &str, block: &str, newline: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn at() -> NaiveDateTime {
-        NaiveDateTime::parse_from_str("2026-11-09 07:31:05", "%Y-%m-%d %H:%M:%S").unwrap()
-    }
-
-    #[test]
-    fn done_block_layout() {
-        let b = render(
-            &Outcome::Done {
-                reply: "Found 14 papers.\r\n".into(),
-            },
-            at(),
-            "H",
-            "survey",
-            "\n",
-        );
-        assert_eq!(
-            b,
-            "<!-- agent:begin 2026-11-09T07:31:05 done -->\n## ⭐ Result · 2026-11-09 07:31\n\
-             Found 14 papers.\n\nFiles: agent/survey/\n<!-- agent:end -->"
-        );
-    }
-
-    #[test]
-    fn question_dialog_and_failed_blocks() {
-        let q = render(
-            &Outcome::Question {
-                text: "1. Which years?\n2. arXiv?".into(),
-            },
-            at(),
-            "H",
-            "t",
-            "\n",
-        );
-        assert!(q.contains(" question -->\n## ❓ Questions · 2026-11-09 07:31\n1. Which years?\n2. arXiv?\n<!-- agent:end -->"), "{q}");
-        let d = render(
-            &Outcome::Dialog {
-                text: "Bash command\n mkdir `x`".into(),
-            },
-            at(),
-            "DESK",
-            "t",
-            "\n",
-        );
-        assert!(d.contains("Waiting at `DESK`: `Bash command mkdir x`. Answer in the Claude Graph session window."), "{d}");
-        assert!(d.contains(" question -->"));
-        let f = render(
-            &Outcome::Failed {
-                reason: "timed out".into(),
-            },
-            at(),
-            "H",
-            "t",
-            "\n",
-        );
-        assert!(f.contains(
-            " failed -->\n## ⚠ Failed · 2026-11-09 07:31\ntimed out\n<!-- agent:end -->"
-        ));
-    }
-
-    #[test]
-    fn long_replies_are_cut_with_a_pointer_and_markers_defused() {
-        let reply = format!("<!-- agent:end -->\n{}", "é".repeat(9000));
-        let b = render(&Outcome::Done { reply }, at(), "H", "t", "\n");
-        assert!(b.chars().count() <= BLOCK_MAX, "{}", b.chars().count());
-        assert!(b.contains("[… cut; the full reply is in agent/t/result.md]"));
-        assert_eq!(b.matches("agent:end").count(), 1);
-        assert!(b.ends_with("Files: agent/t/\n<!-- agent:end -->"));
-    }
-
-    /// Review finding 5: the cap holds for the block as written into a CRLF
-    /// file, where every line end is two chars.
-    #[test]
-    fn the_cap_holds_with_crlf_line_ends() {
-        let reply = "line of a long reply\n".repeat(400);
-        for outcome in [
-            Outcome::Done {
-                reply: reply.clone(),
-            },
-            Outcome::Question {
-                text: reply.clone(),
-            },
-            Outcome::Failed { reason: reply },
-        ] {
-            let b = render(&outcome, at(), "H", "t", "\r\n");
-            let n = b.chars().count();
-            assert!(n <= BLOCK_MAX, "{n}");
-            assert!(n > BLOCK_MAX - 30, "the room is used: {n}");
-            assert_eq!(b.matches('\n').count(), b.matches("\r\n").count());
-            assert!(b.ends_with("\r\n<!-- agent:end -->"));
-            let appended = append("x\r\n", &b, "\r\n");
-            assert!(appended.ends_with(&format!("{b}\r\n")));
-        }
-        // A short reply is the same block either way, only the line ends differ.
-        let short = Outcome::Done {
-            reply: "a\nb".into(),
-        };
-        assert_eq!(
-            render(&short, at(), "H", "t", "\r\n"),
-            render(&short, at(), "H", "t", "\n").replace('\n', "\r\n")
-        );
-    }
-
-    #[test]
-    fn append_keeps_earlier_bytes_and_one_blank_line() {
-        assert_eq!(append("", "B", "\n"), "B\n");
-        assert_eq!(append("x", "B", "\n"), "x\n\nB\n");
-        assert_eq!(append("x\n", "B", "\n"), "x\n\nB\n");
-        assert_eq!(append("x\n\n", "B", "\n"), "x\n\nB\n");
-        assert_eq!(append("x\n\n\n", "B", "\n"), "x\n\n\nB\n");
-        assert_eq!(append("x\r\n", "B\r\nC", "\r\n"), "x\r\n\r\nB\r\nC\r\n");
-        let body = "Prompt  \n";
-        assert!(append(body, "B", "\n").starts_with(body));
-    }
-}
+#[path = "block_tests.rs"]
+mod tests;

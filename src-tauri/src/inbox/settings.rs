@@ -122,7 +122,9 @@ impl SuggestEnv {
     }
 }
 
-/// The board's own `folder` setting if readable, else `<OneDrive>\Vindictive`.
+/// The board's own `folder` setting if readable, else `<OneDrive>\Vindictive`
+/// under the first OneDrive root (in [`ONEDRIVE_VARS`] order) where that
+/// folder already exists, else under the first root set.
 pub fn suggest(env: &SuggestEnv) -> Option<String> {
     let from_board = env.appdata.as_ref().and_then(|a| {
         let file = a.join(VINDICTIVE_ID).join("settings.json");
@@ -132,11 +134,17 @@ pub fn suggest(env: &SuggestEnv) -> Option<String> {
         plausible(&folder).ok().map(|_| folder)
     });
     from_board.or_else(|| {
-        env.onedrive
+        let candidates: Vec<PathBuf> = env
+            .onedrive
             .iter()
             .flatten()
-            .next()
-            .map(|root| root.join(ONEDRIVE_SUBFOLDER).display().to_string())
+            .map(|root| root.join(ONEDRIVE_SUBFOLDER))
+            .collect();
+        candidates
+            .iter()
+            .find(|c| c.is_dir())
+            .or(candidates.first())
+            .map(|c| c.display().to_string())
     })
 }
 
@@ -239,5 +247,29 @@ mod tests {
             Some(od1.join("Vindictive").display().to_string())
         );
         assert_eq!(suggest(&SuggestEnv::default()), None);
+    }
+
+    /// A machine with personal and work OneDrive: the root that already
+    /// holds the board's folder wins over the first root found.
+    #[test]
+    fn an_existing_board_folder_under_any_onedrive_root_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let personal = tmp.path().join("OneDrive");
+        let work = tmp.path().join("OneDrive - Uni");
+        std::fs::create_dir_all(work.join(ONEDRIVE_SUBFOLDER)).unwrap();
+        std::fs::create_dir_all(&personal).unwrap();
+        let env = SuggestEnv {
+            appdata: None,
+            onedrive: vec![Some(personal.clone()), None, Some(work.clone())],
+        };
+        assert_eq!(
+            suggest(&env),
+            Some(work.join(ONEDRIVE_SUBFOLDER).display().to_string())
+        );
+        std::fs::create_dir_all(personal.join(ONEDRIVE_SUBFOLDER)).unwrap();
+        assert_eq!(
+            suggest(&env),
+            Some(personal.join(ONEDRIVE_SUBFOLDER).display().to_string())
+        );
     }
 }

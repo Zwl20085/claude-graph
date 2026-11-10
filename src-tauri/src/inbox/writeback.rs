@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use super::block::Outcome;
+use super::block::{Footnotes, Outcome};
 use super::folder::{gone_or, read_frontmatter, update_gated, Prefix, WriteError, FRONTMATTER_CAP};
 use super::ops::{self, Claimant, Claimed, Finished, Known, OpError};
 use super::tip::{parse, peek_kind, TipError, KIND_AGENT};
@@ -104,8 +104,21 @@ pub fn finish_file(
     expected_body: &str,
     outcome: &Outcome,
 ) -> Result<Finished, Dropped> {
+    finish_file_with(path, id, who, expected_body, outcome, &Footnotes::default())
+}
+
+/// [`finish_file`], naming the files that were not copied
+/// ([`ops::finish_with`]).
+pub fn finish_file_with(
+    path: &Path,
+    id: &str,
+    who: &Claimant<'_>,
+    expected_body: &str,
+    outcome: &Outcome,
+    notes: &Footnotes,
+) -> Result<Finished, Dropped> {
     update_gated(path, &agent_gate, |text| {
-        ops::finish(id, text, who, expected_body, outcome).map(|f| (f.text.clone(), f))
+        ops::finish_with(id, text, who, expected_body, outcome, notes).map(|f| (f.text.clone(), f))
     })
     .map_err(|error| Dropped { error })
 }

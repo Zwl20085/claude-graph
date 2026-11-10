@@ -84,6 +84,90 @@ protocol (sections 6 to 9). This page says how the runner works in this app.
 | waits at a Claude Code start-up dialog (workspace trust, new MCP server) before its message was typed | `question` | the same, with a fixed text: `Claude Code start-up: do you trust the files in this folder? (workspace trust)`, `Claude Code start-up: new MCP server found in this project`, or `Claude Code start-up dialog` (also the MCP one: a legitimate `.mcp.json` above the app's data folder shows it, so it is a question, not a failure) |
 | failed, cancelled, did not start, timed out | `failed` | `## ⚠ Failed` with the reason |
 
+When something of a done or failed round did not reach the results folder,
+the block ends with the runner's own line, in fixed words, kept whatever
+the reply's length: `Not copied to agent/<id>/: `a.md`, `sub/b.md`.` (the
+files not copied, names relative to the deliverables folder, each in a code
+span; `result.md` for the reply; `(the results folder)` when that folder
+could not be used at all; `(more files)` when the deliverables went past
+the copy cap plus 50; at most 10 names, then "and N more"; never an error
+text or a local path). The reasons are in the Inbox panel's log. A round
+that failed before the agent replied does not list `result.md` (there was
+none); a done round whose reply file is missing does. A reply over 32 MiB
+is copied as written, and the block says so on one more fixed line:
+`` `result.md` is the reply as written, not rewritten (over 32 MiB). ``
+
+A reply cut at 4000 characters points at `agent/<id>/result.md`; when the
+reply did not reach the results folder it says "the full reply could not be
+copied to agent/<id>/" instead. Two deliverables that would get the same
+name in the results folder (the agent's own `deliverable-result.md` and a
+renamed `result.md`) are not mixed up: the second is not copied and is
+listed.
+
+**Paths in the texts.** The agent works in a folder of this machine, so the
+paths it writes mean nothing on your other devices and show your Windows
+user name. Every text the runner writes into the tip (the reply, a
+question, a dialog line, a failure reason) and `result.md` are rewritten;
+nothing else in the tip is. Only absolute paths are touched. A path starts
+with a drive (`C:\`, `c:/`, `C%3A%5C`, Git Bash `/c/`, WSL `/mnt/c/`,
+`/C:/`), `~/`, or a variable (`%NAME%`, `$env:NAME`, `$HOME`,
+`$USERPROFILE`), after an optional `file://` (also `file://localhost/`),
+`\\?\` or `\\.\` prefix. A drive letter never follows a letter, digit or
+`:` (except a `:` right after a word, as in `Path:C:\…`), and `~/` or `/c/`
+never follow a letter, digit or `/`, so URLs are not paths. The most
+specific known folder wins:
+
+| The path is under | It becomes |
+|---|---|
+| this round's deliverables folder: a copied file | `agent/<tip id>/<name of the copy>` (a renamed copy by its new name) |
+| … a folder of copied files (the whole path), or the folder itself | `agent/<tip id>/<folder>`, `agent/<tip id>/` |
+| … a file that was not copied | `<file> (not copied)` |
+| … any other name (also a file under a folder of copies that was not copied) | `<name>` (its name with `/`, no claim) |
+| … a `..` way out of it (also `%2e%2e`) | `(a folder on the runner's machine)` |
+| this round's folder, the app data folder, or any `claude-graph` data folder (another round, another tip, another machine) | `(a folder on the runner's machine)` |
+| the tips folder | the path relative to it (the folder itself: `(the tips folder)`) |
+| your home folder (anything else under it: Documents, Temp, `.claude`) | `~/<rest>`; written with a variable (`$HOME/proj`, `%USERPROFILE%\x`) it stays as written (no name shows, and a copied command keeps working); a variable-rooted path into one of the folders above is rewritten like the others |
+| anything else (another drive, outside your home folder) | unchanged |
+
+Folders are compared component by component, case-insensitively, each
+component in its long or 8.3 form (so mixed spellings such as
+`C:\Users\ZHANGW~1\AppData\Roaming\claude-graph\…` work; an 8.3 name only
+stands for the long name it abbreviates, never for another folder next to
+it, and `~` spellings are made only from an exact spelling of your home
+folder), with any
+separators between (`/`, `\`, doubled, `%2F`, `%5C`, `./`); a component
+must end at a name boundary, so `C:\Users\<you>2` or `<you>-old` are not
+your home folder. After the deliverables folder, file names are matched
+against the round's file list, so names with spaces, `%20`, back or doubled
+slashes and `./` work, and what follows a name (`#L10`, `:12`, punctuation,
+Chinese punctuation, emphasis marks) stays outside it. Prose about the
+folder layout without an absolute root is not touched.
+
+A last pass (the backstop) hides what odd spellings leave, by context only:
+`Users`, then a run of separator-like characters (`/ \ ／ ＼ ∕ ⁄ ∖ ⧵`,
+`&#92;`, `&#47;`, `&#x5c;`, `&#x2f;`, `&bsol;`, `&sol;`, `%5C`, `%2F`, mixed
+with zero-width characters, `*`, `_`, backticks, spaces or line breaks,
+with at least one real separator), then your home folder's name (long or
+8.3, zero-width characters, `*`, backticks or line breaks inside it
+skipped; also a domain profile folder `<name>.<DOMAIN>` followed by a
+separator, but not `<name>.txt` at the end of a path): the name becomes
+`(a folder on the runner's machine)`. The same
+for `AppData` … `Roaming` … `claude-graph` as a whole. This covers UNC
+paths (`\\localhost\C$\Users\<you>`), `C:Users\<you>`, HTML entities,
+look-alike separators and markup-split names. Your name in ordinary prose
+(not after `Users` and a separator) is left as it is.
+
+The rewrite is linear in the text (each scan from a path start is bounded
+to 4 KiB); `result.md` is rewritten up to 32 MiB (above that it is copied as
+written, see the line above). A reply that is not UTF-8 is rewritten in one
+pass with each invalid byte sequence held by a placeholder the rewrite
+skips inside paths (so an invalid byte cannot hide a path or your name); the
+invalid bytes come out byte for byte, except one inside a path that was
+rewritten, which goes with it. Texts for the tip are rewritten up to their first 64 KiB (the block
+keeps 4000 characters of them anyway). The brief also asks the agent to
+name its files by file name only.
+
+
 A `done` round's session is ended and its window closed right after its
 outcome and files are written (Inbox runs only; ordinary graph runs keep
 their windows). The run itself is not cancelled (it stays recorded as
@@ -94,7 +178,13 @@ scan after that. If closing fails it is logged and the tip stays `done`; a
 session that does not end within 20 s is killed again at the next scan. A
 `failed` session stays open after its write-back, so you can look at it,
 and is ended, its window closed, at the start of the next scan (timed, at
-start-up, a re-scan, or **Scan now**).
+start-up, a re-scan, or **Scan now**). Once a session is ended this way, the
+round's run record (`runs/<run>/run.json`) is updated to say so (no session
+alive, no process id); the run's own status is left as it was. The write
+holds the round's folder against a run starting there meanwhile; if the
+run or a session was still alive at that moment, it is done at the next
+scan instead (at most 20 scans; then it is logged once and dropped, and
+`run.json` may keep saying the session is alive).
 
 A start-up dialog of Claude Code (workspace trust, a new MCP server) holds
 the session before its message is typed. The app never answers it and types
@@ -214,10 +304,14 @@ In the Inbox panel (top bar **Inbox**, or the start screen), stored in
 | `inbox.timeout_minutes` | 120 | 5 to 1440 |
 | `autostart` | `false` | start Claude Graph with Windows (tauri-plugin-autostart, applied by the backend) |
 
-With no folder set, the panel suggests one: the board's own `folder` setting
+With no folder set, the panel suggests one (only at that moment: the
+results are written relative to the tips folder, so nothing needs to know
+where OneDrive is when a round is written back): the board's own `folder` setting
 (`%APPDATA%\dev.zhangwentao.vindictive\settings.json`) if readable, else
-`<OneDrive>\Vindictive` (env `OneDriveConsumer`, `OneDrive`,
-`OneDriveCommercial`). A suggestion is only shown; **Use it** or **Choose…**
+`<OneDrive>\Vindictive` under the OneDrive roots the OneDrive client
+sets in the environment (`OneDriveConsumer`, `OneDrive`,
+`OneDriveCommercial`, in that order): the first root where that folder
+already exists, else the first root. A suggestion is only shown; **Use it** or **Choose…**
 stores it, and the Inbox stays off until you enable it.
 
 ## Safety notes

@@ -248,6 +248,13 @@ impl AppState {
         self.lock().runs.contains_key(run_id)
     }
 
+    /// Run `f` with `dir` reserved, so no run starts or resumes in it
+    /// meanwhile; `None` (and `f` not run) when a run owns it now.
+    pub fn with_dir_reserved<T>(&self, dir: &Path, f: impl FnOnce() -> T) -> Option<T> {
+        let _held = self.reserve(&abs(dir)).ok()?;
+        Some(f())
+    }
+
     /// A run of the graph in `dir` is live or being set up (the "one run per
     /// graph folder" rule would refuse a new one).
     pub fn dir_busy(&self, dir: &Path) -> bool {

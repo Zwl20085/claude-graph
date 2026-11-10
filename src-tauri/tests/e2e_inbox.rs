@@ -651,6 +651,17 @@ async fn done_sessions_close_after_the_write_back_and_questions_stay_open() {
     })
     .await;
     assert!(!r.alive(&done_run));
+    // Item B: the run record says what is true after the close: no session
+    // alive, no pid, and the run still succeeded.
+    let (gdir, _) = r.round("done");
+    let rec = claude_graph_lib::run_store::read_run_state(&gdir, &done_run).unwrap();
+    assert_eq!(rec.status, claude_graph_lib::contract::RunStatus::Succeeded);
+    assert!(!rec.sessions.is_empty());
+    assert!(
+        rec.sessions.iter().all(|s| !s.alive && s.pid.is_none()),
+        "{:?}",
+        rec.sessions
+    );
     // On failure: the Inbox log, which carries every copy refusal.
     let log = || {
         r.inbox
