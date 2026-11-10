@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crate::terminal::api::Terminals;
 use crate::terminal::deliver::DIALOG_SETTLE;
-use crate::terminal::screen::Screen;
+use crate::terminal::screen::{normalize, Screen};
 
 /// What the tip says for Claude Code's workspace-trust dialog.
 pub const TRUST_TEXT: &str =
@@ -31,8 +31,24 @@ const TRUST_MARKERS: [&str; 4] = [
 ];
 const MCP_MARKER: &str = "new mcp server";
 
-fn last_of(text: &str, needles: &[&str]) -> Option<usize> {
-    needles.iter().filter_map(|n| text.rfind(n)).max()
+/// The kind of the dialog shown on the live screen `rows` (the terminal
+/// grid as it is now, not the output stream): the bottom-most row that names
+/// a known dialog wins, so text of an answered dialog that the next one drew
+/// over never counts. A dialog no row names is [`OTHER_TEXT`].
+fn kind_of(rows: &[String]) -> &'static str {
+    rows.iter()
+        .rev()
+        .map(|r| normalize(r))
+        .find_map(|r| {
+            if r.contains(MCP_MARKER) {
+                Some(MCP_TEXT)
+            } else if TRUST_MARKERS.iter().any(|m| r.contains(m)) {
+                Some(TRUST_TEXT)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(OTHER_TEXT)
 }
 
 /// What a session's screen shows before its message was typed.
@@ -49,42 +65,37 @@ pub enum StartupDialog {
 
 pub use StartupDialog::{Closed, Drawing, Open};
 
-/// The dialog on `screen`; fully drawn once `quiet` is at least
-/// [`DIALOG_SETTLE`] (as for the session's own notification).
-pub fn startup_text(screen: &Screen, quiet: Duration) -> StartupDialog {
+/// Whether a dialog waits per `screen` (the session's own rule,
+/// [`Screen::dialog_open`]); fully drawn once `quiet` is at least
+/// [`DIALOG_SETTLE`] (as for the session's own notification); its kind from
+/// the live grid `rows`.
+pub fn startup_text(screen: &Screen, rows: &[String], quiet: Duration) -> StartupDialog {
     if !screen.dialog_open() {
         return Closed;
     }
     if quiet < DIALOG_SETTLE {
         return Drawing;
     }
-    let text = screen.text();
-    let trust = last_of(text, &TRUST_MARKERS);
-    let mcp = last_of(text, &[MCP_MARKER]);
-    Open(match (trust, mcp) {
-        (Some(t), Some(m)) if t > m => TRUST_TEXT,
-        (_, Some(_)) => MCP_TEXT,
-        (Some(_), None) => TRUST_TEXT,
-        (None, None) => OTHER_TEXT,
-    })
+    Open(kind_of(rows))
 }
 
-/// The start-up dialog a session of `run` waits at. Only sessions with a
-/// pty and no pending turn prompt count (a dialog during a turn is the
-/// turn's own prompt). The caller asks only while the node has not started
-/// (its message not yet taken).
+/// The start-up dialog a live session of `run` waits at. Only sessions whose
+/// task is alive (a dead pty keeps its last screen), with a pty and no
+/// pending turn prompt count (a dialog during a turn is the turn's own
+/// prompt). The caller asks only while the node has not started (its
+/// message not yet taken).
 pub fn startup_dialog(terminals: &Terminals, run: &str) -> StartupDialog {
     terminals
         .all_of(run)
         .iter()
-        .filter(|s| s.pending().is_none())
+        .filter(|s| s.is_task_alive() && s.pending().is_none())
         .filter_map(|s| s.pty())
         .map(|pty| {
             let quiet = pty
                 .output
                 .last_output()
                 .map_or(Duration::ZERO, |t| t.elapsed());
-            startup_text(&pty.output.screen(), quiet)
+            startup_text(&pty.output.screen(), &pty.output.rows(), quiet)
         })
         .find(|d| *d != Closed)
         .unwrap_or(Closed)

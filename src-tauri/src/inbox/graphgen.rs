@@ -226,8 +226,9 @@ pub fn round_dirs(root: &Path, tip_id: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Create or refresh `<round_dir>/graph.json` for round `run` of the tip.
-/// Returns the folder.
+/// Create or refresh `<round_dir>/graph.json` for round `run` of the tip
+/// (creating the folders; tests and tools — the Inbox itself creates a
+/// round folder through [`super::round::create`]). Returns the folder.
 pub fn write(
     root: &Path,
     tip_id: &str,
@@ -237,6 +238,13 @@ pub fn write(
 ) -> AppResult<PathBuf> {
     let dir = round_dir(root, tip_id, run);
     std::fs::create_dir_all(&dir)?;
+    write_into(&dir, title, seen_body)?;
+    Ok(dir)
+}
+
+/// Save the generated graph into `dir`, which must exist (the Inbox makes a
+/// round folder itself, [`super::round::create`]).
+pub fn write_into(dir: &Path, title: &str, seen_body: &str) -> AppResult<()> {
     let graph = build(title, seen_body);
     if is_simple(&graph.nodes[0]) {
         return Err(AppError::new(
@@ -244,8 +252,13 @@ pub fn write(
             "inbox node must not be a simple node",
         ));
     }
-    save_graph(&dir, &graph)?;
-    Ok(dir)
+    if !dir.is_dir() {
+        return Err(AppError::new(
+            "internal",
+            format!("the round folder {} does not exist", dir.display()),
+        ));
+    }
+    save_graph(dir, &graph)
 }
 
 #[cfg(test)]

@@ -87,7 +87,7 @@ pub fn hooks_dir(root: &Path, graph_dir: &Path, run_id: &str, sid: &str) -> Path
 
 /// Label of a session window.
 pub fn window_label(run_id: &str, sid: &str) -> String {
-    format!("term-{run_id}-{sid}")
+    format!("{}{run_id}-{sid}", crate::events::SESSION_WINDOW_PREFIX)
 }
 
 /// Content of `runs/<run>/sessions/<sid>/session.json`.

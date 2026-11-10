@@ -346,6 +346,7 @@ impl Inbox {
     async fn scan_once(&self, cfg: &RunConfig) -> AppResult<()> {
         let folder = cfg.folder.clone();
         self.close_finished().await;
+        self.prune_rounds().await;
         check_layout(&folder, &self.graphs_root())?;
         self.retry_unwritten().await;
         let host = self.0.env.host.clone();
@@ -448,6 +449,7 @@ impl Inbox {
                 }
             }
             app.terminals().kill_run(run);
+            self.close_windows(id, run);
             self.log(Some(id), format!("closed the finished session (run {run})"));
         }
         let busy = || {
