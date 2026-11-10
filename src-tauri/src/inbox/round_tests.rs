@@ -54,7 +54,10 @@ fn a_junction_at_any_owned_level_is_refused() {
         let why = create(&data, "t", "r1").unwrap_err();
         assert!(why.contains("is a link or junction"), "{why}");
         assert!(!target.join("r1").exists(), "nothing created through it");
-        fs::remove_dir(level).unwrap();
+        // A junction is removed as a folder, a unix symlink as a file.
+        fs::remove_dir(level)
+            .or_else(|_| fs::remove_file(level))
+            .unwrap();
         fs::create_dir_all(level).unwrap();
     }
 }
