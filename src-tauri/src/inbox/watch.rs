@@ -17,13 +17,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::task::JoinHandle;
+
 use crate::contract::{InboxPhase, NodeStatus, RunState, SessionPrompt, TurnPrompt};
 use crate::run_loop::blocking;
 use crate::run_store::{node_run_dir, read_node_result, RESULT_FILE};
 use crate::store::deliverables_dir;
+use crate::terminal::api::Terminals;
 use crate::terminal::prompt_api::list_session_prompts;
 
 use super::block::Outcome;
+use super::env::Tap;
 use super::graphgen::NODE_ID;
 use super::ops::Claimant;
 use super::results::{copy_round, results_dir};
@@ -301,6 +305,10 @@ fn node_outcome(round: &Round, state: &RunState) -> Option<Outcome> {
 /// Prefix of the key of a start-up dialog (prompt ids never start so).
 const STARTUP_KEY: &str = "startup: ";
 
+/// How long a dialog may stay "still being drawn" (output arriving) before
+/// it stops holding off the timeout.
+const DRAWING_MAX: Duration = Duration::from_secs(30);
+
 /// Whether the session waits for the owner now.
 enum Ask {
     /// It waits: the key of what it waits on (written once) and the outcome.
@@ -311,19 +319,89 @@ enum Ask {
     No,
 }
 
+/// The watcher's state for one round.
+struct Follow {
+    timeout: Duration,
+    deadline: Instant,
+    /// Key of the prompt last written (cleared once answered).
+    written_prompt: Option<String>,
+    /// Start-up dialogs reported in this round: each kind once.
+    startup_written: HashSet<String>,
+    waiting_since: Option<Instant>,
+    drawing_since: Option<Instant>,
+    /// The tip shows a question for what the session waits on now.
+    asking: bool,
+}
+
+impl Follow {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            deadline: Instant::now() + timeout,
+            written_prompt: None,
+            startup_written: HashSet::new(),
+            waiting_since: None,
+            drawing_since: None,
+            asking: false,
+        }
+    }
+
+    /// Not written yet in this round (a start-up dialog kind: ever; a turn
+    /// prompt: since the last answer).
+    fn fresh(&self, key: &str) -> bool {
+        self.written_prompt.as_deref() != Some(key) && !self.startup_written.contains(key)
+    }
+
+    fn written(&mut self, key: String) {
+        if key.starts_with(STARTUP_KEY) {
+            self.startup_written.insert(key.clone());
+        }
+        self.written_prompt = Some(key);
+    }
+
+    /// Answered in the window: working again, with a fresh timeout.
+    fn answered(&mut self) {
+        self.asking = false;
+        self.written_prompt = None;
+        self.deadline = Instant::now() + self.timeout;
+    }
+}
+
+/// A start-up dialog per [`startup_dialog`]; one still being drawn holds
+/// off the timeout for at most [`DRAWING_MAX`].
+fn ask_startup(terminals: &Terminals, run: &str, f: &mut Follow) -> Ask {
+    let seen = startup_dialog(terminals, run);
+    if seen != StartupDialog::Drawing {
+        f.drawing_since = None;
+    }
+    match seen {
+        StartupDialog::Open(text) => Ask::Now(
+            format!("{STARTUP_KEY}{text}"),
+            Outcome::Dialog { text: text.into() },
+        ),
+        StartupDialog::Drawing => {
+            let since = *f.drawing_since.get_or_insert_with(Instant::now);
+            if since.elapsed() < DRAWING_MAX {
+                Ask::Later
+            } else {
+                Ask::No
+            }
+        }
+        StartupDialog::Closed => Ask::No,
+    }
+}
+
 /// What the node waits on: a turn prompt while it is `waiting`, or a
 /// Claude Code start-up dialog (trust, MCP) while its message was not taken
 /// yet (`pending` / `queued`). Nothing is typed into either.
-fn ask(
-    inbox: &Inbox,
-    run: &str,
-    status: Option<NodeStatus>,
-    waiting_since: &mut Option<Instant>,
-) -> Ask {
+fn ask(inbox: &Inbox, run: &str, status: Option<NodeStatus>, f: &mut Follow) -> Ask {
     let terminals = inbox.env().app.terminals();
+    if status != Some(NodeStatus::Waiting) {
+        f.waiting_since = None;
+    }
     match status {
         Some(NodeStatus::Waiting) => {
-            let since = *waiting_since.get_or_insert_with(Instant::now);
+            let since = *f.waiting_since.get_or_insert_with(Instant::now);
             let prompt = list_session_prompts(terminals, run)
                 .ok()
                 .and_then(|v| v.into_iter().find(|p| p.node_id == NODE_ID));
@@ -338,18 +416,57 @@ fn ask(
                 None => Ask::Later,
             }
         }
-        None | Some(NodeStatus::Pending | NodeStatus::Queued) => {
-            match startup_dialog(terminals, run) {
-                StartupDialog::Open(text) => Ask::Now(
-                    format!("{STARTUP_KEY}{text}"),
-                    Outcome::Dialog { text: text.into() },
-                ),
-                StartupDialog::Drawing => Ask::Later,
-                StartupDialog::Closed => Ask::No,
-            }
-        }
+        None | Some(NodeStatus::Pending | NodeStatus::Queued) => ask_startup(terminals, run, f),
         Some(_) => Ask::No,
     }
+}
+
+/// The round ended with `outcome`: written, the phase set, and a written
+/// `done` closes its session in the background (so the freed slot is used
+/// at once).
+async fn finish(inbox: &Inbox, round: &Round, outcome: Outcome, flag: &AtomicBool, run: &str) {
+    let done = matches!(outcome, Outcome::Done { .. });
+    let written = write(inbox, round, outcome, flag).await;
+    inbox.set_phase(&round.tip_id, InboxPhase::Finished);
+    if done && written.is_some() {
+        // Outcome and results are in the tip folder: close it now.
+        let (ib, id, run) = (inbox.clone(), round.tip_id.clone(), run.to_string());
+        tokio::spawn(async move { ib.close_done(&id, &run).await });
+    }
+    inbox.pump().await;
+}
+
+fn timeout_reason(timeout: Duration) -> String {
+    let minutes = timeout.as_secs() / 60;
+    if minutes > 0 {
+        format!("timed out after {minutes} minutes; the run was cancelled")
+    } else {
+        format!(
+            "timed out after {} s; the run was cancelled",
+            timeout.as_secs()
+        )
+    }
+}
+
+/// The run's latest state, and whether its task has ended.
+async fn latest(
+    inbox: &Inbox,
+    id: &str,
+    join: &mut Option<JoinHandle<RunState>>,
+    tap: &Tap,
+) -> (Option<RunState>, bool) {
+    let finished_now = join.as_ref().is_some_and(|j| j.is_finished());
+    let final_state = match join.take_if(|_| finished_now) {
+        Some(j) => match j.await {
+            Ok(s) => Some(s),
+            Err(e) => {
+                inbox.log(Some(id), format!("the run task ended abnormally: {e}"));
+                None
+            }
+        },
+        None => None,
+    };
+    (final_state.or_else(|| tap.latest()), join.is_none())
 }
 
 /// Follow `l` until its outcome is written (or the tip is superseded).
@@ -359,35 +476,17 @@ pub(crate) async fn watch(inbox: Inbox, l: Launched, superseded: Arc<AtomicBool>
         join,
         tap,
     } = l;
-    let timeout = inbox.config().timeout;
     let poll = inbox.env().poll;
     let id = round.tip_id.clone();
     let run = round.graph_run.clone().unwrap_or_default();
-    let mut deadline = Instant::now() + timeout;
-    let mut written_prompt: Option<String> = None;
-    // Start-up dialogs reported in this round: each kind once.
-    let mut startup_written: HashSet<String> = HashSet::new();
-    let mut waiting_since: Option<Instant> = None;
-    let mut asking = false;
+    let mut f = Follow::new(inbox.config().timeout);
     let mut join = Some(join);
     loop {
         tokio::time::sleep(poll).await;
         if halted(&inbox, &superseded) {
             return;
         }
-        let finished_now = join.as_ref().is_some_and(|j| j.is_finished());
-        let final_state = match join.take_if(|_| finished_now) {
-            Some(j) => match j.await {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    inbox.log(Some(&id), format!("the run task ended abnormally: {e}"));
-                    None
-                }
-            },
-            None => None,
-        };
-        let ended = join.is_none();
-        let state = final_state.or_else(|| tap.latest());
+        let (state, ended) = latest(&inbox, &id, &mut join, &tap).await;
         if let Some(s) = &state {
             inbox.set_sid(&id, s);
         }
@@ -396,32 +495,33 @@ pub(crate) async fn watch(inbox: Inbox, l: Launched, superseded: Arc<AtomicBool>
             .and_then(|s| s.nodes.get(NODE_ID))
             .map(|n| n.status);
         if let Some(outcome) = state.as_ref().and_then(|s| node_outcome(&round, s)) {
-            let done = matches!(outcome, Outcome::Done { .. });
-            let written = write(&inbox, &round, outcome, &superseded).await;
-            inbox.set_phase(&id, InboxPhase::Finished);
-            if done && written.is_some() {
-                // Outcome and results are in the tip folder: close it now.
-                inbox.close_done(&id, &run).await;
-            }
-            inbox.pump().await;
-            return;
+            return finish(&inbox, &round, outcome, &superseded, &run).await;
         }
-        if status != Some(NodeStatus::Waiting) {
-            waiting_since = None;
+        // Before anything that waits: a run that ended never comes back.
+        if ended {
+            let reason = "the run ended without a result for the node".to_string();
+            return finish(
+                &inbox,
+                &round,
+                Outcome::Failed { reason },
+                &superseded,
+                &run,
+            )
+            .await;
         }
-        match ask(&inbox, &run, status, &mut waiting_since) {
+        match ask(&inbox, &run, status, &mut f) {
             Ask::Now(key, outcome) => {
-                let fresh = written_prompt.as_deref() != Some(key.as_str())
-                    && !startup_written.contains(&key);
-                if fresh {
-                    if key.starts_with(STARTUP_KEY) {
-                        startup_written.insert(key.clone());
-                    }
+                if f.fresh(&key) {
                     if let Some(body) = write(&inbox, &round, outcome, &superseded).await {
                         round.expected_body = body;
                     }
-                    written_prompt = Some(key);
-                    asking = true;
+                    f.written(key);
+                    f.asking = false;
+                }
+                if !f.asking {
+                    // Written now, or a kind already reported this round:
+                    // either way the session waits for the owner.
+                    f.asking = true;
                     inbox.set_phase(&id, InboxPhase::Question);
                     inbox.pump().await;
                 }
@@ -430,37 +530,23 @@ pub(crate) async fn watch(inbox: Inbox, l: Launched, superseded: Arc<AtomicBool>
             Ask::Later => continue,
             Ask::No => {}
         }
-        if asking {
-            // Answered in the window: working again, with a fresh timeout.
-            asking = false;
-            written_prompt = None;
-            deadline = Instant::now() + timeout;
+        if f.asking {
+            f.answered();
             inbox.set_phase(&id, InboxPhase::Working);
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= f.deadline {
             if let Err(e) = inbox.env().app.cancel_run(&run) {
                 inbox.log(Some(&id), format!("cancel after timeout: {}", e.message));
             }
-            let minutes = timeout.as_secs() / 60;
-            let reason = if minutes > 0 {
-                format!("timed out after {minutes} minutes; the run was cancelled")
-            } else {
-                format!(
-                    "timed out after {} s; the run was cancelled",
-                    timeout.as_secs()
-                )
-            };
-            write(&inbox, &round, Outcome::Failed { reason }, &superseded).await;
-            inbox.set_phase(&id, InboxPhase::Finished);
-            inbox.pump().await;
-            return;
-        }
-        if ended {
-            let reason = "the run ended without a result for the node".to_string();
-            write(&inbox, &round, Outcome::Failed { reason }, &superseded).await;
-            inbox.set_phase(&id, InboxPhase::Finished);
-            inbox.pump().await;
-            return;
+            let reason = timeout_reason(f.timeout);
+            return finish(
+                &inbox,
+                &round,
+                Outcome::Failed { reason },
+                &superseded,
+                &run,
+            )
+            .await;
         }
     }
 }

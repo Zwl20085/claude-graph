@@ -1188,6 +1188,16 @@ Module layout (`src-tauri/src/inbox/`):
   dialog kind per round; the round's prompt (the node prompt from the tip) is kept as
   `prompt.md` next to `result.md`; a round that ends `done` has its session ended and its window
   closed (`Emitter::close_window`, new, session windows only) right after the write-back.
+- Inbox review fixes (2026-11-10): `round` builds every round path from the canonical data
+  dir, requires `inbox`, `inbox/rounds`, `inbox/rounds/<tip>` and the round folder to be plain
+  directories (`fsguard`: symlinks, junctions and any reparse point refused), creates the round
+  folder only after the claim with `create_dir`, and re-checks it (plain, canonical == itself,
+  no planted file) as the last step before `start_by_mode`; `planted_files` refuses a folder
+  outside the data dir. Results are written through a temp file and a rename; hard-linked or
+  linked sources are refused. "One run per tip" uses only the in-memory registry (no on-disk
+  agent-run records). The watcher handles a run that ended before any waiting, ignores dead
+  sessions' screens, caps how long a redrawing dialog holds off the timeout, and reads the
+  dialog kind from the live grid. `prune` deletes round folders 15 days after their finish.
 
 How it plugs into the existing engine:
 

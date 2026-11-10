@@ -546,9 +546,13 @@ async fn stale_claims_rerun_only_for_recorded_runs_and_planted_files_block() {
         fs::read_to_string(r.file("mine")).unwrap()
     );
     fs::write(r.file("mine"), &before).unwrap();
+    let folders = || fs::read_dir(&tip_rounds).unwrap().count();
+    let folders_before = folders();
     restarted.scan_now().await.unwrap();
     assert!(restarted.wait_idle(TIMEOUT).await);
     assert_eq!(fs::read_to_string(r.file("mine")).unwrap(), before);
+    // C3: a round that is not started leaves no folder.
+    assert_eq!(folders(), folders_before);
     let tip = restarted
         .status()
         .tips
@@ -713,5 +717,63 @@ async fn an_edit_during_the_run_is_written_with_the_seen_hash_and_runs_again() {
     assert_eq!(tip.body.matches("## ⭐ Result").count(), 2);
     assert_eq!(r.agent("ed", "hash"), Some(body_hash(&tip.body)));
     assert_eq!(r.status_tip("ed").state, InboxTipState::Done);
+    r.kill_all().await;
+}
+
+/// C4 / S4: a run of the app still active in an earlier round folder of the
+/// tip keeps the next round from starting (one run per tip): the tip is not
+/// claimed and no new round folder is made. Only the app's own registry
+/// counts; an on-disk run record does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_busy_earlier_round_folder_keeps_the_next_round_from_starting() {
+    use claude_graph_lib::contract::RunTarget;
+    use claude_graph_lib::inbox::graphgen::write;
+
+    let r = rig(Duration::from_secs(600));
+    let root = inbox_root(r.app.data_dir());
+    let old = write(
+        &root,
+        "busy",
+        "20261101-000000-aaaa",
+        "Busy",
+        "Work FAKE_SLEEP_MS=8000\n",
+    )
+    .unwrap();
+    let (old_run, _join) = r
+        .app
+        .start_by_mode(&old, RunTarget::All, Arc::new(Recorder::default()))
+        .unwrap();
+    let text = "---\ntitle: Busy\nkind: agent\n---\nDo it.\n";
+    r.write("busy", text);
+    r.inbox.scan_now().await.unwrap();
+    let decision = r.status_tip("busy").decision;
+    assert!(
+        decision.starts_with("not started: a run of its graph folder"),
+        "{decision}"
+    );
+    assert_eq!(
+        fs::read_to_string(r.file("busy")).unwrap(),
+        text,
+        "not claimed"
+    );
+    let rounds: Vec<_> = fs::read_dir(tip_dir(&root, "busy"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(rounds, ["20261101-000000-aaaa"], "no new round folder");
+
+    // A forged agent-mode run record in an old round folder does not block.
+    r.app.terminals().kill_run(&old_run);
+    let _ = r.app.cancel_run(&old_run);
+    wait_until("the old run to end", || !r.app.dir_busy(&abs(&old))).await;
+    let forged = old.join("runs").join("forged");
+    fs::create_dir_all(&forged).unwrap();
+    fs::write(
+        forged.join("run.json"),
+        "{\"run_id\":\"forged\",\"status\":\"running\"}",
+    )
+    .unwrap();
+    r.scan().await;
+    assert_eq!(r.agent("busy", "state").as_deref(), Some("done"));
     r.kill_all().await;
 }

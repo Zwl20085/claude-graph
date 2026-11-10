@@ -1,8 +1,10 @@
-//! Starting one queued tip: checks that need no write (folder busy, planted
-//! Claude Code files, trust, agent-called mode), the claim, the generated
-//! graph with the seen body, and the terminal run through the normal run API.
+//! Starting one queued tip: checks that write nothing (tip still eligible,
+//! no folder of the tip busy, the round's folders per [`super::round`],
+//! trust), the claim, then the round folder made and the generated graph
+//! with the seen body written, a last check of the folder, and the terminal
+//! run through the normal run API.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -17,8 +19,9 @@ use super::block::Outcome;
 use super::eligible::{decide, Decision, Runner};
 use super::env::Tap;
 use super::folder::read;
-use super::graphgen::{self, inbox_root, round_dir, PLANTED};
+use super::graphgen::{self, round_dir, PLANTED};
 use super::ops::{Claimed, Known};
+use super::round;
 use super::runner::{Active, Inbox, Pending};
 use super::tip::parse;
 use super::watch::{self, Round};
@@ -49,13 +52,16 @@ fn not_started(why: impl Into<String>) -> Failure {
 /// root that carries them): looked for in `dir` and every parent of it up to
 /// and including `top` (the app's data dir), never above it. `Some(reason)`
 /// names each folder and what it contains; nothing is deleted. A `dir`
-/// outside `top` is checked on its own.
+/// outside `top` is refused (its parents could not be checked).
 pub fn planted_files(dir: &Path, top: &Path) -> Option<String> {
-    let levels: Vec<&Path> = if dir.starts_with(top) {
-        dir.ancestors().take_while(|a| a.starts_with(top)).collect()
-    } else {
-        vec![dir]
-    };
+    if !dir.starts_with(top) {
+        return Some(format!(
+            "{} is outside the app data folder {}; not run",
+            dir.display(),
+            top.display()
+        ));
+    }
+    let levels: Vec<&Path> = dir.ancestors().take_while(|a| a.starts_with(top)).collect();
     let mut count = 0;
     let found: Vec<String> = levels
         .iter()
@@ -79,9 +85,13 @@ pub fn planted_files(dir: &Path, top: &Path) -> Option<String> {
 }
 
 /// One run per tip: no graph folder of the tip (an earlier round's, or the
-/// single folder of earlier app versions) has an app run or an agent-called
-/// run active. Each round runs in a fresh folder, so the "one run per graph
-/// folder" rule alone would no longer keep two rounds of a tip apart.
+/// single folder of earlier app versions) has a run in this app's registry
+/// (in memory, [`crate::run_api::AppState::dir_busy`]). Each round runs in a
+/// fresh folder, so the "one run per graph folder" rule alone would no
+/// longer keep two rounds of a tip apart. On-disk run records (agent-called
+/// runs' `run.json`) are not consulted: an agent could forge one in its own
+/// round folder to block its tip forever, and no legitimate agent-called run
+/// uses an Inbox round folder.
 fn check_rounds_free(inbox: &Inbox, tip_id: &str) -> Result<(), Failure> {
     for d in graphgen::round_dirs(&inbox.graphs_root(), tip_id) {
         let d = abs(&d);
@@ -91,15 +101,32 @@ fn check_rounds_free(inbox: &Inbox, tip_id: &str) -> Result<(), Failure> {
                 d.display()
             )));
         }
-        crate::agentmode::gui::refuse_if_agent_active(&d).map_err(|e| not_started(e.message))?;
     }
     Ok(())
 }
 
-/// Checks before the claim: the tip is still eligible, no folder of the tip
-/// is busy, the new round's folder and its parents carry no planted files,
-/// the generated graph passes the trust gate as is, no agent-called run.
-fn precheck(inbox: &Inbox, p: &Pending, run: &str, dir: &Path) -> Result<(), Failure> {
+/// The trust gate on the graph as it will be written, before anything is
+/// written: the round folder does not exist yet, so nothing in it can add
+/// elevated settings; [`crate::run_api::AppState::start_by_mode`] checks the
+/// written folder again.
+fn trust_check(inbox: &Inbox, dir: &Path, title: &str, body: &str) -> Result<(), Failure> {
+    let graph = graphgen::build(title, body);
+    let status = crate::trust::status(inbox.env().app.data_dir(), dir, &graph);
+    if status.trusted {
+        return Ok(());
+    }
+    let items: Vec<String> = status.items.iter().map(|i| i.detail.clone()).collect();
+    Err(not_started(format!(
+        "the generated graph is not trusted as is ({}); not bypassed",
+        items.join("; ")
+    )))
+}
+
+/// Checks before the claim, writing nothing: the tip is still eligible, no
+/// folder of the tip is busy, the new round's folder does not exist, the
+/// levels above it are plain folders without planted files, and the graph
+/// passes the trust gate as is. Returns the round folder's path.
+fn precheck(inbox: &Inbox, p: &Pending, run: &str, data: &Path) -> Result<PathBuf, Failure> {
     let env = inbox.env();
     // `kind` from the bounded frontmatter read first: a tip that stopped
     // being an agent tip is not read further (protocol section 9).
@@ -121,34 +148,27 @@ fn precheck(inbox: &Inbox, p: &Pending, run: &str, dir: &Path) -> Result<(), Fai
         return Err(not_started(why));
     }
     check_rounds_free(inbox, &p.id)?;
-    if let Some(why) = planted_files(dir, &abs(env.app.data_dir())) {
-        return Err(not_started(why));
-    }
-    let dir = graphgen::write(&inbox.graphs_root(), &p.id, run, &tip.title, &tip.body)
-        .map_err(|e| not_started(format!("cannot write its graph: {}", e.message)))?;
-    let status = env
-        .app
-        .trust_status(&abs(&dir))
-        .map_err(|e| not_started(e.message))?;
-    if !status.trusted {
-        let items: Vec<String> = status.items.iter().map(|i| i.detail.clone()).collect();
-        return Err(not_started(format!(
-            "the generated graph is not trusted as is ({}); not bypassed",
-            items.join("; ")
-        )));
-    }
-    crate::agentmode::gui::refuse_if_agent_active(&abs(&dir)).map_err(|e| not_started(e.message))
+    let dir = round::check_before_claim(data, &p.id, run).map_err(not_started)?;
+    trust_check(inbox, &dir, &tip.title, &tip.body)?;
+    Ok(dir)
+}
+
+/// The round folder after the claim: created, the graph written, and the
+/// folder checked once more as the last step before the run starts (S3:
+/// nothing the Inbox does comes between this and `start_by_mode`).
+fn make_round(data: &Path, p: &Pending, run: &str, title: &str, body: &str) -> Result<(), String> {
+    let dir = round::create(data, &p.id, run)?;
+    graphgen::write_into(&dir, title, body)
+        .map_err(|e| format!("cannot write its graph: {}", e.message))?;
+    round::recheck(data, &dir)
 }
 
 fn launch(inbox: &Inbox, p: &Pending, run: &str) -> Result<Launched, Failure> {
     let env = inbox.env();
-    // From the canonical data dir: the round folder does not exist yet, so
-    // `abs` could not canonicalize it, and the planted-files check compares
-    // it with the canonical data dir (an 8.3 short name in TEMP would
-    // otherwise hide every parent from that check).
-    let root = inbox_root(&abs(env.app.data_dir()));
-    let dir = round_dir(&root, &p.id, run);
-    precheck(inbox, p, run, &dir)?;
+    // The canonical data dir: every round path is built from it, so the
+    // planted-files check and the session see the same folders.
+    let data = abs(env.app.data_dir());
+    let dir = precheck(inbox, p, run, &data)?;
     let who = super::ops::Claimant {
         host: &env.host,
         run,
@@ -179,13 +199,13 @@ fn launch(inbox: &Inbox, p: &Pending, run: &str) -> Result<Launched, Failure> {
         expected_body: seen_body.clone(),
         prompt: None,
     };
-    if let Err(e) = graphgen::write(&inbox.graphs_root(), &p.id, run, &title, &seen_body) {
+    inbox.refresh_tip(&p.id, &p.path);
+    if let Err(why) = make_round(&data, p, run, &title, &seen_body) {
         return Err(Failure::StartFailed(
             Box::new(round),
-            format!("cannot write its graph: {}", e.message),
+            format!("not started: {why}"),
         ));
     }
-    inbox.refresh_tip(&p.id, &p.path);
     let tap = Tap::new(env.emitter.clone());
     match env.app.start_by_mode(&dir, RunTarget::All, tap.clone()) {
         Ok((graph_run, join)) => Ok(Launched {
@@ -363,5 +383,17 @@ mod tests {
         assert!(why.contains(&format!("{} contains CLAUDE.md", graph.display())));
         assert!(why.contains(&format!("{} contains CLAUDE.md", data.display())));
         assert!(why.ends_with("check and remove them by hand"), "{why}");
+    }
+
+    /// S1 (d): a folder outside the data dir is refused, not checked alone.
+    #[test]
+    fn a_folder_outside_the_data_dir_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("claude-graph");
+        let outside = tmp.path().join("elsewhere").join("round");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let why = planted_files(&outside, &data).expect("refused");
+        assert!(why.contains("is outside the app data folder"), "{why}");
     }
 }

@@ -11,33 +11,69 @@ const MCP: &str = include_str!("../../tests/fixtures/dialog_mcp.txt");
 const IDLE: &str = "fake-claude interactive\r\n  ? for shortcuts\r\n>\u{a0}";
 const SETTLED: Duration = Duration::from_secs(1);
 
+/// The live grid after `raw` (as the session's emulator holds it; line ends
+/// as a pty delivers them, `\r\n`).
+fn grid(raw: &str) -> Vec<String> {
+    let n = |v| std::num::NonZeroU16::new(v).unwrap();
+    let mut p = vt100::Parser::new(n(50), n(160), 0);
+    let crlf = raw.replace("\r\n", "\n").replace('\n', "\r\n");
+    p.process(crlf.as_bytes());
+    p.screen().rows(0, 160).collect()
+}
+
+/// [`startup_text`] on the screen and the grid of the same output.
+fn seen(raw: &str, quiet: Duration) -> StartupDialog {
+    startup_text(&Screen::of(raw), &grid(raw), quiet)
+}
+
+/// C5: the kind comes from what the grid shows now, not from the order of
+/// markers in the output stream.
+#[test]
+fn the_kind_is_read_from_the_live_grid() {
+    let screen = Screen::of(&format!("{TRUST}\r\n{MCP}"));
+    // The grid shows only the trust dialog (the other was drawn over).
+    assert_eq!(
+        startup_text(&screen, &grid(TRUST), SETTLED),
+        Open(TRUST_TEXT)
+    );
+    assert_eq!(startup_text(&screen, &grid(MCP), SETTLED), Open(MCP_TEXT));
+    // Both show: the bottom-most named row wins.
+    let rows = vec![
+        "Do you trust the files?".to_string(),
+        "New MCP server found".to_string(),
+    ];
+    assert_eq!(startup_text(&screen, &rows, SETTLED), Open(MCP_TEXT));
+    // No row names a known dialog: the generic text.
+    assert_eq!(
+        startup_text(&screen, &[String::new()], SETTLED),
+        Open(OTHER_TEXT)
+    );
+}
+
 #[test]
 fn start_up_dialogs_are_named_by_fixed_text() {
-    assert_eq!(startup_text(&Screen::of(TRUST), SETTLED), Open(TRUST_TEXT));
-    assert_eq!(startup_text(&Screen::of(MCP), SETTLED), Open(MCP_TEXT));
+    assert_eq!(seen(TRUST, SETTLED), Open(TRUST_TEXT));
+    assert_eq!(seen(MCP, SETTLED), Open(MCP_TEXT));
     // Trust answered, then the MCP dialog: the later one is named.
     let both = format!("{TRUST}\r\n{MCP}");
-    assert_eq!(startup_text(&Screen::of(&both), SETTLED), Open(MCP_TEXT));
+    assert_eq!(seen(&both, SETTLED), Open(MCP_TEXT));
     let fake = "Do you trust the files in this folder?\r\n\u{276f} Yes, proceed\r\nEnter to confirm \u{b7} Esc to exit";
-    assert_eq!(startup_text(&Screen::of(fake), SETTLED), Open(TRUST_TEXT));
+    assert_eq!(seen(fake, SETTLED), Open(TRUST_TEXT));
     // Another dialog (markers only): named generically, never by its text.
     let other = "Pick a theme\r\nEnter to confirm \u{b7} Esc to cancel";
-    assert_eq!(startup_text(&Screen::of(other), SETTLED), Open(OTHER_TEXT));
+    assert_eq!(seen(other, SETTLED), Open(OTHER_TEXT));
 }
 
 #[test]
 fn no_dialog_or_one_still_drawing_is_not_reported() {
-    assert_eq!(startup_text(&Screen::of(IDLE), SETTLED), Closed);
-    assert_eq!(startup_text(&Screen::of(""), SETTLED), Closed);
+    assert_eq!(seen(IDLE, SETTLED), Closed);
+    assert_eq!(seen("", SETTLED), Closed);
     // Answered: the input box is drawn after the dialog.
     let answered = format!("{TRUST}\r\n{IDLE}");
-    assert_eq!(startup_text(&Screen::of(&answered), SETTLED), Closed);
+    assert_eq!(seen(&answered, SETTLED), Closed);
     // Open but output still arriving (drawn, or redrawn by an arrow key):
     // neither a new dialog nor an answered one.
-    assert_eq!(
-        startup_text(&Screen::of(TRUST), Duration::from_millis(100)),
-        Drawing
-    );
+    assert_eq!(seen(TRUST, Duration::from_millis(100)), Drawing);
 }
 
 #[test]

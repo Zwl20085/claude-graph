@@ -1,8 +1,9 @@
 //! Closing the session of an Inbox round that ended `done`: its window is
 //! closed and its process ended right after the outcome and the results were
 //! written (ordinary graph runs never come here). A round that ended
-//! `question` or `failed` keeps its session (a failed one is closed at the
-//! next scan, [`super::runner::Inbox::close_finished`]).
+//! `question` or `failed` keeps its session (a failed one is ended, its
+//! window closed, at the next scan, [`super::runner::Inbox::close_finished`]).
+//! The run itself is not cancelled here: it succeeded and stays so.
 //!
 //! Closing never changes what was written: a failure is logged, and a
 //! session that does not end in time keeps its entry, so the next scan's
@@ -20,11 +21,8 @@ impl Inbox {
     /// processes. Call only after the done outcome is in the tip.
     pub(crate) async fn close_done(&self, id: &str, run: &str) {
         let app = &self.env().app;
-        if let Err(e) = app.cancel_run(run) {
-            if e.code != "not_found" {
-                self.log(Some(id), format!("closing run {run}: {}", e.message));
-            }
-        }
+        // Only the sessions are ended (no `cancel_run`: the run succeeded and
+        // must stay recorded so).
         app.terminals().kill_run(run);
         let alive = || {
             app.terminals()
@@ -63,7 +61,8 @@ impl Inbox {
         self.emit();
     }
 
-    fn close_windows(&self, id: &str, run: &str) {
+    /// Close the session windows of graph run `run` (failures logged).
+    pub(crate) fn close_windows(&self, id: &str, run: &str) {
         let env = self.env();
         for session in env.app.terminals().all_of(run) {
             let label = session.window().label;
