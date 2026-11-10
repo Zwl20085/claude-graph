@@ -171,11 +171,31 @@ pub fn finish(
     expected_body: &str,
     outcome: &Outcome,
 ) -> Result<Finished, OpError> {
+    finish_with(
+        id,
+        text,
+        who,
+        expected_body,
+        outcome,
+        &block::Footnotes::default(),
+    )
+}
+
+/// [`finish`], with the runner's footnotes under a done or failed block
+/// ([`block::render_with`]).
+pub fn finish_with(
+    id: &str,
+    text: &str,
+    who: &Claimant<'_>,
+    expected_body: &str,
+    outcome: &Outcome,
+    notes: &block::Footnotes,
+) -> Result<Finished, OpError> {
     let tip = agent_tip(id, text)?;
     check_ours(&tip, who)?;
     let agent = tip.agent.clone().unwrap_or_default();
     let newline = split(text).map_or("\n", |p| p.newline());
-    let rendered = block::render(outcome, who.at, who.host, id, newline);
+    let rendered = block::render_with(outcome, notes, who.at, who.host, id, newline);
     let body = block::append(&tip.body, &rendered, newline);
     let edited = normalise(&tip.body) != normalise(expected_body);
     let hash = if edited {

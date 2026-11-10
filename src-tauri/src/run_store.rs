@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 
 use crate::contract::{
     AppError, AppResult, NodeMessage, NodeResult, NodeStatus, NodeSummary, RunState, RunStatus,
-    RunSummary, StatusCounts,
+    RunSummary, StatusCounts, TerminalSession,
 };
 use crate::graph_util::is_valid_node_id;
 use crate::store::{append, read_json, read_optional, write_json};
@@ -130,6 +130,32 @@ fn read_checked(path: &Path, folder: &str) -> AppResult<RunState> {
 pub fn read_run_state(dir: &Path, run_id: &str) -> AppResult<RunState> {
     check_id("run id", run_id)?;
     read_checked(&run_dir(dir, run_id).join(RUN_FILE), run_id)
+}
+
+/// Replace the session entries of run `run_id`'s run.json by `sessions`
+/// (matched by sid; others kept), leaving everything else, the run's status
+/// included, as it was. For sessions that changed after the run's loop
+/// ended (killed later), which no longer reach run.json themselves.
+pub fn record_sessions(dir: &Path, run_id: &str, sessions: &[TerminalSession]) -> AppResult<()> {
+    let state = read_run_state(dir, run_id)?;
+    let merged = state
+        .sessions
+        .iter()
+        .map(|old| {
+            sessions
+                .iter()
+                .find(|s| s.sid == old.sid)
+                .unwrap_or(old)
+                .clone()
+        })
+        .collect();
+    write_run_state(
+        dir,
+        &RunState {
+            sessions: merged,
+            ..state
+        },
+    )
 }
 
 /// Every readable run.json, newest first. Unreadable runs, and runs whose
@@ -629,5 +655,37 @@ mod tests {
             vec![m.clone(), m]
         );
         assert!(list_messages(tmp.path(), "R1", "b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn recorded_sessions_replace_their_entries_and_nothing_else() {
+        use crate::contract::SessionStatus;
+        let tmp = tempfile::tempdir().unwrap();
+        let session = |sid: &str, alive: bool| TerminalSession {
+            sid: sid.into(),
+            title: "T".into(),
+            node_ids: vec!["a".into()],
+            status: SessionStatus::Done,
+            pid: alive.then_some(42),
+            alive,
+            current_node: None,
+            harness: "claude".into(),
+            pending_prompt: None,
+        };
+        let before = RunState {
+            status: RunStatus::Succeeded,
+            sessions: vec![session("s1", true), session("s2", true)],
+            ..state("r1")
+        };
+        write_run_state(tmp.path(), &before).unwrap();
+        record_sessions(tmp.path(), "r1", &[session("s1", false)]).unwrap();
+        let after = read_run_state(tmp.path(), "r1").unwrap();
+        assert_eq!(after.status, RunStatus::Succeeded);
+        assert_eq!(after.nodes, before.nodes);
+        assert_eq!(
+            after.sessions,
+            vec![session("s1", false), session("s2", true)]
+        );
+        assert!(record_sessions(tmp.path(), "gone", &[]).is_err());
     }
 }

@@ -21,20 +21,20 @@ use tokio::task::JoinHandle;
 
 use crate::contract::{InboxPhase, NodeStatus, RunState, SessionPrompt, TurnPrompt};
 use crate::run_loop::blocking;
-use crate::run_store::{node_run_dir, read_node_result, RESULT_FILE};
-use crate::store::deliverables_dir;
+use crate::run_store::read_node_result;
 use crate::terminal::api::Terminals;
 use crate::terminal::prompt_api::list_session_prompts;
 
 use super::block::Outcome;
 use super::env::Tap;
 use super::graphgen::NODE_ID;
+use super::handover;
 use super::ops::Claimant;
-use super::results::{copy_round, results_dir};
+use super::results::CopyReport;
 use super::runner::Inbox;
 use super::start::Launched;
 use super::startup::{startup_dialog, StartupDialog};
-use super::writeback::{claim_holds, finish_file};
+use super::writeback::{claim_holds, finish_file_with};
 
 /// A waiting node with no prompt listed after this long is reported anyway.
 const PROMPT_GRACE: Duration = Duration::from_secs(10);
@@ -173,29 +173,6 @@ impl Written {
     }
 }
 
-/// The reply and the deliverables to `<tips>/agent/<id>/` (protocol 7.3).
-fn copy_results(inbox: &Inbox, round: &Round) {
-    let id = &round.tip_id;
-    match results_dir(&round.folder, id) {
-        Ok(dest) => {
-            let result_md = round
-                .graph_run
-                .as_deref()
-                .map(|r| node_run_dir(&round.graph_dir, r, NODE_ID).join(RESULT_FILE));
-            let report = copy_round(
-                &dest,
-                result_md.as_deref(),
-                round.prompt.as_deref(),
-                &deliverables_dir(&round.graph_dir, NODE_ID),
-            );
-            for r in &report.refused {
-                inbox.log(Some(id), format!("not copied: {r}"));
-            }
-        }
-        Err(e) => inbox.log(Some(id), format!("results folder refused: {e}")),
-    }
-}
-
 /// Copy the round's files (unless the claim is lost), then append the block and set `agent` (protocol
 /// 7.2 and 7.3). A final outcome (done / failed) that could not be written
 /// for a passing reason is kept for the next scan.
@@ -210,14 +187,17 @@ pub(crate) fn write_round(inbox: &Inbox, round: &Round, outcome: &Outcome) -> Wr
     // A read-only look at the frontmatter first: when the claim is no longer
     // this host's run (or the tip is gone or no longer an agent tip), the
     // results folder belongs to whoever holds it now and is not touched.
-    match claim_holds(&round.path, id, &who) {
+    let report = match claim_holds(&round.path, id, &who) {
         Err(d) if d.is_lost() => {
             inbox.log(Some(id), format!("results not copied: {}", d.describe()));
+            CopyReport::default()
         }
-        _ => copy_results(inbox, round),
-    }
+        _ => handover::copy_results(inbox, round),
+    };
+    let shown = handover::for_tip(outcome, &handover::places(inbox, round, &report.files));
+    let notes = handover::footnotes(outcome, &report);
     let state = outcome.state().as_str();
-    let written = finish_file(&round.path, id, &who, &round.expected_body, outcome);
+    let written = finish_file_with(&round.path, id, &who, &round.expected_body, &shown, &notes);
     inbox.refresh_tip(id, &round.path);
     match written {
         Ok(f) => {

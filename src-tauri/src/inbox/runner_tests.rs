@@ -335,3 +335,171 @@ fn results_are_not_copied_when_the_claim_is_lost() {
         "the prompt"
     );
 }
+
+/// Items A and C through the real write-back: the reply's local paths point
+/// into the results folder in the tip and in `result.md`, and a deliverable
+/// that was not copied is named on the tip (names only, no OS error, no
+/// local path); the hash is over the final body.
+#[test]
+fn the_tip_and_result_md_cite_the_copies_and_name_what_was_not_copied() {
+    use crate::inbox::block::Outcome;
+    use crate::inbox::graphgen::NODE_ID;
+    use crate::inbox::watch::{write_round, Round, Written};
+    use crate::run_store::{node_run_dir, RESULT_FILE};
+    use crate::store::deliverables_dir;
+
+    let tips = tempfile::tempdir().unwrap();
+    let (ib, data) = inbox(tips.path().to_path_buf(), 1);
+    let tip = tips.path().join("t.md");
+    std::fs::write(&tip, agent_tip_claimed_by("H", "r-mine")).unwrap();
+    let graph_dir = crate::paths::abs(data.path())
+        .join("inbox")
+        .join("rounds")
+        .join("t-1")
+        .join("r1");
+    let deliv = deliverables_dir(&graph_dir, NODE_ID);
+    std::fs::create_dir_all(&deliv).unwrap();
+    std::fs::write(deliv.join("answer.md"), "42").unwrap();
+    let outside = data.path().join("outside.txt");
+    std::fs::write(&outside, "x").unwrap();
+    std::fs::hard_link(&outside, deliv.join("loot.md")).unwrap();
+    let shown = crate::prompt::display_dir(&deliv);
+    let reply = format!("Saved `{shown}/answer.md` and {shown}/loot.md.");
+    let src = node_run_dir(&graph_dir, "g1", NODE_ID).join(RESULT_FILE);
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    std::fs::write(&src, &reply).unwrap();
+    let round = Round {
+        tip_id: "t".into(),
+        path: tip.clone(),
+        folder: tips.path().to_path_buf(),
+        run: "r-mine".into(),
+        graph_dir: graph_dir.clone(),
+        graph_run: Some("g1".into()),
+        expected_body: "Do x\n".into(),
+        prompt: Some("p".into()),
+    };
+    let Written::Yes(body) = write_round(&ib, &round, &Outcome::Done { reply }) else {
+        panic!("written");
+    };
+    let want = "Saved `agent/t/answer.md` and loot.md (not copied).";
+    assert!(body.contains(want), "{body}");
+    assert!(
+        body.contains("Files: agent/t/\nNot copied to agent/t/: `loot.md`.\n"),
+        "{body}"
+    );
+    let local = data.path().display().to_string();
+    assert!(
+        !body.contains(&local) && !body.contains("AppData"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("hard link"),
+        "no OS or runner error text: {body}"
+    );
+    let result = std::fs::read_to_string(tips.path().join("agent/t/result.md")).unwrap();
+    assert_eq!(result, want);
+    let parsed = crate::inbox::tip::parse("t", &std::fs::read_to_string(&tip).unwrap()).unwrap();
+    assert_eq!(parsed.body, body);
+    assert_eq!(
+        parsed.agent.and_then(|a| a.hash()),
+        Some(crate::inbox::hash::body_hash(&body))
+    );
+}
+
+/// L10: the ended session is written into run.json (status untouched); a
+/// write that has to wait (here: the folder is held by a run) is retried at
+/// the next `close_finished`, so the record does not stay "alive" forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn ended_sessions_reach_run_json_also_after_a_wait() {
+    use crate::contract::{RunMode, RunState, RunStatus, SessionStatus, TerminalSession};
+    use crate::run_store::{read_run_state, write_run_state};
+    use crate::terminal::api::SessionShared;
+
+    let tips = tempfile::tempdir().unwrap();
+    let (ib, data) = inbox(tips.path().to_path_buf(), 1);
+    let dir = crate::paths::abs(data.path()).join("g");
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = |alive: bool| TerminalSession {
+        sid: "s1".into(),
+        title: "Board task".into(),
+        node_ids: vec!["task".into()],
+        status: SessionStatus::Done,
+        pid: alive.then_some(4242),
+        alive,
+        current_node: None,
+        harness: "claude".into(),
+        pending_prompt: None,
+    };
+    let before = RunState {
+        run_id: "g1".into(),
+        graph_dir: dir.display().to_string(),
+        started_at: chrono::Utc::now(),
+        finished_at: Some(chrono::Utc::now()),
+        status: RunStatus::Succeeded,
+        nodes: Default::default(),
+        mode: RunMode::Terminal,
+        sessions: vec![session(true)],
+    };
+    write_run_state(&dir, &before).unwrap();
+    // The session ended (its task gone, its own state says so).
+    let shared = SessionShared::new("g1", &dir, session(false));
+    ib.env().app.terminals().insert(shared);
+    let alive = || read_run_state(&dir, "g1").unwrap().sessions[0].alive;
+    assert!(alive(), "before the close the record says alive");
+
+    // A run holds the folder: the write waits, it is remembered.
+    ib.env()
+        .app
+        .with_dir_reserved(&dir, || ib.record_ended("t", "g1"))
+        .unwrap();
+    assert!(alive());
+    assert!(ib.lock().unrecorded.contains_key("g1"));
+
+    // The next close_finished writes it.
+    ib.close_finished().await;
+    let after = read_run_state(&dir, "g1").unwrap();
+    assert!(!after.sessions[0].alive && after.sessions[0].pid.is_none());
+    assert_eq!(after.status, RunStatus::Succeeded);
+    assert!(ib.lock().unrecorded.is_empty());
+}
+
+/// LOW 10: a run whose sessions never end is not retried forever: after
+/// `UNRECORDED_TRIES` tries it is dropped, logged once.
+#[test]
+fn an_unrecordable_run_is_dropped_after_a_bounded_number_of_tries() {
+    use crate::contract::{SessionStatus, TerminalSession};
+    use crate::terminal::api::SessionShared;
+
+    let tips = tempfile::tempdir().unwrap();
+    let (ib, data) = inbox(tips.path().to_path_buf(), 1);
+    let dir = crate::paths::abs(data.path()).join("g");
+    std::fs::create_dir_all(&dir).unwrap();
+    let info = TerminalSession {
+        sid: "s1".into(),
+        title: "T".into(),
+        node_ids: vec!["task".into()],
+        status: SessionStatus::Done,
+        pid: Some(1),
+        alive: true,
+        current_node: None,
+        harness: "claude".into(),
+        pending_prompt: None,
+    };
+    let shared = SessionShared::new("g9", &dir, info);
+    shared.task_started(); // never ends
+    ib.env().app.terminals().insert(shared);
+    for _ in 0..crate::inbox::close::UNRECORDED_TRIES {
+        ib.record_ended("t", "g9");
+    }
+    assert!(!ib.lock().unrecorded.contains_key("g9"));
+    let dropped = ib
+        .status()
+        .log
+        .iter()
+        .filter(|l| {
+            l.text
+                .starts_with("gave up recording the ended session of run g9")
+        })
+        .count();
+    assert_eq!(dropped, 1);
+}

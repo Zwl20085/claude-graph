@@ -10,6 +10,8 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use super::fsguard;
+use super::relink::CopiedFile;
+use super::relink::{sentinel, sentinel_index, SENTINEL_COUNT};
 
 /// Most files copied per round.
 pub const MAX_FILES: usize = 200;
@@ -20,9 +22,40 @@ pub const MAX_BYTES: u64 = 100 * 1024 * 1024;
 pub struct CopyReport {
     /// Relative paths copied.
     pub copied: Vec<String>,
-    /// `path: why` for everything refused or failed.
+    /// `path: why` for everything refused or failed (for the log).
     pub refused: Vec<String>,
+    /// Names (relative, `/`) of the files that were not copied, for the tip.
+    pub not_copied: Vec<String>,
+    /// Each deliverable: its path under the deliverables folder and its name
+    /// in the results folder (`None`: not copied).
+    pub files: Vec<CopiedFile>,
+    /// The reply file did not exist (normal for a round that failed early).
+    pub reply_missing: bool,
+    /// The walk stopped at [`WALK_MAX`] entries.
+    pub walk_cut: bool,
+    /// Why `result.md` is the reply byte for byte, not rewritten.
+    pub reply_as_written: Option<&'static str>,
 }
+
+/// Largest reply that is rewritten; a larger one is copied as written.
+pub const REWRITE_MAX: u64 = 32 * 1024 * 1024;
+/// Why a reply was copied as written.
+pub const AS_WRITTEN_LARGE: &str = "over 32 MiB";
+
+/// How the results folder is named when it could not be used at all.
+pub const RESULTS_FOLDER_NAME: &str = "(the results folder)";
+/// How further files are named once the walk stopped.
+pub const MORE_FILES_NAME: &str = "(more files)";
+/// Most entries the walk lists (copied or not): the copy cap plus a margin,
+/// so the report and the tip's line stay bounded.
+pub const WALK_MAX: usize = MAX_FILES + 50;
+
+/// What the reply text becomes before it is written as `result.md`, given
+/// what was copied (the runner's path rewriting, [`super::relink`]).
+pub type ReplyFix<'a> = &'a dyn Fn(&str, &CopyReport) -> String;
+
+/// How the deliverables folder itself is named when it cannot be read.
+const DELIVERABLES_NAME: &str = "(the deliverables folder)";
 
 /// `<tips>/agent/<tip id>`, created; refuses a symlinked `agent` or results
 /// folder and a tip id that is not one plain path component.
@@ -70,31 +103,44 @@ pub fn results_dir(tips: &Path, tip_id: &str) -> io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// `rel` with `/` separators.
+fn slashed(rel: &Path) -> String {
+    rel.display().to_string().replace('\\', "/")
+}
+
 /// Regular files under `root` (relative paths); symlinks and unreadable
 /// folders are reported (a missing deliverables folder is not an error).
-fn walk(root: &Path, rel: &Path, out: &mut Vec<PathBuf>, refused: &mut Vec<String>) {
+fn walk(root: &Path, rel: &Path, out: &mut Vec<PathBuf>, report: &mut CopyReport) {
+    if report.walk_cut {
+        return;
+    }
     let entries = match fs::read_dir(root.join(rel)) {
         Ok(e) => e,
         Err(e) if e.kind() == io::ErrorKind::NotFound && rel.as_os_str().is_empty() => return,
         Err(e) => {
-            let shown = if rel.as_os_str().is_empty() {
-                root.display().to_string()
+            let name = if rel.as_os_str().is_empty() {
+                DELIVERABLES_NAME.to_string()
             } else {
-                rel.display().to_string()
+                slashed(rel)
             };
-            refused.push(format!("{shown}: cannot read the folder: {e}"));
+            report.refuse(&name, &format!("cannot read the folder: {e}"));
             return;
         }
     };
     let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
+        if out.len() + report.not_copied.len() >= WALK_MAX {
+            report.walk_cut = true;
+            report.refuse(MORE_FILES_NAME, "over the copy cap");
+            return;
+        }
         let r = rel.join(e.file_name());
         match e.file_type() {
-            Ok(t) if t.is_symlink() => refused.push(format!("{}: symbolic link", r.display())),
-            Ok(t) if t.is_dir() => walk(root, &r, out, refused),
+            Ok(t) if t.is_symlink() => report.refuse(&slashed(&r), "symbolic link"),
+            Ok(t) if t.is_dir() => walk(root, &r, out, report),
             Ok(t) if t.is_file() => out.push(r),
-            _ => refused.push(format!("{}: not a regular file", r.display())),
+            _ => report.refuse(&slashed(&r), "not a regular file"),
         }
     }
 }
@@ -161,23 +207,25 @@ fn deliverable_target(rel: &Path) -> PathBuf {
 }
 
 /// Copy every file under `deliverables`, then write `prompt` (as
-/// `prompt.md`, when given), then copy `result_md` (as `result.md`, when
-/// given, last so it is always the reply) into `dest`, which [`results_dir`]
-/// made. Top-level deliverables named `result.md` / `prompt.md` are copied
-/// as `deliverable-result.md` / `deliverable-prompt.md`. The prompt and the
-/// reply do not count against the caps; both replace an earlier round's
-/// file of the same name (as every file here, protocol 7.3).
+/// `prompt.md`, when given), then the reply read from `result_md` and passed
+/// through `fix` (as `result.md`, when given, last so it is always the
+/// reply) into `dest`, which [`results_dir`] made. Top-level deliverables
+/// named `result.md` / `prompt.md` are copied as `deliverable-result.md` /
+/// `deliverable-prompt.md`. The prompt and the reply do not count against
+/// the caps; both replace an earlier round's file of the same name (as
+/// every file here, protocol 7.3).
 pub fn copy_round(
     dest: &Path,
     result_md: Option<&Path>,
     prompt: Option<&str>,
     deliverables: &Path,
+    fix: ReplyFix<'_>,
 ) -> CopyReport {
     let mut report = CopyReport::default();
     let canon_root = match fs::canonicalize(dest) {
         Ok(c) => c,
         Err(e) => {
-            report.refused.push(format!("{}: {e}", dest.display()));
+            report.refuse(RESULTS_FOLDER_NAME, &e.to_string());
             return report;
         }
     };
@@ -188,55 +236,142 @@ pub fn copy_round(
         report.note(PROMPT_NAME, written);
     }
     if let Some(r) = result_md {
-        // A missing reply file is reported too: a done tip must not point
-        // at a result.md that silently never came.
-        let opened = open(r).map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => {
-                io::Error::new(io::ErrorKind::NotFound, "the node left no reply file")
-            }
-            _ => e,
+        let written = read_reply(r, &mut report).and_then(|bytes| {
+            let text = if bytes.len() as u64 > REWRITE_MAX {
+                report.reply_as_written = Some(AS_WRITTEN_LARGE);
+                bytes
+            } else {
+                rewrite_bytes(&bytes, fix, &report)
+            };
+            target(dest, &canon_root, Path::new(REPLY_NAME))
+                .and_then(|t| fsguard::write_replacing(&t, &mut text.as_slice()))
         });
-        let copied =
-            opened.and_then(|(file, _)| copy_one(file, dest, &canon_root, Path::new(REPLY_NAME)));
-        report.note(REPLY_NAME, copied);
+        report.note(REPLY_NAME, written);
     }
     report
+}
+
+/// The reply rewritten by `fix` in one call. Each invalid UTF-8 sequence
+/// stands in the text as its own sentinel (which the rewrite skips inside
+/// paths) and is put back byte for byte wherever it is still there; one
+/// inside a rewritten path goes with that path. A text that already holds
+/// sentinel code points, or more invalid sequences than there are
+/// sentinels, is rewritten part by part instead (invalid bytes kept).
+fn rewrite_bytes(bytes: &[u8], fix: ReplyFix<'_>, report: &CopyReport) -> Vec<u8> {
+    let mut text = String::with_capacity(bytes.len());
+    let mut bad: Vec<&[u8]> = Vec::new();
+    let mut clean = true;
+    for chunk in bytes.utf8_chunks() {
+        clean &= !chunk.valid().chars().any(|c| sentinel_index(c).is_some());
+        text.push_str(chunk.valid());
+        if !chunk.invalid().is_empty() {
+            clean &= bad.len() < SENTINEL_COUNT;
+            text.push(sentinel(bad.len()));
+            bad.push(chunk.invalid());
+        }
+    }
+    if !clean {
+        let mut out = Vec::with_capacity(bytes.len());
+        for chunk in bytes.utf8_chunks() {
+            out.extend(fix(chunk.valid(), report).into_bytes());
+            out.extend(chunk.invalid());
+        }
+        return out;
+    }
+    let fixed = fix(&text, report);
+    let mut out = Vec::with_capacity(fixed.len());
+    for c in fixed.chars() {
+        match sentinel_index(c).and_then(|k| bad.get(k)) {
+            Some(raw) => out.extend_from_slice(raw),
+            None => out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+        }
+    }
+    out
+}
+
+/// The reply file's text ([`fsguard::open_source`] rules); a missing one is
+/// reported as such (a done tip must not point at a result.md that silently
+/// never came) and flagged in the report.
+fn read_reply(path: &Path, report: &mut CopyReport) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    match open(path) {
+        Ok((mut file, _)) => {
+            io::Read::read_to_end(&mut file, &mut bytes)?;
+            Ok(bytes)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            report.reply_missing = true;
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the node left no reply file",
+            ))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 impl CopyReport {
     fn note(&mut self, shown: &str, result: io::Result<()>) {
         match result {
             Ok(()) => self.copied.push(shown.to_string()),
-            Err(e) => self.refused.push(format!("{shown}: {e}")),
+            Err(e) => {
+                self.refused.push(format!("{shown}: {e}"));
+                let missing_reply = shown == REPLY_NAME && self.reply_missing;
+                if !missing_reply {
+                    self.not_copied.push(shown.to_string());
+                }
+            }
         }
+    }
+
+    /// A deliverable: `source` (its own name) when not copied, `shown` (the
+    /// copy's name) when copied.
+    fn note_file(&mut self, source: &str, shown: &str, result: io::Result<()>) {
+        match result {
+            Ok(()) => self.copied.push(shown.to_string()),
+            Err(e) => self.refuse(source, &e.to_string()),
+        }
+    }
+
+    fn refuse(&mut self, name: &str, why: &str) {
+        self.refused.push(format!("{name}: {why}"));
+        self.not_copied.push(name.to_string());
     }
 }
 
 /// Every file under `deliverables`, within the caps.
 fn copy_deliverables(dest: &Path, canon_root: &Path, deliverables: &Path, report: &mut CopyReport) {
     let mut rels = Vec::new();
-    walk(deliverables, Path::new(""), &mut rels, &mut report.refused);
+    walk(deliverables, Path::new(""), &mut rels, report);
     let mut bytes = 0u64;
+    // Names already used in the results folder (a deliverable named
+    // `deliverable-result.md` and a renamed `result.md` would collide).
+    let mut taken = std::collections::HashSet::new();
     for r in rels {
         let src = deliverables.join(&r);
         let rel = deliverable_target(&r);
-        let shown = rel.display().to_string().replace('\\', "/");
-        let (file, size) = match open(&src) {
-            Ok(opened) => opened,
-            Err(e) => {
-                report.note(&shown, Err(e));
-                continue;
+        let shown = slashed(&rel);
+        let source = slashed(&r);
+        let copied = match open(&src) {
+            Ok(_) if taken.contains(&shown.to_lowercase()) => {
+                Err(io::Error::other("its name is taken in the results folder"))
             }
+            Ok((_, size)) if report.copied.len() >= MAX_FILES || bytes + size > MAX_BYTES => {
+                Err(io::Error::other("over the copy cap"))
+            }
+            Ok((file, size)) => copy_one(file, dest, canon_root, &rel).map(|()| {
+                bytes += size;
+            }),
+            Err(e) => Err(e),
         };
-        if report.copied.len() >= MAX_FILES || bytes + size > MAX_BYTES {
-            report.refused.push(format!("{shown}: over the copy cap"));
-            continue;
-        }
-        let copied = copy_one(file, dest, canon_root, &rel);
         if copied.is_ok() {
-            bytes += size;
+            taken.insert(shown.to_lowercase());
         }
-        report.note(&shown, copied);
+        report.files.push(CopiedFile {
+            source: source.clone(),
+            target: copied.is_ok().then(|| shown.clone()),
+        });
+        report.note_file(&source, &shown, copied);
     }
 }
 
